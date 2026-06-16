@@ -1762,10 +1762,12 @@ def _verify_stage_2_file_blocks(file_blocks: list[tuple[str, str]], raw_file: Pa
                    f"Paths: {[p for p, _ in file_blocks[:10]]}. "
                    f"LLM must emit a wiki/sources/<title>.md block.")
     # Verify concept pages are in wiki/concepts/, not bare wiki/ or wiki/sources/
-    concept_blocks = [p for p, _ in file_blocks if "concepts/" in p or (not p.startswith("wiki/") and "sources/" not in p)]
-    bare_paths = [p for p, _ in file_blocks if not p.startswith("wiki/")]
+    concept_blocks = [p for p, _ in file_blocks if "concepts/" in p or (not p.startswith(("wiki/", "sources/", "concepts/", "entities/")) and "sources/" not in p)]
+    # True bare paths: no known subdirectory prefix and no wiki/ prefix
+    _KNOWN_PREFIXES = ("wiki/", "sources/", "concepts/", "entities/", "queries/", "comparisons/", "synthesis/", "findings/", "thesis/")
+    bare_paths = [p for p, _ in file_blocks if not p.startswith(_KNOWN_PREFIXES)]
     if bare_paths:
-        print(f"  ⚠️  Stage 2: {len(bare_paths)} FILE blocks with bare paths (missing wiki/ prefix), will auto-correct")
+        print(f"  ⚠️  Stage 2: {len(bare_paths)} truly bare paths (no subdirectory prefix) — auto-correcting")
     wrong_dir = [p for p, _ in file_blocks if p.startswith("wiki/sources/") and not any(
         kw in p.lower() for kw in ["source", raw_file.stem.lower()[:10]])]
     # Only flag if there are many pages in sources/ that look like concepts
@@ -2301,7 +2303,9 @@ def parse_file_blocks(response: str) -> list[tuple[str, str]]:
     # Format 1: NashSU-style ---FILE:wiki/<path>--- ... ---END FILE---
     # NashSU parity: fence-aware parsing (ingest.ts L377-400) — track CommonMark
     # code fences so ---END FILE--- inside a code block doesn't close the outer block.
-    FILE_HEADER_RE = re.compile(r'^---FILE:\s*(wiki/.+?)\s*---\s*$')
+    # Accept both ---FILE:wiki/concepts/X.md--- (correct) and
+    # ---FILE:concepts/X.md--- (LLM forgot wiki/ prefix; auto-correct strips it either way)
+    FILE_HEADER_RE = re.compile(r'^---FILE:\s*(wiki/)?(.+?)\s*---\s*$')
     END_FILE_RE = re.compile(r'^---END FILE---\s*$')
     FENCE_RE = re.compile(r'^(```|~~~)')
 
@@ -2344,9 +2348,8 @@ def parse_file_blocks(response: str) -> list[tuple[str, str]]:
                     # Unclosed previous block — flush it
                     content = "\n".join(current_lines).rstrip() + "\n"
                     blocks.append((current_path, content))
-                path = file_match.group(1).strip()
-                if path.startswith("wiki/"):
-                    path = path[len("wiki/"):]
+                # group(1) = optional "wiki/" prefix, group(2) = actual path
+                path = file_match.group(2).strip()
                 if not path.endswith(".md"):
                     current_path = None
                     current_lines = []
@@ -4093,10 +4096,12 @@ def _auto_correct_wiki_path(rel_path: str, content: str, config: Config | None =
             # Default: treat as concept (vast majority of pages)
             return f"concepts/{slug}.md"
 
-    # If path is just "wiki/<something>" (missing subdirectory)
+    # Strip wiki/ prefix if present (from LLM or legacy format)
     if "/" in rel_path:
+        if rel_path.startswith("wiki/"):
+            rel_path = rel_path[len("wiki/"):]
         parts = rel_path.split("/")
-        if len(parts) >= 2 and parts[0] == "wiki":
+        if len(parts) >= 2:
             # Case: 4+ part path — LLM added extra nesting
             # wiki/sources/book/Title → sources/book/Title.md (keep type subdir, aligns with raw/)
             # wiki/concepts/topic/Title → concepts/Title.md (flatten — concepts have no subdirs)
