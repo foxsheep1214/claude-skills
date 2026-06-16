@@ -992,17 +992,18 @@ def _caption_images(images: list[dict], config: Config, media_dir: Path,
 
 
 def _preprocess_image_for_caption(img_path: Path, max_dim: int = 1568) -> str:
-    """Load image, convert grayscale→RGB, downscale if > max_dim, return base64.
+    """Load image, normalize to RGB, downscale if > max_dim, return base64.
 
-    MiniMax VLM struggles with: grayscale (mode L), oversized images (>4K).
-    This preprocessor fixes both before the image reaches the VLM.
+    Normalizes palette/alpha modes to plain RGB for consistent base64 encoding.
+    Downscales oversized images to stay within VLM context limits.
     """
     import io, base64
     from PIL import Image
     im = Image.open(img_path)
     w, h = im.size
 
-    # Grayscale → RGB (critical: VLM often rejects mode L images)
+    # Normalize to RGB (harmless: MiniMax M3 handles grayscale fine; this
+    # just ensures consistent encoding across PDF extraction variants)
     if im.mode in ('L', 'LA', 'P', 'PA'):
         im = im.convert('RGB')
 
@@ -1044,7 +1045,7 @@ def _caption_one_batch(batch: list[dict], batch_idx: int, total_batches: int,
             img_path = media_dir / img["filename"]
         if not img_path.exists():
             continue
-        # Preprocess: grayscale→RGB + downscale oversized images for VLM compatibility
+        # Preprocess: normalize to RGB + downscale oversized images
         img_data = _preprocess_image_for_caption(img_path)
         ext = img_path.suffix.lstrip(".").lower()
         media_type = f"image/{'jpeg' if ext in ('jpg', 'jpeg') else ext}"

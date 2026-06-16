@@ -219,20 +219,23 @@ mmx vision describe \
 
 ---
 
-## Pitfall 6: 灰度图导致 MiniMax VLM 返回"解析失败"（2026-06-17 修复）
+## Pitfall 6: 历史 caption "解析失败" 大部分可通过重试修复（2026-06-17）
 
-**症状**：1,515/18,709 (8.1%) caption 内容为 `（图N，解析失败）`，主要来自 minerU 扫描版 PDF（产出的 .jpeg 多为灰度模式 L）。同一张图转为 RGB 后 MiniMax VLM 正常返回。
+**症状**：1,515/18,709 (8.1%) caption 内容为 `（图N，解析失败）`。怀疑是灰度图 VLM 兼容性问题，但 A/B 对照测试（同图灰度 vs RGB）证明 MiniMax M3 对两种模式都能正常返回。
 
-**根因**：MiniMax M3 VLM 对 PIL mode='L'（灰度）、'P'（调色板）、'PA'、'LA' 等非 RGB 模式的 base64 编码图片支持差。扫描版 PDF 的 minerU 输出大量灰度图。
+**A/B 对照验证**（2026-06-17，郑军奇 EMC 书 p119-fig2.jpeg，349×210，mode=L）：
+- 灰度版 (mode=L): ✅ OK (6.2s) "ESD防护电路示意图，展示了音频接口金属外壳..."
+- RGB版 (mode=L→RGB): ✅ OK (3.9s) "电路框图，展示音频接口ESD防护设计..."
+- 结论：灰度图 NOT 被拒绝
 
-**实测验证**（2026-06-17，郑军奇 EMC 书）：
-- 原始灰度图 p278-fig2.jpeg (406×246, mode=L) → `（图1，解析失败）`
-- 预处理转 RGB 后同图 → `逻辑电平电压分区示意图，纵轴为电压，标注2.0 V以上为逻辑"1"区，0.4 V以下为逻辑"0"区，中间0.4–2.0 V为不确定区。`
-- 耗时 3.3s
+**真正原因推测**：
+1. 早期 MiniMax M3 版本 VLM 能力较弱（那批图是数月前 ingest）
+2. 旧 `_caption_one_batch_mineru` 的 prompt 缺少页号/尺寸等上下文
+3. 重试即可修复——今天重试的 6 张"解析失败"图 100% 成功
 
-**分布**（HardwareWiki 18709 张图中 1515 张受影响）：
+**分布**（HardwareWiki，1515 张可用 `_caption_images()` 重试）：
 ```
-944  嵌入式系统设计 - 2013 - Marwedel   (minerU scanned, 62%)
+944  嵌入式系统设计 - 2013 - Marwedel   (62%)
  82  High Speed Signal Propagation
  80  模拟电子技术基础
  75  传感器原理及应用
@@ -240,24 +243,12 @@ mmx vision describe \
  ...
 ```
 
-**修复**：`ingest.py` 新增 `_preprocess_image_for_caption()` 函数（在 `_caption_one_batch` 内调用）：
-```python
-def _preprocess_image_for_caption(img_path, max_dim=1568):
-    from PIL import Image
-    im = Image.open(img_path)
-    # Grayscale → RGB
-    if im.mode in ('L', 'LA', 'P', 'PA'):
-        im = im.convert('RGB')
-    # Downscale oversized
-    if im.size[0] > max_dim or im.size[1] > max_dim:
-        im.thumbnail((max_dim, max_dim))
-    # Encode
-    buf = io.BytesIO()
-    im.save(buf, format='JPEG', quality=85)
-    return base64.b64encode(buf.getvalue()).decode()
-```
+**修复**：
+- `_caption_images()` 缓存过滤现在检测并重试失败的 caption
+- `_is_caption_failed()` 检测 "解析失败" / "无法识别" 等 VLM 错误模式
+- `_preprocess_image_for_caption()` 做 RGB 归一化 + 超大图缩放（防御性，无害）
 
-**lesson**：MiniMax VLM 对接时**永远先转 RGB**。灰度/调色板模式在 PDF 提取中非常常见（尤其 minerU 扫描版），即使人眼看完全正常的图也可能被 VLM 拒绝。
+**lesson**：旧 ingest 的 caption 失败不一定有 bug——VLM 本身在进化，直接重试往往就通过了。
 
 ---
 

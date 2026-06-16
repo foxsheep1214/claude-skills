@@ -56,7 +56,7 @@ HardwareWiki verified (2026-06-17): 18,709 images, 18,701 captions (99.96% cover
 ## Image preprocessing
 
 `_preprocess_image_for_caption()` in `ingest.py`:
-- **Grayscale → RGB**: MiniMax VLM rejects mode L images (proven: EMC book p278-fig2.jpeg failed as grayscale, succeeded as RGB)
+- **Normalize to RGB**: palette/alpha modes converted to plain RGB for consistent encoding (MiniMax M3 handles grayscale fine per A/B test; normalization is defensive)
 - **Downscale oversized**: images >1568px in any dimension are thumbnailed (VLM context window limit)
 - Handles modes L, LA, P, PA, RGB, RGBA
 
