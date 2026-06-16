@@ -39,7 +39,7 @@ Lint:  [16: Build Graph] → [17: Louvain] → [18: Insights]
 
 **Operations**:
 - `references/kb-retrieval.md` — 4-step knowledge retrieval (search → read → cite → declare)
-- `references/image-caption-strategy.md` — captioning decision tree (batch API preferred)
+- `references/image-caption-strategy.md` — unified Path A+B caption pipeline, parallel dispatch, preprocessing (2026-06-17)
 - `references/multimodal-vlm-pitfalls.md` — VLM pitfalls (caption collapse, OCR brittleness)
 - `references/known-issues.md` — current bugs and workarounds
 - `references/initial-setup.md` — first-time project bootstrap
