@@ -219,9 +219,52 @@ mmx vision describe \
 
 ---
 
+## Pitfall 6: 灰度图导致 MiniMax VLM 返回"解析失败"（2026-06-17 修复）
+
+**症状**：1,515/18,709 (8.1%) caption 内容为 `（图N，解析失败）`，主要来自 minerU 扫描版 PDF（产出的 .jpeg 多为灰度模式 L）。同一张图转为 RGB 后 MiniMax VLM 正常返回。
+
+**根因**：MiniMax M3 VLM 对 PIL mode='L'（灰度）、'P'（调色板）、'PA'、'LA' 等非 RGB 模式的 base64 编码图片支持差。扫描版 PDF 的 minerU 输出大量灰度图。
+
+**实测验证**（2026-06-17，郑军奇 EMC 书）：
+- 原始灰度图 p278-fig2.jpeg (406×246, mode=L) → `（图1，解析失败）`
+- 预处理转 RGB 后同图 → `逻辑电平电压分区示意图，纵轴为电压，标注2.0 V以上为逻辑"1"区，0.4 V以下为逻辑"0"区，中间0.4–2.0 V为不确定区。`
+- 耗时 3.3s
+
+**分布**（HardwareWiki 18709 张图中 1515 张受影响）：
+```
+944  嵌入式系统设计 - 2013 - Marwedel   (minerU scanned, 62%)
+ 82  High Speed Signal Propagation
+ 80  模拟电子技术基础
+ 75  传感器原理及应用
+ 55  EMC电磁兼容设计与测试案例分析
+ ...
+```
+
+**修复**：`ingest.py` 新增 `_preprocess_image_for_caption()` 函数（在 `_caption_one_batch` 内调用）：
+```python
+def _preprocess_image_for_caption(img_path, max_dim=1568):
+    from PIL import Image
+    im = Image.open(img_path)
+    # Grayscale → RGB
+    if im.mode in ('L', 'LA', 'P', 'PA'):
+        im = im.convert('RGB')
+    # Downscale oversized
+    if im.size[0] > max_dim or im.size[1] > max_dim:
+        im.thumbnail((max_dim, max_dim))
+    # Encode
+    buf = io.BytesIO()
+    im.save(buf, format='JPEG', quality=85)
+    return base64.b64encode(buf.getvalue()).decode()
+```
+
+**lesson**：MiniMax VLM 对接时**永远先转 RGB**。灰度/调色板模式在 PDF 提取中非常常见（尤其 minerU 扫描版），即使人眼看完全正常的图也可能被 VLM 拒绝。
+
+---
+
 ## 修订记录
 
 - **2026-06-11**：初版，基于 738 张电源篇实测
 - **2026-06-11**：删除 Pitfall 1+2（minerU 1.2B 专属）以及所有 minerU 备份内容，按用户指令"删 minerU 备份"；Pitfall 重新编号 1=缺包/2=8 张批量/3=Batches/4=embedding
 - **2026-06-11**：Pitfall 2 加前置说明（mmx CLI 不适用 batching）；决策树 mmx 段加入 50-300 / >300 张阈值；canonical mmx invocation 加 `--region cn --output text --timeout 180` 三个 flag 解释
 - **2026-06-11**：新增 Pitfall 5 minimax 国内端 endpoint 矩阵（`anthropic/v1/messages` 多图 vs `v1/coding_plan/vlm` 单图）——无源器件篇 OCR 实战沉淀，避免下次在两条 endpoint 之间再试错
+- **2026-06-17**：新增 Pitfall 6 灰度图 VLM 拒绝问题 + `_preprocess_image_for_caption()` 修复 + HardwareWiki 1515 张图分布统计
