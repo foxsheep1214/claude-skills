@@ -60,9 +60,9 @@ Lint:  [16: Build Graph] → [17: Louvain] → [18: Insights]
 
 - **15-stage auto-ingest**: `python3 scripts/ingest.py file.pdf [file2.pdf ...]`
 - **3-stage knowledge graph lint**: `python3 scripts/build_knowledge_graph.py` — four-signal weighted graph + Louvain + insights
-- **Batch mode**: `--parallel N` for concurrent Phase 0-2 processing (default 4)
+- **Parallel pipeline**: 4 levels of parallelism — caption batch ∥ digest (Stage 0.9∥1.1), caption batch dispatch (×6 workers), chunk analysis (×8 workers), per-chunk generation (×configurable)
+- **Batch mode**: `--parallel N` for concurrent Phase 0-2 processing across books (default 4)
 - **Queue watch**: `--watch --drain` daemon mode consuming `ingest-queue.json`
-- **Per-chunk generation**: Stage 1.3 ~60K/chunk → Stage 2.1 parallel concept/entity generation
 - **Auto-validation**: `validate_ingest.py` runs at end of every ingest; per-stage `_verify_stage_N()` gates
 - **NashSU parity**: aligned with `ingest.ts` v0.4.24 (page merge, path safety, fence-aware parsing, CRLF, error classification, page history, dynamic token budget)
 - **Local OCR**: minerU VLM via `~/.venv/bin/mineru -b vlm-auto-engine` (free, max 2 concurrent)
