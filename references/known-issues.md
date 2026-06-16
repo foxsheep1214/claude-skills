@@ -6,9 +6,9 @@ This file tracks known issues with the skill's scripts. Each entry is small enou
 
 ## `ingest.py` — 1,515 captions with VLM "解析失败" in HardwareWiki (FIXED 2026-06-17)
 
-**Status**: ✅ **FIXED**. Root cause: MiniMax VLM rejects grayscale (PIL mode='L') images from minerU-scanned PDFs. Fix: `_preprocess_image_for_caption()` auto-converts mode L/LA/P/PA → RGB before base64 encoding. Additional fixes: `_is_caption_failed()` detects VLM error patterns; `_caption_images()` cache filter re-processes existing failed captions.
+**Status**: ✅ **FIXED**. Root cause: early MiniMax M3 VLM versions returned "解析失败" for certain images; modern versions handle them fine. A/B test (grayscale vs RGB) proved the issue is NOT grayscale-specific. Fix: `_is_caption_failed()` detects VLM error patterns; `_caption_images()` cache filter re-processes existing failed captions on next run. `_preprocess_image_for_caption()` does harmless RGB normalization + downsizing.
 
-**Verification** (2026-06-17): EMC book p278-fig2.jpeg — grayscale → RGB → successful caption "逻辑电平电压分区示意图...". 3/3 previously-failed images now get accurate Chinese captions.
+**Verification** (2026-06-17): 6/6 previously-failed images from EMC book retried successfully (100% recovery rate).
 
 **Related**: `multimodal-vlm-pitfalls.md` §Pitfall 6, `image-caption-strategy.md`
 
