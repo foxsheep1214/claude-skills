@@ -4793,35 +4793,55 @@ def ingest_one(
               "extract_method": method, "stage_0_5": stage_0_5_result}
         save_progress(config, h, cp)
 
-    # ── Stage 0.6: Image captioning ──
-    stage_0_6_result: dict = {"captioned": 0}
-    if progress and "stage_0_6" in progress:
-        stage_0_6_result = progress["stage_0_6"]
-        print(f"[stage_0_6] (cached) {stage_0_6_result.get('captioned', 0)} captions")
-    elif stage_0_5_result.get("count", 0) > 0:
-        stage_0_6_result = stage_0_6_caption_images(config, stage_0_5_result)
-        if "extracted_text" not in (progress or {}):
-            cp = {"stage": "stage_0_done", "extracted_text": extracted_text,
-                  "extract_method": method, "stage_0_5": stage_0_5_result,
-                  "stage_0_6": stage_0_6_result}
-            save_progress(config, h, cp)
+    # ── Stage 0.6 (Caption) ∥ Stage 1 (Global Digest) ──
+    # These two stages are independent: caption uses MiniMax VLM on images,
+    # digest uses LLM on text. Different API endpoints, no shared state.
+    # Run them in parallel to hide I/O latency.
+    needs_caption = (
+        not progress or "stage_0_6" not in progress
+    ) and stage_0_5_result.get("count", 0) > 0
+    needs_digest = (
+        not progress or progress.get("stage") not in ("stage_1_done", "stage_1_5_done", "stage_2_done")
+    )
+    stage_0_6_result = progress.get("stage_0_6", {"captioned": 0}) if progress and "stage_0_6" in progress else {"captioned": 0}
 
-    # ── Stage 1: Global Digest ──
-    if progress and progress.get("stage") in ("stage_1_done", "stage_1_5_done", "stage_2_done"):
-        global_digest = progress["global_digest"]
-        print(f"[stage_1] (cached) Global Digest — {len(global_digest)} keys")
+    if needs_caption and needs_digest:
+        print(f"[parallel] Stage 0.6 (caption) ∥ Stage 1.1 (digest) — launching both...")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            fut_cap = executor.submit(stage_0_6_caption_images, config, stage_0_5_result)
+            fut_dig = executor.submit(stage_1_global_digest, extracted_text, raw_file, config, template_content, verbose=verbose)
+            stage_0_6_result = fut_cap.result()
+            global_digest = fut_dig.result()
         _verify_stage_1_digest(global_digest, raw_file)
+        if "extracted_text" not in (progress or {}):
+            save_progress(config, h, {"stage": "stage_0_done", "extracted_text": extracted_text,
+                  "extract_method": method, "stage_0_5": stage_0_5_result, "stage_0_6": stage_0_6_result})
+        save_progress(config, h, {"stage": "stage_1_done", "extracted_text": extracted_text,
+            "extract_method": method, "global_digest": global_digest, "stage_0_5": stage_0_5_result,
+            "stage_0_6": stage_0_6_result})
     else:
-        global_digest = stage_1_global_digest(extracted_text, raw_file, config, template_content, verbose=verbose)
-        _verify_stage_1_digest(global_digest, raw_file)
-        save_progress(config, h, {
-            "stage": "stage_1_done",
-            "extracted_text": extracted_text,
-            "extract_method": method,
-            "global_digest": global_digest,
-            "stage_0_5": stage_0_5_result,
-            "stage_0_6": stage_0_6_result,
-        })
+        if needs_caption:
+            print(f"[stage_0_6] Captioning images...")
+            stage_0_6_result = stage_0_6_caption_images(config, stage_0_5_result)
+        elif progress and "stage_0_6" in progress:
+            stage_0_6_result = progress["stage_0_6"]
+            print(f"[stage_0_6] (cached) {stage_0_6_result.get('captioned', 0)} captions")
+
+        if needs_digest:
+            global_digest = stage_1_global_digest(extracted_text, raw_file, config, template_content, verbose=verbose)
+            _verify_stage_1_digest(global_digest, raw_file)
+        else:
+            global_digest = progress["global_digest"]
+            print(f"[stage_1] (cached) Global Digest — {len(global_digest)} keys")
+            _verify_stage_1_digest(global_digest, raw_file)
+
+        if needs_caption and "extracted_text" not in (progress or {}):
+            save_progress(config, h, {"stage": "stage_0_done", "extracted_text": extracted_text,
+                  "extract_method": method, "stage_0_5": stage_0_5_result, "stage_0_6": stage_0_6_result})
+        if needs_digest:
+            save_progress(config, h, {"stage": "stage_1_done", "extracted_text": extracted_text,
+                "extract_method": method, "global_digest": global_digest, "stage_0_5": stage_0_5_result,
+                "stage_0_6": stage_0_6_result})
 
     # ── Stage 1.5: Chunk Analysis ──
     if progress and progress.get("stage") in ("stage_1_5_done", "stage_2_done") and "chunk_analyses" in progress:
@@ -5138,27 +5158,43 @@ def _do_prepare(
                   "extract_method": method, "stage_0_5": stage_0_5_result}
             save_progress(config, h, cp)
 
-        # Stage 0.6: Image captioning
-        stage_0_6_result: dict = {"captioned": 0}
-        if progress and "stage_0_6" in progress:
-            stage_0_6_result = progress["stage_0_6"]
-            print(f"  [stage_0_6] (cached) {stage_0_6_result.get('captioned', 0)} captions")
-        elif stage_0_5_result.get("count", 0) > 0:
-            stage_0_6_result = stage_0_6_caption_images(config, stage_0_5_result)
-            if "extracted_text" not in (progress or {}):
-                cp = {"stage": "stage_0_done", "extracted_text": extracted_text,
-                      "extract_method": method, "stage_0_5": stage_0_5_result,
-                      "stage_0_6": stage_0_6_result}
-                save_progress(config, h, cp)
+        # Stage 0.6 (Caption) ∥ Stage 1 (Global Digest) — batch path
+        needs_caption = (
+            not progress or "stage_0_6" not in progress
+        ) and stage_0_5_result.get("count", 0) > 0
+        needs_digest = (
+            not progress or progress.get("stage") not in ("stage_1_done", "stage_1_5_done", "stage_2_done")
+        )
+        stage_0_6_result = progress.get("stage_0_6", {"captioned": 0}) if progress and "stage_0_6" in progress else {"captioned": 0}
 
-        # Stage 1: Global Digest
-        if progress and progress.get("stage") in ("stage_1_done", "stage_1_5_done", "stage_2_done"):
-            global_digest = progress["global_digest"]
-            print(f"  [stage_1] (cached) Global Digest — {len(global_digest)} keys")
+        if needs_caption and needs_digest:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                fut_cap = executor.submit(stage_0_6_caption_images, config, stage_0_5_result)
+                fut_dig = executor.submit(stage_1_global_digest, extracted_text, raw_file, config, template_content, verbose=verbose)
+                stage_0_6_result = fut_cap.result()
+                global_digest = fut_dig.result()
             _verify_stage_1_digest(global_digest, raw_file)
+            if "extracted_text" not in (progress or {}):
+                save_progress(config, h, {"stage": "stage_0_done", "extracted_text": extracted_text,
+                      "extract_method": method, "stage_0_5": stage_0_5_result, "stage_0_6": stage_0_6_result})
         else:
-            global_digest = stage_1_global_digest(extracted_text, raw_file, config, template_content, verbose=verbose)
-            _verify_stage_1_digest(global_digest, raw_file)
+            if needs_caption:
+                stage_0_6_result = stage_0_6_caption_images(config, stage_0_5_result)
+            elif progress and "stage_0_6" in progress:
+                stage_0_6_result = progress["stage_0_6"]
+                print(f"  [stage_0_6] (cached) {stage_0_6_result.get('captioned', 0)} captions")
+
+            if needs_digest:
+                global_digest = stage_1_global_digest(extracted_text, raw_file, config, template_content, verbose=verbose)
+                _verify_stage_1_digest(global_digest, raw_file)
+            else:
+                global_digest = progress["global_digest"]
+                print(f"  [stage_1] (cached) Global Digest — {len(global_digest)} keys")
+                _verify_stage_1_digest(global_digest, raw_file)
+
+            if needs_caption and "extracted_text" not in (progress or {}):
+                save_progress(config, h, {"stage": "stage_0_done", "extracted_text": extracted_text,
+                      "extract_method": method, "stage_0_5": stage_0_5_result, "stage_0_6": stage_0_6_result})
 
         # Stage 1.5: Chunk Analysis
         if progress and progress.get("stage") in ("stage_1_5_done", "stage_2_done") and "chunk_analyses" in progress:
