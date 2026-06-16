@@ -962,18 +962,31 @@ def _caption_images(images: list[dict], config: Config, media_dir: Path,
             if err:
                 print(f"  batch {bi+1}: {err}")
                 continue
-            # Parse JSON array from LLM response
+            # Parse JSON array from LLM response (with truncation recovery)
             if text.startswith("```"):
                 text = text.split("```", 2)[1]
                 if text.startswith("json"):
                     text = text[4:]
                 if text.endswith("```"):
                     text = text[:-3]
+            text = text.strip()
             try:
-                captions = json.loads(text.strip())
+                captions = json.loads(text)
             except json.JSONDecodeError:
-                print(f"  batch {bi+1}: JSON parse failed, text[:200]: {text[:200]}")
-                continue
+                # Recovery: try to salvage individual captions from truncated JSON
+                # Common pattern: LLM output hit max_tokens, JSON array is truncated.
+                # Each valid caption is {"idx": N, "caption": "..."} — extract them
+                import re
+                salvaged = re.findall(
+                    r'\{\s*"idx"\s*:\s*(\d+)\s*,\s*"caption"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}',
+                    text
+                )
+                if salvaged:
+                    captions = [{"idx": int(idx), "caption": cap} for idx, cap in salvaged]
+                    print(f"  batch {bi+1}: JSON truncated — salvaged {len(captions)} captions")
+                else:
+                    print(f"  batch {bi+1}: JSON parse failed, text[:200]: {text[:200]}")
+                    continue
             for cap in captions:
                 idx = cap.get("idx", 0) - 1
                 if 0 <= idx < len(batch):
