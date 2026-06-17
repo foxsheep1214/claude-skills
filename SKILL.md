@@ -65,7 +65,7 @@ Lint:  [16: Build Graph] → [17: Louvain] → [18: Insights]
 - **Queue watch**: `--watch --drain` daemon mode consuming `ingest-queue.json`
 - **Auto-validation**: `validate_ingest.py` runs at end of every ingest; per-stage `_verify_stage_N()` gates
 - **NashSU parity**: aligned with `ingest.ts` v0.4.24 (page merge, path safety, fence-aware parsing, CRLF, error classification, page history, dynamic token budget)
-- **Local OCR**: minerU VLM via `~/.venv/bin/mineru -b vlm-auto-engine` (free, max 2 concurrent)
+- **Local OCR**: minerU VLM via `~/.venv/bin/mineru -b vlm-auto-engine` (free, serial execution, `MINERU_MAX_CONCURRENT=1`)
 
 ## Scripts
 
