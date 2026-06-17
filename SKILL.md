@@ -1,16 +1,16 @@
 ---
 name: improved-wiki
-description: "Class-level umbrella for the Karpathy/NashSU LLM-Wiki ingestion pipeline (autoIngestImpl + 16 ingest Stages + 3 lint Stages for knowledge graph). Use when ingesting a PDF/PPTX/DOCX into a wiki project (HardwareWiki, RadarWiki, etc), validating an ingest, debugging failed tasks, or auditing wiki completeness. Phase 0 OCR uses local minerU (free, auto-extracts images). Lint stages include four-signal knowledge graph + Louvain community detection."
+description: "Class-level umbrella for the Karpathy/NashSU LLM-Wiki ingestion pipeline (autoIngestImpl + 15 ingest Stages + 3 lint Stages for knowledge graph). Use when ingesting a PDF/PPTX/DOCX into a wiki project (HardwareWiki, RadarWiki, etc), validating an ingest, debugging failed tasks, or auditing wiki completeness. Phase 0 OCR uses local minerU (free, auto-extracts images). Lint stages include four-signal knowledge graph + Louvain community detection."
 tags: [ingest, mandatory, nashsu, pipeline, scan-pdf, mineru, local-ocr, knowledge-graph, louvain]
 related_skills: [karpathy-llm-wiki, llm-wiki-local]
 ---
 
 # improved-wiki
 
-Karpathy LLM-Wiki pattern + NashSU v0.4.24 pipeline. 16 ingest Stages (4 Phases) + 3 lint Stages (knowledge graph).
+Karpathy LLM-Wiki pattern + NashSU v0.4.24 pipeline. 15 ingest Stages (4 Phases) + 3 lint Stages (knowledge graph).
 
 ```
-Ingest: 0.0→0.1→0.3→0.5→0.7→0.9→1.1→1.3→2.1→2.3→2.5→3.5→3.8→4.5→4.7→[4.9]
+Ingest: 0.1→0.3→0.5→0.7→0.9→1.1→1.3→2.1→2.3→2.5→3.5→3.8→4.5→4.7→[4.9]
 
 Phase 0: Pre-processing     Phase 2: Generation         Phase 4: Reflect & Finalize
 Phase 1: Analysis            Phase 3: Write & Enrich

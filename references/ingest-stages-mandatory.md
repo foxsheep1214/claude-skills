@@ -9,7 +9,7 @@ related: [SKILL.md §7, known-issues, multimodal-vlm-pitfalls]
 
 ## 为什么需要"强制"？
 
-Karpathy LLM-Wiki 模式 + NashSU LLM Wiki app (v0.4.24) 的 `autoIngestImpl()` 流水线包含 **16 个 ingest Stage + 3 个 lint Stage**（2026-06-16 全面重编号为 Phase.序列 格式）。**任何一个 Stage 都不能跳过**——即使后续 Stage 看起来成功了，也不能"先跑再说"。
+Karpathy LLM-Wiki 模式 + NashSU LLM Wiki app (v0.4.24) 的 `autoIngestImpl()` 流水线包含 **15 个 ingest Stage + 3 个 lint Stage**（2026-06-16 全面重编号为 Phase.序列 格式）。**任何一个 Stage 都不能跳过**——即使后续 Stage 看起来成功了，也不能"先跑再说"。
 
 **跳过的代价**：
 1. **raw 是 sacred**（Layer 1 原则）—— PDF 里的图也是 raw 的一部分，跳过图片提取 = 丢了一半知识
@@ -27,24 +27,24 @@ Karpathy LLM-Wiki 模式 + NashSU LLM Wiki app (v0.4.24) 的 `autoIngestImpl()` 
 - **产物**：Stage 完成后必须存在的文件
 - **go/no-go 判断**：怎么知道这个 Stage 算"真的完成"了
 
-### Stage 0.0 · Raw 文件命名规范检查 ⭐ **Stage 0.1 之前强制执行**
+## Pre-Ingest Gate：Raw 文件命名规范检查 ⭐ **Stage 0.1 之前强制执行**
 
-- **作用**：确保待 ingest 的 raw 文件符合该项目的命名规范。**每个知识库项目的 raw 命名规则是项目特定的，记录在 `<project>/raw/NAMING.md`**。文件选取之前必须通过命名检查，因为不规范的文件名会在后续 Stage 产生歧义。
+> **定位**：此 gate 不属于 ingest pipeline 的阶段编号。它检查的是 raw/ 目录的**管理状态**（命名规则是否存在、新文件是否合规），而非单个文件的消化进度。有独立的检查逻辑，不应与 Stage 0.1 的去重耦合。
+
+- **作用**：确保 raw/ 下的候选文件符合该项目的命名规范。**每个知识库项目的 raw 命名规则是项目特定的，记录在 `<project>/raw/NAMING.md`**。
 - **跳过代价**：不规范的文件名导致 source 页面路径混乱、wikilink 不可解析，且一旦 ingest 完成后再改 raw 文件名会导致已有 wiki 页面变孤儿。
 - **检查流程**：
   1. 检查 `<project>/raw/NAMING.md` 是否存在
-     - **不存在** → 🛑 **停止 ingest，提醒用户先制定规则。** 列出 raw/ 下的文件夹和文件样本，询问用户希望的命名格式，帮用户起草 `raw/NAMING.md` 和 `.llm-wiki/scripts/normalize_raw_names.py`。参考 `references/raw-naming-conventions.md`。
+     - **不存在** → 🛑 **阻止 ingest，提醒用户先制定规则。** 列出 raw/ 下的文件夹和文件样本，帮用户起草 `raw/NAMING.md` 和 `normalize_raw_names.py`。参考 `references/raw-naming-conventions.md`。
      - **存在** → 继续步骤 2
-  2. 运行命名合规检查
-     - 如果有 `normalize_raw_names.py` → 运行 `python3 .llm-wiki/scripts/normalize_raw_names.py --check`
-     - 如果只有 `NAMING.md` 没有脚本 → 手动对照规则检查候选文件
-  3. 不符合规范的文件 → 🛑 **阻止 ingest**，列出违规文件和修正建议。用户修正后重新执行 Stage 0.0。
+  2. 检查候选文件是否符合规则
+     - 如果有 `normalize_raw_names.py` → `python3 .llm-wiki/scripts/normalize_raw_names.py --check`
+     - 如果只有 `NAMING.md` 没有脚本 → 手动对照规则检查
+  3. 不符合 → 🛑 **阻止 ingest**，列出违规文件和修正建议
   4. 全部符合 → ✅ 进入 Stage 0.1
-- **产物**：命名合规确认（全部候选文件通过检查）。
 - **go/no-go 判断**：
-  - `raw/NAMING.md` 存在 **且** 所有候选文件通过命名检查 → 进入 Stage 0.1
+  - `raw/NAMING.md` 存在 **且** 候选文件全部合规 → 进入 Stage 0.1
   - 否则 → 🛑 阻止 ingest
-- **关键实操**：即使文件通过 `ingest-cache.json` 去重，命名检查仍必须执行（新文件可能刚加入 raw/）。检查范围包括递归子目录（datasheet 等有子文件夹的类型）。
 
 ### Stage 0.1 · 源页去重检查 ⭐ **任何文件选取前强制执行**
 
