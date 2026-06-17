@@ -711,7 +711,7 @@ def stage_0_pilot(file_path: Path, config: Config) -> dict:
 # ---------- Stage 0 path B: Scanned PDF OCR via local minerU ----------
 
 MINERU_CHUNK_SIZE = 50  # pages per minerU invocation
-MINERU_MAX_CONCURRENT = 2  # max parallel minerU instances system-wide (16GB unified memory)
+MINERU_MAX_CONCURRENT = 1  # max parallel minerU OCR jobs system-wide (串行执行，避免 VLM 内存竞争)
 
 
 def _count_running_mineru() -> int:
@@ -747,13 +747,54 @@ def _count_running_mineru() -> int:
         return 0
 
 
-def _wait_for_mineru_slot(poll_interval: int = 15) -> None:
-    """Block until a minerU concurrency slot is available. Prints status updates."""
+def _wait_for_mineru_slot(poll_interval: int = 30) -> None:
+    """Block until a minerU concurrency slot is available. Prints prominent status updates.
+
+    When all slots are busy, identifies which file(s) currently occupy them and
+    shows accumulated wait time.  Designed for MINERU_MAX_CONCURRENT=1 (serial OCR)
+    where wait times can be 5-30 minutes per chunk.
+    """
+    import subprocess
+    wait_start = time.time()
+    first_cycle = True
     while True:
         running = _count_running_mineru()
         if running < MINERU_MAX_CONCURRENT:
+            if not first_cycle:
+                waited = time.time() - wait_start
+                if waited >= 60:
+                    print(f"[mineru] ✅ slot freed after {waited/60:.1f}min — proceeding")
+                else:
+                    print(f"[mineru] ✅ slot freed after {waited:.0f}s — proceeding")
             return
-        print(f"[mineru] {running}/{MINERU_MAX_CONCURRENT} slots busy — waiting {poll_interval}s...")
+
+        # Build informative wait message
+        waited = time.time() - wait_start
+        # Try to identify which file(s) are occupying the slot(s)
+        busy_desc = ""
+        try:
+            proc = subprocess.run(
+                ["pgrep", "-fla", "mineru"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if proc.stdout.strip():
+                import re
+                for line in proc.stdout.strip().split("\n"):
+                    m = re.search(r'-p\s+(/[^\s]+\.pdf)', line)
+                    if m and "fast_api" not in line.lower():
+                        fname = Path(m.group(1)).name
+                        if fname not in busy_desc:
+                            busy_desc += f"「{fname}」"
+        except Exception:
+            pass
+
+        # Format elapsed time
+        if waited >= 60:
+            elapsed = f"{waited/60:.1f} 分钟"
+        else:
+            elapsed = f"{waited:.0f} 秒"
+
+        print(f"[mineru] ⏳ 并发槽已满 ({running}/{MINERU_MAX_CONCURRENT}){busy_desc} — 已等待 {elapsed}，{poll_interval}s 后重试...")
         time.sleep(poll_interval)
 
 
