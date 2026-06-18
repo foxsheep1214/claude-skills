@@ -1,6 +1,6 @@
 ---
 name: improved-wiki
-description: "强制 Ingest Stage 清单——基于 NashSU v0.4.24 autoIngestImpl() 流水线的 15 ingest + 3 lint Stage 规范，每个 Stage 含作用/跳过代价/产物/go-no-go 判断。用于约束任何 wiki 项目执行 ingest 时不漏步。"
+description: "强制 Ingest Stage 清单——基于 NashSU v0.4.25 autoIngestImpl() 流水线的 ~15 ingest + lint + graph Stage 规范，每个 Stage 含作用/跳过代价/产物/go-no-go 判断。用于约束任何 wiki 项目执行 ingest 时不漏步。"
 tags: [ingest, mandatory, nashsu, pipeline]
 related: [SKILL.md §7, known-issues, multimodal-vlm-pitfalls]
 ---
@@ -9,17 +9,38 @@ related: [SKILL.md §7, known-issues, multimodal-vlm-pitfalls]
 
 ## 为什么需要"强制"？
 
-Karpathy LLM-Wiki 模式 + NashSU LLM Wiki app (v0.4.24) 的 `autoIngestImpl()` 流水线包含 **15 个 ingest Stage + 3 个 lint Stage**（2026-06-16 全面重编号为 Phase.序列 格式）。**任何一个 Stage 都不能跳过**——即使后续 Stage 看起来成功了，也不能"先跑再说"。
+Karpathy LLM-Wiki 模式 + NashSU LLM Wiki app (v0.4.25) 的 `autoIngestImpl()` 流水线包含 **~15 个 ingest Stage + lint + graph**（Phase.序列编号格式）。**任何一个 Stage 都不能跳过**——即使后续 Stage 看起来成功了，也不能"先跑再说"。
 
 **跳过的代价**：
 1. **raw 是 sacred**（Layer 1 原则）—— PDF 里的图也是 raw 的一部分，跳过图片提取 = 丢了一半知识
 2. **审计可追溯性**（三层模型）—— 缺了 stage 产物，审计时无法回溯"为什么这个页面这么写"
-3. **增量缓存前提**（Stage 5.1）—— 不写 hash cache，下一次 ingest 不知道哪些文件已处理
+3. **增量缓存前提**（ingest cache）—— 不写 hash cache，下一次 ingest 不知道哪些文件已处理
 4. **错误累积**（NashSU 实测）—— 跳过的 stage 永远不会被补做，错误会一直留在 wiki 里
 
-**违反此清单的代价**已在 2026-06-11 HardwareWiki 第一次 ingest 中真实发生：漏掉 Stage 0.7/0.9 后，source 页面里没有任何图片引用——因为没强制流程就没人会回头补。
+**违反此清单的代价**已在 2026-06-11 HardwareWiki 第一次 ingest 中真实发生：漏掉 Stage 0.5/0.6 后，source 页面里没有任何图片引用——因为没强制流程就没人会回头补。
 
-## 强制 Stage 清单（15 步）
+## 阶段编号说明
+
+本文件使用 Phase.序列 编号体系。与 `ingest.py` 代码中实际函数名的对应关系：
+
+| 本文编号 | 代码函数名 | 说明 |
+|---------|-----------|------|
+| 0.5 | `extract_text` / `detect_pdf_type` | 文本提取 + PDF 类型检测 |
+| 0.7 | `stage_0_5_extract_images` | 图片提取 |
+| 0.9 | `stage_0_6_caption_images` | 图片 caption |
+| 1.1 | `stage_1_global_digest` | 全局摘要 |
+| 1.3 | `stage_1_5_chunk_analysis` | 逐 chunk 分析（NashSU 顺序递进） |
+| 2.0 | `stage_2_0_source_page` | 源页面生成 |
+| 2.1 | `stage_2_per_chunk_generation` | 概念/实体逐 chunk 生成 |
+| 2.3 | `stage_2_3_query_generation` | 问题生成 |
+| 2.5 | `stage_2_5_comparison_generation` | 对比 + 审查建议 |
+| 3.5 | 主写入循环 | 文件写盘 |
+| 3.8 | `stage_3_5_inject_images` | 图片注入 |
+| 4.5 | `stage_2_5_review_suggestions` | 审查建议（代码中属于 2.5） |
+| 4.7 | `stage_2_6_aggregate_repair` | 聚合修复 + 缓存（代码中属于 2.6） |
+| 4.9 | `_auto_embed_new_pages` | 嵌入（代码中为 Stage 4） |
+
+## 强制 Stage 清单（~15 步）
 
 每个 Stage 都标了：
 - **作用**：该 Stage 做什么

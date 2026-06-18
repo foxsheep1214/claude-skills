@@ -5947,7 +5947,7 @@ def ingest_one(
         print(f"[cache] HARD ERROR — cache not saved: {e}")
         return {"status": "hard-error", "error": str(e), "files_written": files_written_paths + index_log_files}
 
-    # ── Stage 6 (NashSU parity): auto-embed new pages if embedding is configured ──
+    # ── Stage 4: auto-embed new pages if embedding is configured ──
     _auto_embed_new_pages(config, files_written_paths + index_log_files)
 
     # ── Final verification: run validate_ingest.py to confirm all stages pass ──
