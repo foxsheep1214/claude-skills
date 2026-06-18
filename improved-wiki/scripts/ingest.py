@@ -3379,8 +3379,32 @@ This source belongs to the **{current_domain}** domain. Tag all generated concep
 {_build_image_reference_section(file_path, config)}
 # Task
 Generate wiki pages for this source. Create:
-1. A source page at wiki/sources/{source_rel}.md (frontmatter: type:source, title, created:{time.strftime('%Y-%m-%d')}, updated:{time.strftime('%Y-%m-%d')}, tags, related, domain, sources)
-2. Concept pages at wiki/concepts/<slug>.md for EVERY concept in the list above
+1. A **source page** at wiki/sources/{source_rel}.md — this is the MOST IMPORTANT page.
+   **Required format for source page body:**
+   ```
+   ---
+   type: source
+   title: "完整书名"
+   domain: {current_domain}
+   created: {time.strftime('%Y-%m-%d')}
+   updated: {time.strftime('%Y-%m-%d')}
+   tags: [tag1, tag2]
+   sources: ["raw/{source_rel}.pdf"]
+   ---
+
+   # 书名
+
+   **Book Summary:** 2-4句概括全书内容和定位。
+
+   ## Table of Contents & Key Concepts
+   1. **第1章标题** — 本章3-5个关键概念
+   2. **第2章标题** — 本章3-5个关键概念
+   ...
+
+   ## Key Takeaways
+   - 全书最重要的3-8条论断/结论/公式，每条一句话
+   ```
+2. Concept pages at wiki/concepts/<slug>.md for EVERY concept
 3. Entity pages at wiki/entities/<slug>.md for key entities
 
 **Every concept page frontmatter MUST include: `domain: {current_domain}`**
@@ -5179,16 +5203,63 @@ def ingest_one(
         print(f"{action} {rel_path}")
 
     if not source_block:
-        placeholder_content = (
-            f"---\ntype: source\ntitle: \"{raw_file.stem}\"\n"
-            f"created: {today_str}\nupdated: {today_str}\n"
-            f"tags: []\nrelated: []\n"
-            f"sources: [\"{canonical_source}\"]\n---\n\n"
-            f"# {raw_file.stem}\n\n"
-            f"_Ingested but the LLM did not emit a source page File block. "
-            f"The synthesis response is below._\n\n"
-            f"```yaml\n{json.dumps(analysis, ensure_ascii=False, indent=2)}\n```\n"
-        )
+        # Build NashSU-quality source page from digest data (no LLM needed)
+        book_meta = analysis.get("book_meta", {})
+        outline = analysis.get("outline", [])
+        key_claims = analysis.get("key_claims", [])
+        title = book_meta.get("title", raw_file.stem)
+        authors = book_meta.get("authors", [])
+        year = book_meta.get("year", "")
+        publisher = book_meta.get("publisher", "")
+
+        lines = [
+            "---",
+            "type: source",
+            f'title: "{title}"',
+            "domain: general",
+            f"created: {today_str}",
+            f"updated: {today_str}",
+            "tags: []",
+            "related: []",
+            f'sources: ["{canonical_source}"]',
+            "---",
+            "",
+            f"# {title}",
+            "",
+        ]
+        if authors:
+            lines.append(f"**Authors:** {', '.join(str(a) for a in authors[:5])}")
+        if year:
+            lines.append(f"**Year:** {year}")
+        if publisher:
+            lines.append(f"**Publisher:** {publisher}")
+        lines.append("")
+
+        if outline:
+            lines.append("## Table of Contents & Key Concepts")
+            lines.append("")
+            for ch in outline[:40]:
+                if isinstance(ch, dict):
+                    ch_title = ch.get("title", "")
+                    topics = ch.get("key_topics", [])
+                    topics_str = ", ".join(str(t) for t in topics[:4]) if topics else ""
+                else:
+                    ch_title = str(ch)
+                    topics_str = ""
+                lines.append(f"1. **{ch_title}**" + (f" — {topics_str}" if topics_str else ""))
+            lines.append("")
+
+        if key_claims:
+            lines.append("## Key Takeaways")
+            lines.append("")
+            for claim in key_claims[:10]:
+                if isinstance(claim, dict):
+                    lines.append(f"- {claim.get('claim', str(claim))}")
+                else:
+                    lines.append(f"- {str(claim)}")
+            lines.append("")
+
+        placeholder_content = "\n".join(lines) + "\n"
         try:
             write_wiki_file(source_path, placeholder_content, config)
             files_written_paths.append(str(source_path.relative_to(config.wiki_root)))
@@ -5546,16 +5617,63 @@ def _do_write(prepared: dict, verbose: bool = False) -> dict:
         print(f"  {action} {rel_path}")
 
     if not source_block:
-        placeholder_content = (
-            f"---\ntype: source\ntitle: \"{raw_file.stem}\"\n"
-            f"created: {today_str}\nupdated: {today_str}\n"
-            f"tags: []\nrelated: []\n"
-            f"sources: [\"{canonical_source}\"]\n---\n\n"
-            f"# {raw_file.stem}\n\n"
-            f"_Ingested but the LLM did not emit a source page File block. "
-            f"The synthesis response is below._\n\n"
-            f"```yaml\n{json.dumps(analysis, ensure_ascii=False, indent=2)}\n```\n"
-        )
+        # Build NashSU-quality source page from digest data (no LLM needed)
+        book_meta = analysis.get("book_meta", {})
+        outline = analysis.get("outline", [])
+        key_claims = analysis.get("key_claims", [])
+        title = book_meta.get("title", raw_file.stem)
+        authors = book_meta.get("authors", [])
+        year = book_meta.get("year", "")
+        publisher = book_meta.get("publisher", "")
+
+        lines = [
+            "---",
+            "type: source",
+            f'title: "{title}"',
+            "domain: general",
+            f"created: {today_str}",
+            f"updated: {today_str}",
+            "tags: []",
+            "related: []",
+            f'sources: ["{canonical_source}"]',
+            "---",
+            "",
+            f"# {title}",
+            "",
+        ]
+        if authors:
+            lines.append(f"**Authors:** {', '.join(str(a) for a in authors[:5])}")
+        if year:
+            lines.append(f"**Year:** {year}")
+        if publisher:
+            lines.append(f"**Publisher:** {publisher}")
+        lines.append("")
+
+        if outline:
+            lines.append("## Table of Contents & Key Concepts")
+            lines.append("")
+            for ch in outline[:40]:
+                if isinstance(ch, dict):
+                    ch_title = ch.get("title", "")
+                    topics = ch.get("key_topics", [])
+                    topics_str = ", ".join(str(t) for t in topics[:4]) if topics else ""
+                else:
+                    ch_title = str(ch)
+                    topics_str = ""
+                lines.append(f"1. **{ch_title}**" + (f" — {topics_str}" if topics_str else ""))
+            lines.append("")
+
+        if key_claims:
+            lines.append("## Key Takeaways")
+            lines.append("")
+            for claim in key_claims[:10]:
+                if isinstance(claim, dict):
+                    lines.append(f"- {claim.get('claim', str(claim))}")
+                else:
+                    lines.append(f"- {str(claim)}")
+            lines.append("")
+
+        placeholder_content = "\n".join(lines) + "\n"
         try:
             write_wiki_file(source_path, placeholder_content, config)
             files_written_paths.append(str(source_path.relative_to(config.wiki_root)))
