@@ -335,7 +335,6 @@ def stage_2_per_chunk_generation(
     config: Config,
     template: str = "",
     verbose: bool = False,
-    max_chunk_concurrent: int = 4,
 ) -> tuple[dict, str, list[tuple[str, str]]]:
     """Stage 2 (per-chunk): Generate FILE blocks SEQUENTIALLY.
 

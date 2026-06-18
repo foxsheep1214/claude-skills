@@ -335,9 +335,12 @@ def extract_text(file_path: Path, config: Config, pilot_confirmed: bool = False)
 def detect_pdf_type(file_path: Path, sample_pages: int = 10) -> tuple[str, float]:
     """Sample N pages to determine PDF type.
 
-    Uses two signals:
+    Uses three signals:
     1. Text chars/page (PyMuPDF get_text())
     2. Presence of full-page images (scanned PDFs have one large image per page)
+    3. Garbled text ratio — C0 control chars (0x00-0x1F) indicate custom font
+       encoding that PyMuPDF cannot decode. >1% garbled → force OCR path.
+       (2026-06-18: Fuqua book had 500+ chars/page but all garbled.)
 
     Pages are sampled evenly across the document to avoid bias from
     TOC/intro pages at the front and index/bibliography at the back.
@@ -348,13 +351,16 @@ def detect_pdf_type(file_path: Path, sample_pages: int = 10) -> tuple[str, float
         import fitz
     except ImportError:
         return ("text", 0)
+
+    _C0_RE = __import__('re').compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
+
     doc = fitz.open(file_path)
     try:
         total_chars = 0
         text_pages = 0
         img_pages = 0
+        garbled_chars = 0
         n = min(sample_pages, len(doc))
-        # Evenly-spaced sampling across the full document (avoid TOC bias)
         if len(doc) <= n:
             sample_indices = list(range(len(doc)))
         else:
@@ -363,13 +369,15 @@ def detect_pdf_type(file_path: Path, sample_pages: int = 10) -> tuple[str, float
 
         for idx in sample_indices:
             page = doc[idx]
-            chars = len(page.get_text())
-            # Skip pages that are effectively blank (navigable content might be images)
+            text = page.get_text()
+            chars = len(text)
             if chars < 10:
                 continue
             total_chars += chars
             text_pages += 1
-            # Check for full-page scan image: >50% of page area
+            # Signal 3: garbled text (custom font encoding → force OCR)
+            garbled_chars += len(_C0_RE.findall(text))
+            # Signal 2: full-page scan image
             rect = page.rect
             page_area = rect.width * rect.height
             for img in page.get_images():
@@ -380,16 +388,17 @@ def detect_pdf_type(file_path: Path, sample_pages: int = 10) -> tuple[str, float
                     break
 
         if text_pages == 0:
-            # All sampled pages were blank — assume scanned
             return ("scanned", 0.0)
 
         avg = total_chars / text_pages
         img_ratio = img_pages / text_pages
+        garbled_ratio = garbled_chars / max(total_chars, 1)
 
-        # If most pages have full-page images, it's scanned regardless of text
+        # Signal 3: garbled text trumps all — force OCR
+        if garbled_ratio > 0.01:
+            return ("scanned", avg)
         if img_ratio > 0.6:
             return ("scanned", avg)
-        # Hidden OCR layer: significant text BUT also many full-page images
         if avg > 500 and img_ratio > 0.3:
             return ("mixed", avg)
         if avg > 500:
@@ -1409,4 +1418,58 @@ CAPTION_SYSTEM_PROMPT = (
 )
 
 
+def check_text_quality(text: str, source_name: str = "") -> dict:
+    """Pre-ingest text quality gate (Stage 0.5 → Stage 1.1).
+
+    Detects garbled text from custom font encoding (e.g. Fuqua book:
+    500+ chars/page but all unreadable). Returns a quality report dict.
+    Caller should warn if quality is poor; ingest pipeline may choose to
+    abort or re-route to OCR.
+
+    Checks:
+      - C0 control character ratio (>1% → likely garbled)
+      - Printable ASCII ratio (<80% → unusual for English technical books)
+      - CJK ratio vs expected language (if source_expected_lang is set)
+    """
+    if not text:
+        return {"status": "empty", "c0_ratio": 0, "printable_ratio": 0}
+
+    _C0_RE = __import__('re').compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
+    _PRINTABLE_RE = __import__('re').compile(r'[A-Za-z0-9\s.,;:!?()[\]{}/\\@#$%^&*+=_\-~`\'"<>|]')
+    _CJK_RE = __import__('re').compile(r'[一-鿿㐀-䶿]')
+
+    sample = text[:50000]  # first 50K chars is sufficient
+    n = len(sample)
+    c0_count = len(_C0_RE.findall(sample))
+    printable_count = len(_PRINTABLE_RE.findall(sample))
+    cjk_count = len(_CJK_RE.findall(sample))
+
+    c0_ratio = c0_count / n
+    printable_ratio = printable_count / n
+    cjk_ratio = cjk_count / n
+
+    # Heuristic: classify quality
+    issues = []
+    if c0_ratio > 0.01:
+        issues.append(f"garbled: {c0_ratio:.1%} C0 control chars (font encoding failure?)")
+    if printable_ratio < 0.5 and cjk_ratio < 0.1:
+        issues.append(f"low-readability: only {printable_ratio:.1%} printable ASCII and {cjk_ratio:.1%} CJK")
+    if c0_ratio > 0.05:
+        issues.append("SEVERE: text appears to be corrupted — LLM digest will be useless")
+
+    status = "ok" if not issues else ("severe" if c0_ratio > 0.05 else "warning")
+
+    report = {
+        "status": status,
+        "c0_ratio": round(c0_ratio, 4),
+        "printable_ratio": round(printable_ratio, 4),
+        "cjk_ratio": round(cjk_ratio, 4),
+        "sample_size": n,
+        "issues": issues,
+    }
+
+    if issues:
+        print(f"[quality] {source_name}: {status.upper()} — {'; '.join(issues)}")
+
+    return report
 
