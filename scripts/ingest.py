@@ -3530,10 +3530,11 @@ The 5-10 most important claims, formulas, design rules, or conclusions from this
 
 # Instructions
 - The frontmatter MUST be exactly as shown above with real data from the digest
+- ⚠️ CRITICAL: DO NOT wrap the YAML frontmatter in ```yaml fences. The first line MUST be `---`, the frontmatter ends with `---`, then the body follows immediately. No code blocks anywhere.
 - Chapter outline: use the outline from the digest. For each chapter, list 2-3 key concepts with ONE-SENTENCE definitions
 - Key Takeaways: extract the most impactful claims from the digest's key_claims
 - Use [[wikilink]] syntax to link to concept pages (slugs should be concept-name-slug format)
-- The response MUST start with `---\ntype: source\n` — NO preamble
+- The response MUST start with `---` (three dashes on the first line) — NO preamble, NO ``` fences, NO commentary
 - Math: $inline$ $$display$$
 """
 
