@@ -83,7 +83,7 @@ Karpathy LLM-Wiki 模式 + NashSU LLM Wiki app (v0.4.25) 的 `autoIngestImpl()` 
 
 ### Stage 0.5 · PDF 文本提取（按 PDF 类型分两路径）
 
-**先判断 PDF 类型**（2026-06-17 改为均匀采样 + 四信号检测：① PyMuPDF `get_text()` 字符数 ② 全页大图占比 ③ `get_images()` 嵌入图数量 ④ 隐藏 OCR 层检测），采样方式从"前 10 页"改为"全书均匀间隔取 10 页"以避免 TOC/前言偏斜。空白页（<10 chars）自动跳过不计入统计。按结果走不同路径：
+**先判断 PDF 类型**（2026-06-18 改为跳过首尾随机采样 + 四信号检测），采样方式：跳过首页（封面/扉页）和末页（索引/封底），从剩余中间页中随机挑 5 页。不足 5 页的短 PDF 全量采样中间页，不足 3 页的采全部页面。空白页（<10 chars）自动跳过不计入统计。按结果走不同路径：
 
 - **信号 ①**：`get_text()` 平均 chars/page
 - **信号 ②**：渲染页面低分 Pixmap，检查非白像素占比（>80% 即视为全页扫描图）。这是 **2026-06-14 Johnson《High-Speed Signal Propagation》教训**引入的补充检测——OCR 处理的扫描版 PDF，其背景扫描图可能以 PyMuPDF `get_images()` 无法枚举的形式存储（form XObject / masked image / inline image），导致信号 ③ 漏检。仅靠 `get_images()` 是不够的。

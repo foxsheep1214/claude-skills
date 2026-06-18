@@ -9,6 +9,7 @@ import base64
 import hashlib
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -332,8 +333,8 @@ def extract_text(file_path: Path, config: Config, pilot_confirmed: bool = False)
 
 # ---------- Stage 0 pilot: PDF type detection + pilot OCR ----------
 
-def detect_pdf_type(file_path: Path, sample_pages: int = 10) -> tuple[str, float]:
-    """Sample N pages to determine PDF type.
+def detect_pdf_type(file_path: Path, sample_pages: int = 5) -> tuple[str, float]:
+    """Sample N pages (skipping first+last) to determine PDF type.
 
     Uses three signals:
     1. Text chars/page (PyMuPDF get_text())
@@ -342,8 +343,9 @@ def detect_pdf_type(file_path: Path, sample_pages: int = 10) -> tuple[str, float
        encoding that PyMuPDF cannot decode. >1% garbled → force OCR path.
        (2026-06-18: Fuqua book had 500+ chars/page but all garbled.)
 
-    Pages are sampled evenly across the document to avoid bias from
-    TOC/intro pages at the front and index/bibliography at the back.
+    Page 0 (cover/title) and the last page (index/back-cover) are always
+    skipped. N pages are randomly picked from the remaining middle pages.
+    Short PDFs (< N+2 pages) sample all available middle pages.
 
     Returns ("text", avg_chars) or ("scanned", avg_chars) or ("mixed", avg_chars).
     """
@@ -360,12 +362,14 @@ def detect_pdf_type(file_path: Path, sample_pages: int = 10) -> tuple[str, float
         text_pages = 0
         img_pages = 0
         garbled_chars = 0
-        n = min(sample_pages, len(doc))
-        if len(doc) <= n:
-            sample_indices = list(range(len(doc)))
+        n = min(sample_pages, len(doc) - 2)  # skip page 0 and last page
+        middle_pages = max(0, len(doc) - 2)
+        n = min(sample_pages, middle_pages)
+        if middle_pages <= 0:
+            sample_indices = list(range(len(doc)))  # too short, take all
         else:
-            step = len(doc) / n
-            sample_indices = [int(i * step) for i in range(n)]
+            pool = list(range(1, len(doc) - 1))    # pages between first and last
+            sample_indices = random.sample(pool, n) if n < len(pool) else pool
 
         for idx in sample_indices:
             page = doc[idx]

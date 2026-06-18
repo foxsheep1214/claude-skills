@@ -867,8 +867,11 @@ def _do_prepare(
                 barrier_free = False
             else:
                 # ── Barrier-free pipeline: analyze → generate → next chunk ──
+                # Rough estimate: ~60s analysis + ~15s generation per chunk
+                est_min = chunk_total * 75 / 60
                 print(f"  [stage_1_5∥2.1] Barrier-free — {chunk_total} chunks, "
-                      f"target {config.target_chars:,} chars/chunk")
+                      f"target {config.target_chars:,} chars/chunk (est. {est_min:.0f} min)")
+                _stage_begin("Stage 1.5∥2.1: Barrier-free pipeline")
                 t_start = time.time()
                 chunk_analyses = []
                 all_file_blocks: list = []
@@ -909,7 +912,7 @@ def _do_prepare(
                     # ── Generate (immediately after analysis) ──
                     blocks = _generate_chunk(
                         ca, i, generated_slugs, raw_file, config, template_content,
-                        verbose=verbose)
+                        verbose=verbose, chunk_text=chunk)
                     all_file_blocks.extend(blocks)
                     all_responses.extend([b[1] for b in blocks])
                     for path, _ in blocks:
@@ -939,7 +942,6 @@ def _do_prepare(
                 raw_response = "\n".join(all_responses)
                 file_blocks = all_file_blocks
                 _verify_stage_1_5_chunks(chunk_analyses, extracted_text)
-                _verify_stage_2_file_blocks(file_blocks, raw_file)
                 barrier_free = True
 
         # Stage 2.0: Source page generation (NashSU two-step — dedicated LLM call)
@@ -969,14 +971,30 @@ def _do_prepare(
                 analysis, raw_response, file_blocks = stage_2_synthesis(
                     global_digest, chunk_analyses, raw_file, config, template_content, verbose=verbose
                 )
-        _verify_stage_2_file_blocks(file_blocks, raw_file)
 
-        # Merge Stage 2.0 source page into file_blocks
+        # Merge Stage 2.0 source page into file_blocks (before verification)
         if source_page_response:
             source_blocks = parse_file_blocks(source_page_response)
             if source_blocks:
                 file_blocks = source_blocks + list(file_blocks)
                 print(f"  [stage_2_0] Source page block merged ({len(file_blocks)} total)")
+            elif source_page_response:
+                # LLM didn't use FILE block format — generate placeholder
+                source_rel = f"sources/{raw_file.relative_to(config.raw_root).with_suffix('.md')}"
+                title = global_digest.get("book_meta", {}).get("title", raw_file.stem) if isinstance(global_digest.get("book_meta"), dict) else raw_file.stem
+                stub = f"---\ntype: source\ntitle: \"{title}\"\ndomain: general\n"
+                stub += f"created: {time.strftime('%Y-%m-%d')}\nupdated: {time.strftime('%Y-%m-%d')}\n"
+                stub += f"tags: []\nrelated: []\nsources: [\"raw/{raw_file.relative_to(config.raw_root)}\"]\n---\n\n"
+                stub += f"**Title:** {title}\n**Author:** {raw_file.stem}\n\n"
+                stub += f"## Global Digest\n\n```yaml\n{json.dumps(global_digest, ensure_ascii=False, indent=2)[:4000]}\n```\n\n"
+                stub += f"## Key Concepts\n\n"
+                for path, _ in file_blocks:
+                    if "concepts/" in path:
+                        stub += f"- [[{Path(path).stem}]]\n"
+                file_blocks.append((source_rel, stub))
+                print(f"  [stage_2_0] Placeholder source page generated ({len(file_blocks)} total)")
+
+        _verify_stage_2_file_blocks(file_blocks, raw_file)
 
         # ── Stage 2.3: Query generation ──
         query_blocks, query_response = stage_2_3_query_generation(
@@ -1755,7 +1773,7 @@ def main() -> int:
         # Estimate cost
         if raw_file.suffix.lower() == ".pdf":
             pdf_type, avg_chars = detect_pdf_type(raw_file)
-            print(f"  PDF type: {pdf_type} (avg {avg_chars:.0f} chars/page, 10-page sample)")
+            print(f"  PDF type: {pdf_type} (avg {avg_chars:.0f} chars/page, 5-page random sample, skip first+last)")
             if pdf_type in ("scanned", "mixed"):
                 try:
                     import fitz

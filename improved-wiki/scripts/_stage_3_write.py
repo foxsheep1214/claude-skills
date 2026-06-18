@@ -13,21 +13,13 @@ from _core import (
     llm_call_progress as _llm_call_progress, llm_call_done as _llm_call_done,
     load_cache, save_cache, detect_domain, list_existing_slugs,
     parse_yaml_block, parse_file_blocks,
+    is_safe_ingest_path, _WINDOWS_RESERVED, _ILLEGAL_CHARS_RE,
 )
 from _llm_api import call_anthropic_protocol
 
 __all__ = ["write_wiki_file", "stage_2_6_aggregate_repair", "canonicalize_sources_field", "stamp_frontmatter_dates", "sanitize_ingested_content", "is_safe_ingest_path", "wiki_path_for_source", "merge_page_content", "_auto_correct_wiki_path", "_contains_cjk", "_make_cjk_slug", "_parse_frontmatter", "_merge_frontmatter_arrays", "_fmt_frontmatter", "backup_existing_page"]
 
 # ---------- File writing ----------
-
-# NashSU parity: isSafeIngestPath (ingest.ts L290-306)
-_WINDOWS_RESERVED = {"con", "prn", "aux", "nul"}
-for _i in range(1, 10):
-    _WINDOWS_RESERVED.add(f"com{_i}")
-    _WINDOWS_RESERVED.add(f"lpt{_i}")
-
-_ILLEGAL_CHARS_RE = re.compile(r'[<>:"|?*\x00-\x1f]')
-
 
 def _contains_cjk(text: str) -> bool:
     """Check if text contains CJK characters (NashSU parity: containsCjk)."""
@@ -234,44 +226,6 @@ def _auto_correct_wiki_path(rel_path: str, content: str, config: Config | None =
                 rel_path = f"{expected_dir}/{rel_path}"
 
     return None
-
-
-def is_safe_ingest_path(rel_path: str) -> bool:
-    """Reject paths that are unsafe to write to the wiki/ directory.
-
-    NashSU checks (ingest.ts L290-306):
-      - No control/NUL bytes
-      - Not an absolute path (POSIX /, Windows drive, UNC)
-      - No .. segments
-      - No segments ending with space or .
-      - No Windows reserved device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
-      - No Windows illegal characters (<>:"|?*)
-    """
-    if not rel_path or _ILLEGAL_CHARS_RE.search(rel_path):
-        return False
-    if rel_path.startswith("/") or rel_path.startswith("\\"):
-        return False
-    # Windows drive letter or UNC
-    if len(rel_path) >= 2 and rel_path[1] == ":":
-        return False
-    if rel_path.startswith("\\\\"):
-        return False
-    if ".." in rel_path.split("/") or ".." in rel_path.split("\\"):
-        return False
-    for segment in rel_path.replace("\\", "/").split("/"):
-        if not segment:
-            continue
-        if segment.endswith(" ") or segment.endswith("."):
-            return False
-        if segment.lower() in _WINDOWS_RESERVED:
-            return False
-    # Reject garbage slugs from LLM empty/malformed titles
-    stem = Path(rel_path).stem
-    if stem in ("", "-", "--", "none", "null", "undefined", "n-a", "n/a"):
-        return False
-    if re.match(r'^\(.*\)$', stem):  # e.g. "(none)", "(empty)"
-        return False
-    return True
 
 
 def wiki_path_for_source(raw_file: Path, config: Config) -> Path:
