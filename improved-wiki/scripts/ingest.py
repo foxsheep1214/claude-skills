@@ -916,6 +916,26 @@ def extract_text_scanned_pdf(file_path: Path, config: Config) -> str:
             stats["failed_chunks"].append({"chunk": chunk_key, "error": "minerU failed after retries"})
             _save_mineru_stats(stats_path, stats)
             _kill_mineru_servers()
+            # ⚠️  Prominent warning — all 3 retries exhausted
+            w = 64
+            lines = [
+                f"ALL 3 RETRIES EXHAUSTED — CHUNK PERMANENTLY FAILED",
+                f"",
+                f"Chunk:  pages {start+1}-{end}",
+                f"File:   {chunk_pdf.name}",
+                f"",
+                f"Action: re-run ingest to retry this chunk, or check",
+                f"        _mineru_stats.json for error details",
+            ]
+            print(f"")
+            print(f"  ╔{'═'*w}╗")
+            for i, line in enumerate(lines):
+                if i == 0:
+                    print(f"  ║  ⚠️  {line:<{w-5}} ║")
+                else:
+                    print(f"  ║     {line:<{w-4}} ║")
+            print(f"  ╚{'═'*w}╝")
+            print(f"")
             if len(stats["failed_chunks"]) > len(chunks) * 0.3:
                 doc.close()
                 _kill_mineru_servers()
