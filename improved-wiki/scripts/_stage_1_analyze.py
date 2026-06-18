@@ -383,21 +383,6 @@ updated_global_digest: |
 """
 
 
-def _chunk_concurrency() -> int:
-    """Max concurrent workers for Stage 2.1 per-chunk generation (default 8).
-
-    Stage 1.5 (chunk analysis) is now sequential (NashSU parity).
-    This env var only affects Stage 2.1 parallel page generation.
-    """
-    env = os.environ.get("LLM_CHUNK_CONCURRENCY", "")
-    if env:
-        try:
-            return max(1, int(env))
-        except ValueError:
-            pass
-    return 8
-
-
 def _chunk_retries() -> int:
     """Max attempts per chunk (1 initial + N retries). Default 2 retries → 3 total attempts."""
     env = os.environ.get("LLM_CHUNK_RETRIES", "")

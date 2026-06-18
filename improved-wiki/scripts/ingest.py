@@ -26,8 +26,6 @@ Configuration:
   LLM_API_KEY             override API key (env var)
   LLM_BASE_URL            override base URL (env var)
   LLM_MODEL               override model name (env var)
-  LLM_CHUNK_CONCURRENCY   max concurrent chunk analysis + generation workers (default 8)
-                            (shared by Stage 1.5 chunk analysis and Stage 2.1 per-chunk generation)
   LLM_CHUNK_RETRIES       extra attempts per failed chunk (default 2 → 3 total)
   Text LLM:               config.json default provider (DeepSeek V4 Pro via OpenAI protocol)
   Image caption:          config.json caption_provider (MiniMax via Anthropic protocol)
@@ -78,7 +76,7 @@ from _core import (
     FOLDER_TO_TEMPLATE,
 )
 from _stage_0_extract import (
-    extract_text, detect_pdf_type, stage_0_pilot,
+    extract_text, detect_pdf_type, stage_0_pilot, check_text_quality,
     extract_text_pymupdf, extract_text_mineru, extract_text_scanned_pdf,
     _count_running_mineru, _wait_for_mineru_slot, _kill_mineru_servers,
     stage_0_5_extract_images, stage_0_6_caption_images,
@@ -88,7 +86,7 @@ from _stage_0_extract import (
 from _stage_1_analyze import (
     chunk_text, stage_1_global_digest, stage_1_5_chunk_analysis,
     build_global_digest_prompt, build_chunk_analysis_prompt,
-    _chunk_concurrency, _chunk_retries, _analyze_chunk,
+    _chunk_retries, _analyze_chunk,
     _resolve_chunk_heading_path,
 )
 from _stage_2_generate import (
@@ -701,238 +699,28 @@ def ingest_one(
         if _should_stop_after(config, stage_check, {"status": "ok"}):
             return {"status": "ok", "stopped_after": stage_check}
 
-    # ── Load cache for Stage 3+ writes (needed for update at end) ──
-    cache = load_cache(config)
-    try:
-        rel = str(raw_file.relative_to(config.raw_root))
-    except ValueError:
-        rel = str(raw_file)
-
-    # NOTE: Stage 3+ logic duplicated with _do_write()
-    # 6. Write wiki files
-    source_path = wiki_path_for_source(raw_file, config)
-    files_written_paths: list[str] = []
-    hard_failures: list[str] = []  # NashSU parity: track FS errors to gate cache save
-    source_block: tuple[str, str] | None = None
-
-    # Known wiki subdirectories for schema routing validation (NashSU parity)
-    _VALID_SUBDIRS = {"sources", "concepts", "entities", "queries", "comparisons",
-                      "synthesis", "findings", "thesis"}
-    _LISTING_PAGES = {"index.md", "log.md", "overview.md", "schema.md"}
-
-    # Detect expected language from source text (NashSU parity: contentMatchesTargetLanguage)
-    try:
-        from _language import detect_language
-        expected_lang = detect_language(extracted_text[:5000]) if extracted_text else "unknown"
-    except ImportError:
-        expected_lang = "unknown"
-
-    canonical_source = f"raw/{raw_file.relative_to(config.raw_root)}"
-    today_str = time.strftime("%Y-%m-%d")
-
-    for rel_path, content in file_blocks:
-        # NashSU parity: isSafeIngestPath validation
-        if ".." in rel_path or rel_path.startswith("/"):
-            print(f"[write] Skipping unsafe path: {rel_path}")
-            continue
-        if not is_safe_ingest_path(rel_path):
-            print(f"[write] Dropped unsafe path: {rel_path}")
-            continue
-
-        # NashSU parity: schema routing validation + auto-correction
-        top_dir = rel_path.split("/")[0] if "/" in rel_path else ""
-        basename = Path(rel_path).name
-        if basename in _LISTING_PAGES:
-            pass  # listing pages allowed at wiki root
-        elif top_dir not in _VALID_SUBDIRS:
-            # Auto-correct malformed paths instead of dropping them.
-            # LLM sometimes outputs wiki/ConceptName instead of wiki/concepts/ConceptName.md
-            # or wiki/Book Title instead of wiki/sources/Book Title.md
-            corrected = _auto_correct_wiki_path(rel_path, content, config)
-            if corrected:
-                print(f"[write] Auto-corrected: {rel_path} → {corrected}")
-                rel_path = corrected
-            else:
-                print(f"[write] Dropped — cannot correct path: {rel_path}")
-                continue
-
-        # Auto-add .md extension if missing (LLM sometimes drops it)
-        if not rel_path.endswith(".md"):
-            rel_path = rel_path + ".md"
-            print(f"[write] Added .md extension: {rel_path}")
-
-        # NashSU parity: language validation (warn on mismatch, write regardless)
-        if expected_lang not in ("unknown", "English"):
-            block_lang = detect_language(content[:2000])
-            if block_lang not in (expected_lang, "English") and block_lang != "unknown":
-                print(f"  [lang] ⚠️  {rel_path}: expected {expected_lang}, got {block_lang}")
-
-        # NashSU parity: canonicalize sources field + stamp dates in frontmatter
-        content = canonicalize_sources_field(content, canonical_source)
-        content = stamp_frontmatter_dates(content, today_str)
-
-        full_path = config.wiki_dir / rel_path
-        # NashSU parity: listing pages (index/log/overview) overwrite; content pages merge
-        is_listing = basename in _LISTING_PAGES
-        do_merge = full_path.exists() and not is_listing
-
-        try:
-            write_wiki_file(full_path, content, config, merge=do_merge)
-        except OSError as e:
-            print(f"[write] HARD ERROR: {rel_path} — {e}")
-            hard_failures.append(rel_path)
-            continue
-
-        files_written_paths.append(str(full_path.relative_to(config.wiki_root)))
-        if full_path == source_path:
-            source_block = (rel_path, content)
-        action = "[merge]" if do_merge else "[overwrite]" if is_listing and full_path.exists() else "[write]"
-        print(f"{action} {rel_path}")
-
-    if not source_block:
-        # Build NashSU-quality source page from digest data (no LLM needed)
-        book_meta = analysis.get("book_meta", {})
-        outline = analysis.get("outline", [])
-        key_claims = analysis.get("key_claims", [])
-        title = book_meta.get("title", raw_file.stem)
-        authors = book_meta.get("authors", [])
-        year = book_meta.get("year", "")
-        publisher = book_meta.get("publisher", "")
-
-        lines = [
-            "---",
-            "type: source",
-            f'title: "{title}"',
-            "domain: general",
-            f"created: {today_str}",
-            f"updated: {today_str}",
-            "tags: []",
-            "related: []",
-            f'sources: ["{canonical_source}"]',
-            "---",
-            "",
-            f"# {title}",
-            "",
-        ]
-        if authors:
-            lines.append(f"**Authors:** {', '.join(str(a) for a in authors[:5])}")
-        if year:
-            lines.append(f"**Year:** {year}")
-        if publisher:
-            lines.append(f"**Publisher:** {publisher}")
-        lines.append("")
-
-        if outline:
-            lines.append("## Table of Contents & Key Concepts")
-            lines.append("")
-            for ch in outline[:40]:
-                if isinstance(ch, dict):
-                    ch_title = ch.get("title", "")
-                    topics = ch.get("key_topics", [])
-                    topics_str = ", ".join(str(t) for t in topics[:4]) if topics else ""
-                else:
-                    ch_title = str(ch)
-                    topics_str = ""
-                lines.append(f"1. **{ch_title}**" + (f" — {topics_str}" if topics_str else ""))
-            lines.append("")
-
-        if key_claims:
-            lines.append("## Key Takeaways")
-            lines.append("")
-            for claim in key_claims[:10]:
-                if isinstance(claim, dict):
-                    lines.append(f"- {claim.get('claim', str(claim))}")
-                else:
-                    lines.append(f"- {str(claim)}")
-            lines.append("")
-
-        placeholder_content = "\n".join(lines) + "\n"
-        try:
-            write_wiki_file(source_path, placeholder_content, config)
-            files_written_paths.append(str(source_path.relative_to(config.wiki_root)))
-            print(f"[write] {source_path.relative_to(config.wiki_root)}  (placeholder)")
-        except OSError as e:
-            print(f"[write] HARD ERROR: placeholder source page — {e}")
-            hard_failures.append("source-placeholder")
-
-    # ── Stage 3.5: Image injection into source page ──
-    stage_3_5_result: dict = {"injected": 0}
-    if source_path.exists():
-        stage_3_5_result = stage_3_5_inject_images(config, raw_file, source_path, method)
-
-    if _should_stop_after(config, "3", {"status": "ok", "files_written": files_written_paths}):
-        return {"status": "ok", "stopped_after": "3"}
-
-    # ── Stage 2.5: Review suggestions (NashSU 3-condition trigger) ──
-    stage_2_5_result = stage_2_5_review_suggestions(
-        config, file_blocks, raw_file, raw_response=raw_response, verbose=verbose)
-
-    # ── Go/no-go validation (NashSU: all stages must pass checks) ──
-    go_nogo_warnings = validate_stage_outputs(
-        config, raw_file, method, extracted_text,
-        stage_0_5_result, stage_0_6_result,
-        file_blocks, source_path,
-    )
-
-# (compliance record removed — validate_ingest.py covers this)
-
-    # ── Post-ingest lint (NashSU: structural lint after every ingest) ──
-    _run_post_ingest_lint(config)
-    # ── Post-ingest graph (staleness-guarded, <30min) ──
-    _run_post_ingest_graph(config)
-
-    # 7. Stage 2.6: Aggregate repair (index/log/overview)
-    index_log_files = stage_2_6_aggregate_repair(source_path, raw_file, analysis, h, method, config)
-
-    # 8. Update cache
-    cache["entries"][rel] = {
-        "hash": h,
-        "timestamp": int(time.time() * 1000),
-        "filesWritten": files_written_paths + index_log_files,
-        "method": method,
-        "template": template_name,
-        "sourceHash": h,
-        "fileBlockCount": len(file_blocks),
-        "stages": {
-            "global_digest_keys": len(global_digest),
-            "chunks_analyzed": len(chunk_analyses),
-            "file_blocks_generated": len(file_blocks),
-            "concepts_identified": analysis.get("concepts_identified", len(file_blocks)),
-            "concepts_core": analysis.get("concepts_core", 0),
-            "concepts_supporting": analysis.get("concepts_supporting", 0),
-            "concepts_generated": analysis.get("concepts_generated", len(file_blocks)),
-            "coverage_core": analysis.get("coverage_core", 1.0),
-            "coverage_supporting": analysis.get("coverage_supporting", 1.0),
-            "coverage_pct": analysis.get("coverage_pct", 1.0),
-            "images_extracted": stage_0_5_result.get("count", 0),
-            "images_captioned": stage_0_6_result.get("captioned", 0),
-            "images_injected": stage_3_5_result.get("injected", 0),
-            "review_items": stage_2_5_result.get("items", 0),
-        },
+    # Stage 3+: Delegate to _do_write (shared with batch path)
+    prepared = {
+        "raw_file": raw_file, "config": config, "h": h, "method": method,
+        "extracted_text": extracted_text, "global_digest": global_digest,
+        "chunk_analyses": chunk_analyses, "analysis": analysis,
+        "raw_response": raw_response, "file_blocks": file_blocks,
+        "stage_0_5_result": stage_0_5_result, "stage_0_6_result": stage_0_6_result,
+        "template_name": template_name,
     }
-    # NashSU parity: hard failures during file writes prevent cache save (ingest.ts L1115-1124).
-    # Without this, a partial-write result is permanently cached and never retried.
-    if hard_failures:
-        print(f"[cache] SKIPPED — {len(hard_failures)} hard failure(s): {', '.join(hard_failures[:5])}")
-        return {"status": "hard-error", "hard_failures": hard_failures,
-                "files_written": files_written_paths + index_log_files}
+    result = _do_write(prepared, verbose=verbose)
+    if result["status"] != "ok":
+        return result
 
-    try:
-        save_cache(config, cache)
-        clear_progress(config, h)
-        print(f"[cache] saved {rel}")
-    except OSError as e:
-        print(f"[cache] HARD ERROR — cache not saved: {e}")
-        return {"status": "hard-error", "error": str(e), "files_written": files_written_paths + index_log_files}
+    files_written = result["files_written"]
 
-    # ── Stage 4: auto-embed new pages if embedding is configured ──
-    _auto_embed_new_pages(config, files_written_paths + index_log_files)
-
-    # ── Final verification: run validate_ingest.py to confirm all stages pass ──
-    # Superpowers: NO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE
+    # ── Post-ingest (unique to single-book path) ──
+    _run_post_ingest_lint(config)
+    _run_post_ingest_graph(config)
+    _auto_embed_new_pages(config, files_written)
     _auto_validate_ingest(config, raw_file)
 
-    return {"status": "ok", "files_written": cache["entries"][rel]["filesWritten"]}
+    return {"status": "ok", "files_written": files_written}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -993,6 +781,11 @@ def _do_prepare(
             extracted_text, method = extract_text(raw_file, config, pilot_confirmed=pilot_confirmed)
             print(f"  [extract] {method}: {len(extracted_text)} chars")
             _verify_stage_0_text(raw_file, extracted_text, method)
+            qr = check_text_quality(extracted_text, raw_file.name)
+            if qr["status"] == "severe":
+                print(f"  [extract] ❌ Text quality SEVERE — aborting ingest. "
+                      f"Re-run with a different PDF or re-download from source.")
+                return None
             save_progress(config, h, {
                 "stage": "stage_0_done", "extracted_text": extracted_text,
                 "extract_method": method,
@@ -1170,7 +963,7 @@ def _do_prepare(
             elif len(chunk_analyses) > 1:
                 analysis, raw_response, file_blocks = stage_2_per_chunk_generation(
                     chunk_analyses, [], global_digest, raw_file, config, template_content,
-                    max_chunk_concurrent=_chunk_concurrency(), verbose=verbose,
+                    verbose=verbose,
                 )
             else:
                 analysis, raw_response, file_blocks = stage_2_synthesis(
