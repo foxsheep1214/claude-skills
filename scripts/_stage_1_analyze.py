@@ -572,6 +572,70 @@ def stage_1_5_chunk_analysis(
     return analyses
 
 
+def _analyze_chunk(
+    chunk: str,
+    chunk_idx: int,
+    chunk_total: int,
+    global_digest: dict,
+    accumulated_digest: str,
+    overlap_before: str,
+    heading_path: str,
+    file_path: Path,
+    config: Config,
+    template: str = "",
+    max_retries: int = 2,
+    verbose: bool = False,
+) -> dict:
+    """Analyze a single chunk (extracted from stage_1_5_chunk_analysis).
+
+    Used by the barrier-free pipeline in _do_prepare where each chunk is
+    analyzed and immediately generated before moving to the next chunk.
+
+    Returns analysis dict with keys: concepts_found, entities_found, claims,
+    formulas, connections_to_existing_wiki, digest_updates, plus _chunk_index,
+    _chunk_size, _attempts.
+    On failure: returns dict with chunk_index + error key.
+    """
+    prompt = build_chunk_analysis_prompt(
+        chunk, chunk_idx, chunk_total, global_digest, file_path, config,
+        template=template, accumulated_digest=accumulated_digest,
+        overlap_before=overlap_before, heading_path=heading_path,
+    )
+
+    for attempt in range(1 + max_retries):
+        try:
+            t0 = time.time()
+            response, stop_reason = call_anthropic_protocol(prompt, config, max_tokens=8192)
+            analysis = parse_yaml_block(response)
+            analysis["_chunk_index"] = chunk_idx + 1
+            analysis["_chunk_size"] = len(chunk)
+            analysis["_attempts"] = attempt + 1
+            dt = time.time() - t0
+            n_c = len(analysis.get("concepts_found") or [])
+            n_e = len(analysis.get("entities_found") or [])
+            tag = f" (retry #{attempt})" if attempt > 0 else ""
+            print(f"  [chunk {chunk_idx+1}/{chunk_total}] analyze OK{tag} — "
+                  f"{n_c} concepts, {n_e} entities, {dt:.0f}s")
+            if verbose:
+                print(f"    response: {response[:500]}...")
+            return analysis
+
+        except Exception as e:
+            if attempt < max_retries and _is_retryable_exception(e):
+                _record_rate_limit()
+                wait = _retry_jitter(2.0, attempt)
+                err_label = type(e).__name__
+                print(f"  [chunk {chunk_idx+1}/{chunk_total}] analyze retry {attempt+1}/{1+max_retries}"
+                      f" ({err_label}: {str(e)[:80]}) — {wait:.1f}s...")
+                time.sleep(wait)
+                continue
+            print(f"  [chunk {chunk_idx+1}/{chunk_total}] analyze FAILED: {e}")
+            return {
+                "chunk_index": chunk_idx + 1, "error": str(e),
+                "chunk_text_length": len(chunk), "_attempts": 1 + max_retries,
+            }
+
+
 def _checkpoint_1_5(config: Config, source_hash: str, chunk_total: int,
                     accumulated_digest: str, analyses: list[dict]) -> None:
     """Save per-chunk checkpoint for Stage 1.5 resume (NashSU parity)."""

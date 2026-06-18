@@ -88,11 +88,13 @@ from _stage_0_extract import (
 from _stage_1_analyze import (
     chunk_text, stage_1_global_digest, stage_1_5_chunk_analysis,
     build_global_digest_prompt, build_chunk_analysis_prompt,
-    _chunk_concurrency,
+    _chunk_concurrency, _chunk_retries, _analyze_chunk,
+    _resolve_chunk_heading_path,
 )
 from _stage_2_generate import (
-    stage_2_5_review_suggestions,
+    stage_2_5_review_suggestions, _generate_chunk,
     build_per_chunk_gen_prompt, stage_2_per_chunk_generation,
+    _extract_concept_entity_names,
     stage_2_0_source_page, stage_2_synthesis, build_synthesis_prompt,
     build_query_generation_prompt, stage_2_3_query_generation,
     build_comparison_disambiguation_prompt,
@@ -1051,14 +1053,101 @@ def _do_prepare(
                 save_progress(config, h, {"stage": "stage_0_done", "extracted_text": extracted_text,
                       "extract_method": method, "stage_0_5": stage_0_5_result, "stage_0_6": stage_0_6_result})
 
-        # Stage 1.5: Chunk Analysis
+        # Stage 1.5 + 2.1: Chunk Analysis → Generation
+        # Multi-chunk books use barrier-free pipeline: analyze → generate → next chunk
         if progress and progress.get("stage") in ("stage_1_5_done", "stage_2_done") and "chunk_analyses" in progress:
             chunk_analyses = progress["chunk_analyses"]
             print(f"  [stage_1_5] (cached) Chunk Analysis — {len(chunk_analyses)} chunks")
             _verify_stage_1_5_chunks(chunk_analyses, extracted_text)
+            analysis = progress.get("analysis", {})
+            raw_response = progress.get("raw_response", "")
+            file_blocks = parse_file_blocks(raw_response) if raw_response else []
+            barrier_free = False
         else:
-            chunk_analyses = stage_1_5_chunk_analysis(extracted_text, global_digest, raw_file, config, template_content, verbose=verbose, source_hash=h)
-            _verify_stage_1_5_chunks(chunk_analyses, extracted_text)
+            chunks = chunk_text(extracted_text, config.target_chars, config.chunk_overlap)
+            chunk_total = len(chunks)
+            if chunk_total == 1:
+                # Single chunk: original sequential path
+                chunk_analyses = stage_1_5_chunk_analysis(
+                    extracted_text, global_digest, raw_file, config, template_content,
+                    verbose=verbose, source_hash=h)
+                barrier_free = False
+            else:
+                # ── Barrier-free pipeline: analyze → generate → next chunk ──
+                print(f"  [stage_1_5∥2.1] Barrier-free — {chunk_total} chunks, "
+                      f"target {config.target_chars:,} chars/chunk")
+                t_start = time.time()
+                chunk_analyses = []
+                all_file_blocks: list = []
+                all_responses: list[str] = []
+                generated_slugs: list[str] = []
+                accumulated_digest = json.dumps(
+                    {k: global_digest[k] for k in
+                     ("book_meta", "outline", "key_entities", "key_concepts")
+                     if k in global_digest},
+                    ensure_ascii=False, indent=2)
+
+                for i in range(chunk_total):
+                    chunk = chunks[i]
+                    # ── Analyze ──
+                    overlap_before = chunks[i - 1][-config.chunk_overlap:] if i > 0 else ""
+                    chunk_pos = extracted_text.find(chunk)
+                    if chunk_pos == -1:
+                        chunk_pos = i * config.target_chars
+                    heading_path = _resolve_chunk_heading_path(
+                        extracted_text, chunk_pos, chunk_pos + len(chunk))
+
+                    ca = _analyze_chunk(
+                        chunk, i, chunk_total, global_digest, accumulated_digest,
+                        overlap_before, heading_path, raw_file, config, template_content,
+                        max_retries=_chunk_retries(), verbose=verbose)
+                    chunk_analyses.append(ca)
+
+                    # Update accumulated digest
+                    updated = ca.get("updated_global_digest", "")
+                    if isinstance(updated, str) and len(updated.strip()) > 50:
+                        accumulated_digest = updated.strip()
+                    elif isinstance(updated, dict):
+                        accumulated_digest = json.dumps(updated, ensure_ascii=False, indent=2)
+
+                    if "error" in ca:
+                        continue
+
+                    # ── Generate (immediately after analysis) ──
+                    blocks = _generate_chunk(
+                        ca, i, generated_slugs, raw_file, config, template_content,
+                        verbose=verbose)
+                    all_file_blocks.extend(blocks)
+                    all_responses.extend([b[1] for b in blocks])
+                    for path, _ in blocks:
+                        slug = Path(path).stem.lower().replace(" ", "-").replace("/", "-")
+                        if slug not in generated_slugs:
+                            generated_slugs.append(slug)
+
+                    done = i + 1
+                    pct = done * 100 // chunk_total
+                    eta = ((time.time() - t_start) / done) * (chunk_total - done) if done > 0 else 0
+                    print(f"  [pipeline] {done}/{chunk_total} [{pct}% ETA {eta:.0f}s]")
+
+                # Build combined analysis (same shape as stage_2_per_chunk_generation)
+                unique_concepts, _ = _extract_concept_entity_names(chunk_analyses)
+                concept_blocks = [b for b in all_file_blocks if "concepts/" in b[0]]
+                entity_blocks = [b for b in all_file_blocks if "entities/" in b[0]]
+                analysis = {
+                    "book_meta": global_digest.get("book_meta", {}),
+                    "outline": global_digest.get("outline", []),
+                    "concepts_identified": len(unique_concepts),
+                    "concepts_generated": len(concept_blocks),
+                    "entities_generated": len(entity_blocks),
+                    "coverage_pct": round(len(concept_blocks) / max(len(unique_concepts), 1), 2),
+                    "total_chunks": chunk_total,
+                    "method": "barrier-free",
+                }
+                raw_response = "\n".join(all_responses)
+                file_blocks = all_file_blocks
+                _verify_stage_1_5_chunks(chunk_analyses, extracted_text)
+                _verify_stage_2_file_blocks(file_blocks, raw_file)
+                barrier_free = True
 
         # Stage 2.0: Source page generation (NashSU two-step — dedicated LLM call)
         current_domain = _detect_domain(raw_file, template_content, global_digest)
@@ -1071,23 +1160,22 @@ def _do_prepare(
                 template=template_content, current_domain=current_domain, verbose=verbose
             )
 
-        # Stage 2: Generation (per-chunk for multi-chunk, legacy synthesis for single)
-        if progress and progress.get("stage") == "stage_2_done" and "raw_response" in progress:
-            analysis = progress["analysis"]
-            raw_response = progress["raw_response"]
-            file_blocks = parse_file_blocks(raw_response)
-            print(f"  [stage_2] (cached) Synthesis — {len(file_blocks)} file blocks")
-        elif len(chunk_analyses) > 1:
-            # Passing [] for chunks: the chunk-text-aware path is not yet wired;
-            # chunk_analyses carry all structured data the LLM needs per chunk.
-            analysis, raw_response, file_blocks = stage_2_per_chunk_generation(
-                chunk_analyses, [], global_digest, raw_file, config, template_content,
-                max_chunk_concurrent=_chunk_concurrency(), verbose=verbose,
-            )
-        else:
-            analysis, raw_response, file_blocks = stage_2_synthesis(
-                global_digest, chunk_analyses, raw_file, config, template_content, verbose=verbose
-            )
+        # Stage 2: Generation (only if not already done in barrier-free path)
+        if not barrier_free:
+            if progress and progress.get("stage") == "stage_2_done" and "raw_response" in progress:
+                analysis = progress["analysis"]
+                raw_response = progress["raw_response"]
+                file_blocks = parse_file_blocks(raw_response)
+                print(f"  [stage_2] (cached) Synthesis — {len(file_blocks)} file blocks")
+            elif len(chunk_analyses) > 1:
+                analysis, raw_response, file_blocks = stage_2_per_chunk_generation(
+                    chunk_analyses, [], global_digest, raw_file, config, template_content,
+                    max_chunk_concurrent=_chunk_concurrency(), verbose=verbose,
+                )
+            else:
+                analysis, raw_response, file_blocks = stage_2_synthesis(
+                    global_digest, chunk_analyses, raw_file, config, template_content, verbose=verbose
+                )
         _verify_stage_2_file_blocks(file_blocks, raw_file)
 
         # Merge Stage 2.0 source page into file_blocks

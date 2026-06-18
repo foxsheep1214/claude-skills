@@ -456,6 +456,61 @@ START IMMEDIATELY with ---FILE:... No preamble.
     return analysis, combined, all_file_blocks
 
 
+def _generate_chunk(
+    analysis: dict,
+    chunk_idx: int,
+    generated_slugs: list[str],
+    file_path: Path,
+    config: Config,
+    template: str = "",
+    verbose: bool = False,
+) -> list[tuple[str, str]]:
+    """Generate FILE blocks for a single chunk (extracted from stage_2_per_chunk_generation).
+
+    Used by the barrier-free pipeline in _do_prepare where each chunk is
+    generated immediately after analysis, before moving to the next chunk.
+
+    Returns list of (path, content) tuples.  Caller should append slugs to
+    generated_slugs from the returned paths.
+    """
+    concepts_n = len(analysis.get("concepts_found", []))
+    entities_n = len(analysis.get("entities_found", []))
+    if concepts_n == 0 and entities_n == 0:
+        print(f"  [chunk {chunk_idx+1}] (no concepts or entities — skipped)")
+        return []
+
+    prompt = build_per_chunk_gen_prompt(
+        analysis, "", chunk_idx, file_path, config, template,
+        generated_slugs=generated_slugs,
+    )
+    gen_tokens = config.compute_max_tokens(8192)
+
+    for attempt in range(4):
+        try:
+            t0 = time.time()
+            response, stop_reason = call_anthropic_protocol(prompt, config, max_tokens=gen_tokens)
+            blocks = parse_file_blocks(response)
+            dt = time.time() - t0
+            tag = f" (retry #{attempt})" if attempt > 0 else ""
+            print(f"  [chunk {chunk_idx+1}] generate OK{tag} — "
+                  f"{concepts_n}c/{entities_n}e → {len(blocks)} blocks "
+                  f"({len(response):,} chars, {stop_reason}) {dt:.0f}s")
+            if verbose:
+                print(f"    response: {response[:500]}...")
+            return blocks
+
+        except Exception as e:
+            if attempt < 3 and _is_retryable_exception(e):
+                wait = _retry_jitter(2.0, attempt)
+                err_label = type(e).__name__
+                print(f"  [chunk {chunk_idx+1}] generate {err_label} retry {attempt+1}/4"
+                      f" — {wait:.1f}s...")
+                time.sleep(wait)
+                continue
+            print(f"  [chunk {chunk_idx+1}] generate FAILED: {e}")
+            return []
+
+
 
 # ---------- Stage 2: Synthesis (legacy, for small books) ----------
 
