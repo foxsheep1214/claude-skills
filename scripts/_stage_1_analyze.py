@@ -590,6 +590,9 @@ def _analyze_chunk(
     for attempt in range(1 + max_retries):
         try:
             t0 = time.time()
+            if attempt == 0:
+                print(f"  [chunk {chunk_idx+1}/{chunk_total}] analyzing ({len(chunk):,} chars)...",
+                      flush=True)
             response, stop_reason = call_anthropic_protocol(prompt, config, max_tokens=8192)
             analysis = parse_yaml_block(response)
             analysis["_chunk_index"] = chunk_idx + 1

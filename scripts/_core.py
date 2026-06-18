@@ -472,6 +472,53 @@ def list_existing_slugs(config: Config) -> list[str]:
     return [f.stem for f in config.wiki_dir.rglob("*.md")]
 
 
+# ── Path safety (NashSU parity: isSafeIngestPath) ──
+
+_WINDOWS_RESERVED = {"con", "prn", "aux", "nul"}
+for _i in range(1, 10):
+    _WINDOWS_RESERVED.add(f"com{_i}")
+    _WINDOWS_RESERVED.add(f"lpt{_i}")
+
+_ILLEGAL_CHARS_RE = re.compile(r'[<>:"|?*\x00-\x1f]')
+
+
+def is_safe_ingest_path(rel_path: str) -> bool:
+    """Reject paths that are unsafe to write to the wiki/ directory.
+
+    NashSU checks (ingest.ts L290-306):
+      - No control/NUL bytes
+      - Not an absolute path (POSIX /, Windows drive, UNC)
+      - No .. segments
+      - No segments ending with space or .
+      - No Windows reserved device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
+      - No Windows illegal characters (<>:"|?*)
+      - No garbage slugs from LLM empty/malformed titles
+    """
+    if not rel_path or _ILLEGAL_CHARS_RE.search(rel_path):
+        return False
+    if rel_path.startswith("/") or rel_path.startswith("\\"):
+        return False
+    if len(rel_path) >= 2 and rel_path[1] == ":":
+        return False
+    if rel_path.startswith("\\\\"):
+        return False
+    if ".." in rel_path.split("/") or ".." in rel_path.split("\\"):
+        return False
+    for segment in rel_path.replace("\\", "/").split("/"):
+        if not segment:
+            continue
+        if segment.endswith(" ") or segment.endswith("."):
+            return False
+        if segment.lower() in _WINDOWS_RESERVED:
+            return False
+    stem = Path(rel_path).stem
+    if stem in ("", "-", "--", "none", "null", "undefined", "n-a", "n/a"):
+        return False
+    if re.match(r'^\(.*\)$', stem):
+        return False
+    return True
+
+
 # ── Parse helpers (moved from ingest.py) ──
 
 def parse_yaml_block(response: str) -> dict:

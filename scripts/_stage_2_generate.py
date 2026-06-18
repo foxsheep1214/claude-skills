@@ -463,6 +463,7 @@ def _generate_chunk(
     config: Config,
     template: str = "",
     verbose: bool = False,
+    chunk_text: str = "",
 ) -> list[tuple[str, str]]:
     """Generate FILE blocks for a single chunk (extracted from stage_2_per_chunk_generation).
 
@@ -479,7 +480,7 @@ def _generate_chunk(
         return []
 
     prompt = build_per_chunk_gen_prompt(
-        analysis, "", chunk_idx, file_path, config, template,
+        analysis, chunk_text, chunk_idx, file_path, config, template,
         generated_slugs=generated_slugs,
     )
     gen_tokens = config.compute_max_tokens(8192)
@@ -487,6 +488,9 @@ def _generate_chunk(
     for attempt in range(4):
         try:
             t0 = time.time()
+            if attempt == 0:
+                print(f"  [chunk {chunk_idx+1}] generating ({concepts_n}c/{entities_n}e)...",
+                      flush=True)
             response, stop_reason = call_anthropic_protocol(prompt, config, max_tokens=gen_tokens)
             blocks = parse_file_blocks(response)
             dt = time.time() - t0
@@ -851,10 +855,12 @@ def stage_2_0_source_page(
         source_rel = file_path.stem
 
     book_meta = global_digest.get("book_meta", {})
-    title = book_meta.get("title", file_path.stem)
-    authors = book_meta.get("authors", [])
-    year = book_meta.get("year", "")
-    publisher = book_meta.get("publisher", "")
+    if not isinstance(book_meta, dict):
+        book_meta = {}
+    title = book_meta.get("title", file_path.stem) if isinstance(book_meta, dict) else file_path.stem
+    authors = book_meta.get("authors", []) if isinstance(book_meta, dict) else []
+    year = book_meta.get("year", "") if isinstance(book_meta, dict) else ""
+    publisher = book_meta.get("publisher", "") if isinstance(book_meta, dict) else ""
 
     digest_str = json.dumps(global_digest, ensure_ascii=False, indent=2)
     if len(digest_str) > 8000:
