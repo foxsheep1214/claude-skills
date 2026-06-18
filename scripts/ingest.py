@@ -903,6 +903,7 @@ def extract_text_scanned_pdf(file_path: Path, config: Config) -> str:
                     "onnection", "failed", "timeout", "refused",
                     "Task failed", "RemoteDisconnected", "ServerDisconnected",
                     "semaphore", "resource_tracker",  # minerU shutdown crashes
+                    "concurrency", "limited",  # minerU VLM concurrency limit (transient)
                 ]
                 if any(p.lower() in err_tail.lower() for p in RETRY_PATTERNS):
                     continue
@@ -3580,18 +3581,21 @@ sources: ["raw/{source_rel}.pdf"]
 
 ## Table of Contents & Key Concepts
 
-For EACH chapter in the outline, write:
-1. **Chapter Title** — 2-3 key concepts with brief definitions
+For EACH chapter in the outline, write one comprehensive line:
+1. **Chapter Title:** list ALL key topics covered — aim for 5-15 items, comma-separated. Include specific component names, formulas, design methods, and techniques.
+
+Example:
+1. **DC-DC Converters:** buck (step-down), boost (step-up), buck-boost, continuous vs discontinuous conduction mode, voltage-mode control, efficiency analysis, PWM, synchronous rectification.
 
 ## Key Takeaways
 
-The 5-10 most important claims, formulas, design rules, or conclusions from this book. Each as a bullet point.
+The 5-10 most important claims, formulas, design rules, or conclusions. Each ONE sentence, actionable.
 ```
 
 # Instructions
 - The frontmatter MUST be exactly as shown above with real data from the digest
 - ⚠️ CRITICAL: DO NOT wrap the YAML frontmatter in ```yaml fences. The first line MUST be `---`, the frontmatter ends with `---`, then the body follows immediately. No code blocks anywhere.
-- Chapter outline: use the outline from the digest. For each chapter, list 2-3 key concepts with ONE-SENTENCE definitions
+- Chapter outline: list ALL key topics per chapter (aim for 5-15 items). Be comprehensive — this is the wiki's authoritative reference for what the book covers.
 - Key Takeaways: extract the most impactful claims from the digest's key_claims
 - tags: Generate 3-8 relevant tags from the book's content (e.g. [dc-dc-converter, power-electronics, magnetics]). Do NOT leave tags: [] empty.
 - related: Link to 2-5 related wiki pages by slug (e.g. [power-electronics, buck-converter])
