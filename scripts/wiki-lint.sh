@@ -25,6 +25,7 @@
 #   $ ./wiki-lint.sh --summary                  # one-line summary only
 #   $ ./wiki-lint.sh --strict                   # exit 1 for critical issues
 #   $ ./wiki-lint.sh --semantic                 # also run LLM semantic lint
+#   $ ./wiki-lint.sh --fix                      # auto-fix: missing-frontmatter, missing-domain
 #   $ ./wiki-lint.sh --json-only                # old behavior: JSON only, no wiki/lint/ pages
 #
 # Configuration via env:
@@ -71,6 +72,7 @@ VERBOSE=false
 SUMMARY=false
 STRICT=false
 SEMANTIC=false
+AUTO_FIX=false
 JSON_ONLY=false
 SEMANTIC_LIMIT=""
 SEMANTIC_TOKENS=""
@@ -81,6 +83,7 @@ for arg in "$@"; do
     --summary)    SUMMARY=true ;;
     --strict)     STRICT=true ;;
     --semantic)   SEMANTIC=true ;;
+    --fix)        AUTO_FIX=true ;;
     --json-only)  JSON_ONLY=true ;;
     --semantic-limit=*) SEMANTIC_LIMIT="${arg#*=}" ;;
     --semantic-tokens=*) SEMANTIC_TOKENS="${arg#*=}" ;;
@@ -511,6 +514,39 @@ print(errors)
     echo "[lint] --strict: $HAS_ERRORS critical issues found" >&2
     exit 1
   fi
+fi
+
+# ── Auto-fix (NashSU lint-fixes.ts parity) ──
+if [ "$AUTO_FIX" = true ]; then
+  FIXED=0
+  echo "[lint] Auto-fix: repairing missing-domain and missing-frontmatter..."
+  TIMESTAMP=$(date +%Y-%m-%d)
+
+  python3 << PYEOF
+import json, re, pathlib
+cache = json.loads(open('${LINT_CACHE}', 'r'))
+fixed = 0
+for f in cache:
+    path = pathlib.Path(f.get('path', ''))
+    if not path.exists():
+        continue
+    t = f.get('type', '')
+    if t == 'missing-domain':
+        text = path.read_text()
+        if 'domain:' not in text[:500]:
+            text = re.sub(r'(^title:.+$)', r'\1\ndomain: general', text, count=1, flags=re.MULTILINE)
+            path.write_text(text)
+            fixed += 1
+    elif t == 'missing-frontmatter':
+        text = path.read_text()
+        if not text.startswith('---'):
+            fm = f'---\ntype: concept\ntitle: "{path.stem}"\ndomain: general\ncreated: {timestamp}\nupdated: {timestamp}\ntags: []\nrelated: []\n---\n\n'
+            path.write_text(fm + text)
+            fixed += 1
+print(fixed)
+PYEOF
+  FIXED=$?
+  echo "[lint] Auto-fix: repaired $FIXED issues"
 fi
 
 exit 0

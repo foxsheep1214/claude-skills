@@ -56,6 +56,8 @@ from typing import Any
 _script_dir = Path(__file__).resolve().parent
 sys.path.insert(0, str(_script_dir))
 from _paths import detect_runtime_dir  # noqa: E402
+# _frontmatter provides parse_frontmatter, write_frontmatter, merge_page_content
+# (used locally by the existing merge_page_content in this file)
 
 
 # ── Progress & heartbeat helpers ──
@@ -6342,6 +6344,12 @@ def main() -> int:
     parser.add_argument("--parallel", type=int, default=0,
                         help=f"Max concurrent books for Stage 0-2 (default: {BATCH_MAX_CONCURRENT} if multiple files, 1 for single)")
     parser.add_argument("--dry-run", action="store_true", help="Don't write anything")
+    parser.add_argument("--delete", action="store_true",
+                        help="Delete source: remove source page, cache entry, and cleanup orphans (NashSU source-lifecycle parity)")
+    parser.add_argument("--enrich-wikilinks", action="store_true", default=True,
+                        help="Auto-enrich new pages with [[wikilinks]] after write (NashSU enrich-wikilinks parity)")
+    parser.add_argument("--no-enrich", action="store_true",
+                        help="Disable wikilink enrichment")
     parser.add_argument("--pilot-confirmed", action="store_true",
                         help="Acknowledge Stage 0 pilot quality and proceed with full OCR (required for scanned PDFs)")
     parser.add_argument(
@@ -6392,6 +6400,15 @@ def main() -> int:
         parser.print_help()
         print("\nTip: use --watch to process the queue, or pass file(s) for direct ingest.", file=sys.stderr)
         return 1
+
+    # ── Source lifecycle: delete ──
+    if args.delete:
+        config = Config.from_env()
+        from _source_lifecycle import delete_source
+        for f in args.file:
+            rf = Path(f).expanduser().resolve()
+            delete_source(rf, config)
+        return 0
 
     config = Config.from_env()
     config.conversation_mode = args.conversation
