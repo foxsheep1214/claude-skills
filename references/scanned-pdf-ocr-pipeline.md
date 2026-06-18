@@ -41,7 +41,7 @@
 
 ### 并发限制：MINERU_MAX_CONCURRENT = 1
 
-定义在 `ingest.py:714`：
+定义在 `ingest.py:792`：
 
 ```python
 MINERU_MAX_CONCURRENT = 1  # 串行执行，避免 VLM 内存竞争
@@ -51,7 +51,7 @@ def _count_running_mineru() -> int:
     alive = count_mineru_processes()
     return alive // 2  # 每个 job = 2 进程
 
-def _wait_for_mineru_slot(poll_interval=30):
+def _wait_for_mineru_slot(poll_interval: int = 120):
     """阻塞直到有空槽位。等待时输出：
        - ⏳ 并发槽已满 (1/1)
        - 当前占用文件（如「图解传热学_chunk_0000-0050.pdf」）
@@ -59,7 +59,7 @@ def _wait_for_mineru_slot(poll_interval=30):
        - 下次重试间隔
        槽位释放时输出：✅ slot freed after X.X min — proceeding"""
     while _count_running_mineru() >= MINERU_MAX_CONCURRENT:
-        print(f"[mineru] ⏳ 并发槽已满 (1/1)「当前文件」— 已等待 X 分钟，30s 后重试...")
+        print(f"[mineru] ⏳ 并发槽已满 (1/1)「当前文件」— 已等待 X 分钟，120s 后重试...")
         sleep(poll_interval)
 ```
 
@@ -87,7 +87,7 @@ def _wait_for_mineru_slot(poll_interval=30):
 
 ## Chunk 的 retry 策略
 
-`ingest.py:833-884` 实现的 retry 逻辑：
+`ingest.py:952-994` 实现的 retry 逻辑：
 
 1. **3 次重试** per chunk
 2. **Retry patterns**（stderr 匹配）：
@@ -95,6 +95,7 @@ def _wait_for_mineru_slot(poll_interval=30):
    - `NoneType` / `get` — minerU 内部解析错误
    - `Task failed` / `RemoteDisconnected` / `ServerDisconnected` — FastAPI 端崩溃
    - `semaphore` / `resource_tracker` — minerU shutdown crash
+   - `concurrency` / `limited` — minerU VLM concurrency limit (transient, retry-safe)
 3. **重试间隔**：先 `_kill_mineru_servers()` + sleep 2s 清理残留进程
 4. **Permanent failure**（不重试）：无效 PDF、文件缺失等非瞬态错误
 5. **全本 abort 阈值**：>30% chunks 失败 → `RuntimeError`
