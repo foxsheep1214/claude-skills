@@ -320,12 +320,12 @@ def validate_stage_outputs(
             warnings.append("Stage 3.5: source page missing '## Embedded Images' section")
             print(f"  ⚠️  Stage 3.5: image injection not found in source page")
 
-    # Stage 3.7: source page exists
+    # Stage 3: source page on disk (post-write verify)
     if not source_path.exists():
-        warnings.append("Stage 3.7: source page does not exist after ingest")
-        print(f"  ❌ Stage 3.7: source page missing")
+        warnings.append("Stage 3: source page does not exist after ingest")
+        print(f"  ❌ Stage 3: source page missing")
 
-    # Stage 4.5: review pages in wiki/REVIEW/<type>/ (分子目录)
+    # Stage 2.5(review): review pages in wiki/REVIEW/<type>/ (分子目录)
     reviews_dir = config.wiki_dir / "REVIEW"
     if reviews_dir.exists():
         unresolved = 0
@@ -336,7 +336,7 @@ def validate_stage_outputs(
         if unresolved > 0:
             print(f"  ℹ️  wiki/REVIEW/: {unresolved} unresolved review pages pending human triage")
 
-    # Stage 5: cache will be written after this — just check cache_path dir exists
+    # Stage 2.6: cache will be written after this — just check cache_path dir exists
     config.cache_path.parent.mkdir(parents=True, exist_ok=True)
 
     if warnings:
@@ -1009,6 +1009,9 @@ def _do_prepare(
         if comp_blocks:
             file_blocks = list(file_blocks) + comp_blocks
 
+        query_count = len(query_blocks)
+        comp_count = len(comp_blocks)
+
         analysis["__source_hash"] = h
         analysis["__extract_method"] = method
 
@@ -1022,6 +1025,8 @@ def _do_prepare(
             "stage_0_5_result": stage_0_5_result,
             "stage_0_6_result": stage_0_6_result,
             "template_name": template_name,
+            "query_count": query_count,
+            "comp_count": comp_count,
         }
     except Exception as e:
         print(f"  [prepare] ❌ FAILED: {e}")
@@ -1047,6 +1052,8 @@ def _do_write(prepared: dict, verbose: bool = False) -> dict:
     stage_0_5_result = prepared["stage_0_5_result"]
     stage_0_6_result = prepared["stage_0_6_result"]
     template_name = prepared["template_name"]
+    query_count = prepared.get("query_count", 0)
+    comp_count = prepared.get("comp_count", 0)
 
     print(f"\n=== [write] {raw_file.name} ===")
 
@@ -1237,6 +1244,8 @@ def _do_write(prepared: dict, verbose: bool = False) -> dict:
             "images_extracted": stage_0_5_result.get("count", 0),
             "images_captioned": stage_0_6_result.get("captioned", 0),
             "images_injected": stage_3_5_result.get("injected", 0),
+            "queries_generated": query_count,
+            "comparisons_generated": comp_count,
             "review_items": stage_2_5_result.get("items", 0),
         },
     }
