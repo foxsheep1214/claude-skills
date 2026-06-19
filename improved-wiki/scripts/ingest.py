@@ -84,17 +84,15 @@ from _stage_0_extract import (
     CAPTION_BATCH_SIZE, CAPTION_MAX_WORKERS,
 )
 from _stage_1_analyze import (
-    chunk_text, stage_1_global_digest, stage_1_5_chunk_analysis,
-    build_global_digest_prompt, build_chunk_analysis_prompt,
+    chunk_text, stage_1_global_digest,
     _chunk_retries, _analyze_chunk,
     _resolve_chunk_heading_path,
 )
 from _stage_2_generate import (
     stage_2_5_review_suggestions, _generate_chunk,
-    build_per_chunk_gen_prompt, stage_2_per_chunk_generation,
     _extract_concept_entity_names,
     _stage_2_per_concept_fallback,
-    stage_2_0_source_page, stage_2_synthesis, build_synthesis_prompt,
+    stage_2_0_source_page,
     build_query_generation_prompt, stage_2_3_query_generation,
     build_comparison_disambiguation_prompt,
     build_comparison_in_source_prompt,
@@ -830,7 +828,8 @@ def _do_prepare(
                       "extract_method": method, "stage_0_5": stage_0_5_result, "stage_0_6": stage_0_6_result})
 
         # Stage 1.5 + 2.1: Chunk Analysis → Generation
-        # Multi-chunk books use barrier-free pipeline: analyze → generate → next chunk
+        # Unified barrier-free pipeline (NashSU improved): analyze → generate → next chunk.
+        # Works for all chunk counts: 1 chunk = single loop iteration; N chunks = N iterations.
         if progress and progress.get("stage") in ("stage_1_5_done", "stage_2_done") and "chunk_analyses" in progress:
             chunk_analyses = progress["chunk_analyses"]
             print(f"  [stage_1_5] (cached) Chunk Analysis — {len(chunk_analyses)} chunks")
@@ -838,130 +837,118 @@ def _do_prepare(
             analysis = progress.get("analysis", {})
             raw_response = progress.get("raw_response", "")
             file_blocks = parse_file_blocks(raw_response) if raw_response else []
-            barrier_free = False
         else:
             chunks = chunk_text(extracted_text, config.target_chars, config.chunk_overlap)
             chunk_total = len(chunks)
-            if chunk_total == 1:
-                # Single chunk: original sequential path
-                chunk_analyses = stage_1_5_chunk_analysis(
-                    extracted_text, global_digest, raw_file, config, template_content,
-                    verbose=verbose, source_hash=h)
-                barrier_free = False
-            else:
-                # ── Barrier-free pipeline: analyze → generate → next chunk ──
-                # Rough estimate: ~60s analysis + ~15s generation per chunk
-                est_min = chunk_total * 75 / 60
-                print(f"  [stage_1_5∥2.1] Barrier-free — {chunk_total} chunks, "
-                      f"target {config.target_chars:,} chars/chunk (est. {est_min:.0f} min)")
-                _stage_begin("Stage 1.5∥2.1: Barrier-free pipeline")
-                t_start = time.time()
-                chunk_analyses = []
-                all_file_blocks: list = []
-                all_responses: list[str] = []
-                generated_slugs: list[str] = []
-                accumulated_digest = json.dumps(
-                    {k: global_digest[k] for k in
-                     ("book_meta", "outline", "key_entities", "key_concepts")
-                     if k in global_digest},
-                    ensure_ascii=False, indent=2)
 
-                for i in range(chunk_total):
-                    chunk = chunks[i]
-                    # ── Analyze ──
-                    overlap_before = chunks[i - 1][-config.chunk_overlap:] if i > 0 else ""
-                    chunk_pos = extracted_text.find(chunk)
-                    if chunk_pos == -1:
-                        chunk_pos = i * config.target_chars
-                    heading_path = _resolve_chunk_heading_path(
-                        extracted_text, chunk_pos, chunk_pos + len(chunk))
+            # ── Barrier-free pipeline: analyze → generate → next chunk ──
+            est_sec = chunk_total * 75  # ~60s analysis + ~15s generation per chunk
+            print(f"  [stage_1_5∥2.1] Barrier-free — {chunk_total} chunk(s), "
+                  f"target {config.target_chars:,} chars/chunk (est. {est_sec/60:.0f} min)")
+            _stage_begin("Stage 1.5∥2.1: Barrier-free pipeline")
+            t_start = time.time()
+            chunk_analyses = []
+            all_file_blocks: list = []
+            all_responses: list[str] = []
+            generated_slugs: list[str] = []
+            accumulated_digest = json.dumps(
+                {k: global_digest[k] for k in
+                 ("book_meta", "outline", "key_entities", "key_concepts")
+                 if k in global_digest},
+                ensure_ascii=False, indent=2)
 
-                    ca = _analyze_chunk(
-                        chunk, i, chunk_total, global_digest, accumulated_digest,
-                        overlap_before, heading_path, raw_file, config, template_content,
-                        max_retries=_chunk_retries(), verbose=verbose)
-                    chunk_analyses.append(ca)
+            for i in range(chunk_total):
+                chunk = chunks[i]
+                # ── Analyze ──
+                overlap_before = chunks[i - 1][-config.chunk_overlap:] if i > 0 else ""
+                chunk_pos = extracted_text.find(chunk)
+                if chunk_pos == -1:
+                    chunk_pos = i * config.target_chars
+                heading_path = _resolve_chunk_heading_path(
+                    extracted_text, chunk_pos, chunk_pos + len(chunk))
 
-                    # Update accumulated digest
-                    updated = ca.get("updated_global_digest", "")
-                    if isinstance(updated, str) and len(updated.strip()) > 50:
-                        accumulated_digest = updated.strip()
-                    elif isinstance(updated, dict):
-                        accumulated_digest = json.dumps(updated, ensure_ascii=False, indent=2)
+                ca = _analyze_chunk(
+                    chunk, i, chunk_total, global_digest, accumulated_digest,
+                    overlap_before, heading_path, raw_file, config, template_content,
+                    max_retries=_chunk_retries(), verbose=verbose)
+                chunk_analyses.append(ca)
 
-                    if "error" in ca:
-                        continue
+                # Update accumulated digest
+                updated = ca.get("updated_global_digest", "")
+                if isinstance(updated, str) and len(updated.strip()) > 50:
+                    accumulated_digest = updated.strip()
+                elif isinstance(updated, dict):
+                    accumulated_digest = json.dumps(updated, ensure_ascii=False, indent=2)
 
-                    # ── Generate (immediately after analysis) ──
-                    blocks = _generate_chunk(
-                        ca, i, generated_slugs, raw_file, config, template_content,
-                        verbose=verbose, chunk_text=chunk)
-                    all_file_blocks.extend(blocks)
-                    all_responses.extend([b[1] for b in blocks])
-                    for path, _ in blocks:
-                        slug = Path(path).stem.lower().replace(" ", "-").replace("/", "-")
-                        if slug not in generated_slugs:
-                            generated_slugs.append(slug)
+                if "error" in ca:
+                    continue
 
-                    done = i + 1
-                    pct = done * 100 // chunk_total
-                    eta = ((time.time() - t_start) / done) * (chunk_total - done) if done > 0 else 0
-                    print(f"  [pipeline] {done}/{chunk_total} [{pct}% ETA {eta:.0f}s]")
+                # ── Generate (immediately after analysis) ──
+                blocks = _generate_chunk(
+                    ca, i, generated_slugs, raw_file, config, template_content,
+                    verbose=verbose, chunk_text=chunk)
+                all_file_blocks.extend(blocks)
+                all_responses.extend([b[1] for b in blocks])
+                for path, _ in blocks:
+                    slug = Path(path).stem.lower().replace(" ", "-").replace("/", "-")
+                    if slug not in generated_slugs:
+                        generated_slugs.append(slug)
 
-                # Build combined analysis (same shape as stage_2_per_chunk_generation)
-                unique_concepts, _ = _extract_concept_entity_names(chunk_analyses)
+                done = i + 1
+                pct = done * 100 // chunk_total
+                eta = ((time.time() - t_start) / done) * (chunk_total - done) if done > 0 else 0
+                print(f"  [pipeline] {done}/{chunk_total} [{pct}% ETA {eta:.0f}s]")
+
+            # Build combined analysis
+            unique_concepts, _ = _extract_concept_entity_names(chunk_analyses)
+            concept_blocks = [b for b in all_file_blocks if "concepts/" in b[0]]
+            entity_blocks = [b for b in all_file_blocks if "entities/" in b[0]]
+            analysis = {
+                "book_meta": global_digest.get("book_meta", {}),
+                "outline": global_digest.get("outline", []),
+                "concepts_identified": len(unique_concepts),
+                "concepts_generated": len(concept_blocks),
+                "entities_generated": len(entity_blocks),
+                "coverage_pct": round(len(concept_blocks) / max(len(unique_concepts), 1), 2),
+                "total_chunks": chunk_total,
+                "method": "barrier-free",
+            }
+            raw_response = "\n".join(all_responses)
+            file_blocks = all_file_blocks
+
+            # ── Fallback: per-concept generation ──
+            # If barrier-free produced 0 concept blocks (LLM max_tokens/timeout
+            # before FILE blocks), fall back to per-concept LLM calls.
+            if not concept_blocks and unique_concepts and chunk_analyses:
+                n_missed = len(unique_concepts)
+                print(f"  [stage_2] ⚠️  Barrier-free: 0/{n_missed} concepts generated "
+                      f"— falling back to per-concept generation "
+                      f"(pre_existing_slugs={len(generated_slugs)})")
+                fa_analysis, fa_raw, fa_blocks = _stage_2_per_concept_fallback(
+                    chunk_analyses, global_digest, raw_file, config,
+                    template_content, verbose=verbose,
+                    pre_existing_slugs=generated_slugs,
+                )
+                fa_concept_entity = [(p, c) for p, c in fa_blocks
+                                     if not p.startswith("sources/")]
+                all_file_blocks = fa_concept_entity
+                if fa_concept_entity:
+                    all_responses.append(fa_raw)
+                    raw_response = "\n".join(all_responses)
+                file_blocks = all_file_blocks
                 concept_blocks = [b for b in all_file_blocks if "concepts/" in b[0]]
                 entity_blocks = [b for b in all_file_blocks if "entities/" in b[0]]
-                analysis = {
-                    "book_meta": global_digest.get("book_meta", {}),
-                    "outline": global_digest.get("outline", []),
-                    "concepts_identified": len(unique_concepts),
-                    "concepts_generated": len(concept_blocks),
-                    "entities_generated": len(entity_blocks),
-                    "coverage_pct": round(len(concept_blocks) / max(len(unique_concepts), 1), 2),
-                    "total_chunks": chunk_total,
-                    "method": "barrier-free",
-                }
-                raw_response = "\n".join(all_responses)
-                file_blocks = all_file_blocks
+                analysis["concepts_generated"] = len(concept_blocks)
+                analysis["entities_generated"] = len(entity_blocks)
+                analysis["coverage_pct"] = round(
+                    len(concept_blocks) / max(len(unique_concepts), 1), 2)
+                analysis["method"] = "barrier-free+fallback"
+                for path, _ in fa_concept_entity:
+                    s = Path(path).stem.lower().replace(" ", "-").replace("/", "-")
+                    if s not in generated_slugs:
+                        generated_slugs.append(s)
 
-                # ── Barrier-free fallback: per-concept generation ──
-                # If per-chunk generation produced 0 concept blocks (LLM hit
-                # max_tokens/timeout before emitting FILE blocks), fall back
-                # to generating each concept in its own small LLM call.
-                if not concept_blocks and unique_concepts and chunk_analyses:
-                    n_missed = len(unique_concepts)
-                    print(f"  [stage_2] ⚠️  Barrier-free: 0/{n_missed} concepts generated "
-                          f"— falling back to per-concept generation "
-                          f"(pre_existing_slugs={len(generated_slugs)})")
-                    fa_analysis, fa_raw, fa_blocks = _stage_2_per_concept_fallback(
-                        chunk_analyses, global_digest, raw_file, config,
-                        template_content, verbose=verbose,
-                        pre_existing_slugs=generated_slugs,
-                    )
-                    # Filter out source page from fallback — stage_2_0_source_page
-                    # generates the canonical source page below.
-                    fa_concept_entity = [(p, c) for p, c in fa_blocks
-                                         if not p.startswith("sources/")]
-                    all_file_blocks = fa_concept_entity
-                    if fa_concept_entity:
-                        all_responses.append(fa_raw)
-                        raw_response = "\n".join(all_responses)
-                    file_blocks = all_file_blocks
-                    concept_blocks = [b for b in all_file_blocks if "concepts/" in b[0]]
-                    entity_blocks = [b for b in all_file_blocks if "entities/" in b[0]]
-                    analysis["concepts_generated"] = len(concept_blocks)
-                    analysis["entities_generated"] = len(entity_blocks)
-                    analysis["coverage_pct"] = round(
-                        len(concept_blocks) / max(len(unique_concepts), 1), 2)
-                    analysis["method"] = "barrier-free+fallback"
-                    for path, _ in fa_concept_entity:
-                        s = Path(path).stem.lower().replace(" ", "-").replace("/", "-")
-                        if s not in generated_slugs:
-                            generated_slugs.append(s)
-
-                _verify_stage_1_5_chunks(chunk_analyses, extracted_text)
-                barrier_free = True
+            _verify_stage_1_5_chunks(chunk_analyses, extracted_text)
 
         # Stage 2.0: Source page generation (NashSU two-step — dedicated LLM call)
         current_domain = _detect_domain(raw_file, template_content, global_digest)
@@ -973,31 +960,6 @@ def _do_prepare(
                 global_digest, raw_file, config,
                 template=template_content, current_domain=current_domain, verbose=verbose
             )
-
-        # Stage 2: Generation (only if not already done in barrier-free path)
-        if not barrier_free:
-            if progress and progress.get("stage") == "stage_2_done" and "raw_response" in progress:
-                analysis = progress["analysis"]
-                raw_response = progress["raw_response"]
-                file_blocks = parse_file_blocks(raw_response)
-                print(f"  [stage_2] (cached) Synthesis — {len(file_blocks)} file blocks")
-            else:
-                # Always use per-chunk generation (NashSU sequential mode).
-                # stage_2_synthesis (monolithic multi-round) is retired —
-                # it fails for large single-chunk docs: LLM hits max_tokens
-                # or 600s timeout before producing FILE blocks.
-                # per-chunk works for 1 chunk too — each chunk call is small.
-                analysis, raw_response, file_blocks = stage_2_per_chunk_generation(
-                    chunk_analyses, [], global_digest, raw_file, config, template_content,
-                    verbose=verbose,
-                )
-                if not file_blocks and chunk_analyses:
-                    # Per-chunk returned 0 blocks (e.g. chunk with many concepts
-                    # overwhelms single LLM call). Fall back to per-concept calls.
-                    print(f"  [stage_2] ⚠️  Per-chunk returned 0 blocks — falling back to per-concept generation")
-                    analysis, raw_response, file_blocks = _stage_2_per_concept_fallback(
-                        chunk_analyses, global_digest, raw_file, config, template_content, verbose
-                    )
 
         # Merge Stage 2.0 source page into file_blocks (before verification)
         if source_page_response:

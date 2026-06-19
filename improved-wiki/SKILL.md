@@ -18,8 +18,8 @@ Phase 2: Generation      (source page, per-chunk concept/entity, queries, compar
 Phase 3: Write & Enrich  (file write, image injection, aggregate repair)
 Phase 4: Embeddings      (auto-triggered if EMBEDDING_BASE_URL set)
 
-Sequential (NashSU parity): 1.5 chunk analysis + 2.x per-chunk generation
-Parallel (I/O only):        0.6∥1 caption∥digest + 0.6 caption batch dispatch
+Barrier-free: 1.5∥2.1 analyze→generate per chunk (unified, all chunk counts)
+Parallel (I/O only): 0.6∥1 caption∥digest + 0.6 caption batch dispatch
 
 Lint:  [Build Graph] → [Louvain] → [Insights]
        (post-ingest auto-triggered via AUTO_BUILD_GRAPH=1, 30min staleness guard)
@@ -81,7 +81,7 @@ Lint:  [Build Graph] → [Louvain] → [Insights]
 - **Review sweep** ⭐ (NashSU v0.4.25 parity): `/improved-wiki sweep-reviews` — scans pending review items, auto-resolves those satisfied by subsequent ingests (rule-based + LLM semantic judge). Keeps review backlog actionable. See `references/review-sweep.md`.
 - **Batch ingest**: `python3 scripts/ingest.py f1.pdf f2.pdf ...` — parallel Stage 0-2 per book, serial Stage 3+ write
 - **Knowledge graph**: `AUTO_BUILD_GRAPH=1` auto-rebuilds graph after ingest; manual: `python3 scripts/build_knowledge_graph.py`
-- **Sequential Stage 1.5 + 2.x** (NashSU parity): chunk analysis (Stage 1.5) and per-chunk generation (Stage 2.x) run sequentially with accumulating context — each chunk builds on all previous chunks' discoveries. Per-chunk checkpoint for crash recovery.
+- **Unified barrier-free pipeline**: Stage 1.5 + 2.1 merged — analyze chunk → generate pages → next chunk. Works for all chunk counts (1 to N). Accumulating context + per-chunk checkpoint for crash recovery. Legacy multi-round synthesis retired.
 - **Parallel I/O**: caption ∥ digest (Stage 0.6∥1), caption batch dispatch (×6 workers). Pure I/O-bound parallelism only — no quality impact.
 - **Heading path tracking** (NashSU parity): each chunk analysis prompt includes full heading hierarchy (`Chapter 3 > Section 3.2 > Subsec 3.2.1`)
 - **Overlap context** (NashSU parity): paragraph/sentence-aware overlap text passed between chunks for continuity

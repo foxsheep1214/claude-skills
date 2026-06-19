@@ -166,22 +166,18 @@ Karpathy LLM-Wiki 模式 + NashSU LLM Wiki app (v0.4.25) 的 `autoIngestImpl()` 
   - `digest_updates`：对 global digest 的修正/扩展/矛盾
 - **go/no-go**：`stages.chunks_analyzed ≥ 1`（cache 中记录 ≥1 块）
 
-### Stage 2 · Source/Concept/Entity Generation（per-chunk / legacy synthesis 双模式）
+### Stage 2 · Source/Concept/Entity Generation（统一 barrier-free pipeline）
 
-- **作用**：根据源文本 chunk 数自动选择生成策略——**仅生成 source / concept / entity 三种 page type**：
-  - **多 chunk 书（>1 chunk）→ per-chunk 并行生成**：每个 chunk 的 Stage 1.5 分析结果独立生成该 chunk 的概念/实体页。chunk 之间用 `ThreadPoolExecutor` 并行处理（max 4 concurrent）。所有 chunk 生成完毕后去重合并，再用 global digest 生成 source page。**per-chunk 避免了大 synthesis 的认知衰减问题，大书的覆盖率从 ~10% 提升到 ~60-100%。**
-  - **单 chunk 书（≤1 chunk）→ legacy synthesis**：沿用原来的多轮 synthesis 模型（8 轮 gap-aware continuation，覆盖门禁 core≥80% supp≥50%）。
+- **作用**：与 Stage 1.5 合并为 **barrier-free pipeline**：analyze chunk → generate pages → next chunk。对所有 chunk 数统一——1 chunk = 单次循环，N chunks = N 次循环。每个 chunk 分析完立即生成概念/实体页，不等全部分析完成。**仅生成 source / concept / entity 三种 page type**。
+- **为什么统一**：NashSU 对单 chunk 书用 legacy synthesis（多轮追问），但单次 synthesis LLM 调用经常因 token 超限或超时失败。barrier-free 每 chunk 一次小调用，稳定且可恢复。
 - **产物**：FILE blocks → `parse_file_blocks()` → 写入 `wiki/` 目录
 - **输出格式**：`---FILE:wiki/<path>---\n<markdown content>\n---END FILE---`
 - **go/no-go**：
   - `stages.file_blocks_generated ≥ 1`
   - source page FILE block 存在
   - 概念页路径在 `wiki/concepts/` 下（不在 bare `wiki/` 或 `wiki/sources/`）
-  - per-chunk mode：至少 1 个 chunk 产出 ≥ 1 个 block
-- **覆盖率门禁**（仅 legacy synthesis 模式适用）：
-  - core 概念 ≥ 80%，supporting 概念 ≥ 50%
-  - 由 chunk 分析中的 `importance` 字段驱动（LLM 自行判断 core/supporting/mentioned）
-  - 未达标时自动继续追问未覆盖概念
+  - 至少 1 个 chunk 产出 ≥ 1 个 block
+- **fallback**：barrier-free 产出 0 个 concept → 自动降级为 per-concept 生成（每个 concept 一次 LLM 调用）
 
 ### Stage 2.3 · Query Auto-Generation ⭐ **新增 2026-06-16**
 
