@@ -14,9 +14,10 @@ Two architectural differences from NashSU are by design, NOT gaps:
      `wiki/` prefix stripped, and surfaces unsafe/unclosed blocks via stdout
      prints rather than a `warnings` array.
 
-`@unittest.expectedFailure` marks behavior NashSU has but the skill does not yet
-match — porting them documents the gap. If one starts passing (someone closed the
-gap), unittest reports an "unexpected success" → remove the decorator.
+All ported cases pass. Four marker/fence-tolerance behaviors were briefly tracked
+as `@unittest.expectedFailure` gaps, then fixed on 2026-06-19 (see
+TestParseFileBlocksTolerantMarkers) — the skill now matches NashSU's
+case-insensitive, whitespace-tolerant markers and CommonMark fence-length rule.
 
 Run:  python3 scripts/tests/test_nashsu_parity.py
 """
@@ -187,43 +188,37 @@ class TestParseFileBlocksParity(unittest.TestCase):
         self.assertEqual(paths(text), ["concepts/topic-a.md", "entities/topic-b.md"])
 
 
-class TestParseFileBlocksKnownGaps(unittest.TestCase):
-    """NashSU behaviors the skill does NOT yet match. expectedFailure = tracked gap.
+class TestParseFileBlocksTolerantMarkers(unittest.TestCase):
+    """Marker/fence tolerance closed 2026-06-19 to reach NashSU parity.
 
-    Closing any of these (in `_core.parse_file_blocks`) will turn the case into an
-    "unexpected success" — at which point delete the decorator.
+    These four cases were previously tracked as `expectedFailure` gaps. The fixes
+    (case-insensitive + whitespace-tolerant FILE/END markers, CommonMark
+    fence-length tracking in `_core.parse_file_blocks`) made them pass, so the
+    decorators were removed. A regression now fails normally here.
     """
 
-    @unittest.expectedFailure
     def test_tolerates_inner_spaces_in_end_marker(self):
-        # NashSU accepts `--- END FILE ---`; skill's END_FILE_RE requires exact
-        # `---END FILE---`. The skill returns 1 block ONLY via its unclosed-block
-        # flush, so the unrecognized marker line leaks into the body — that is the gap.
+        # NashSU CLOSER_LINE accepts `--- END FILE ---` (interior whitespace).
         text = "---FILE: wiki/concepts/foo.md---\nbody\n--- END FILE ---\n"
         b = _core.parse_file_blocks(text)
         self.assertEqual(len(b), 1)
         self.assertNotIn("END FILE", b[0][1])  # marker must not bleed into content
 
-    @unittest.expectedFailure
     def test_tolerates_lowercase_end_marker(self):
-        # NashSU accepts `---end file---` (case-insensitive); skill is uppercase-only,
-        # so the marker leaks into the body (block survives only via flush).
+        # NashSU CLOSER_LINE is case-insensitive — `---end file---` closes the block.
         text = "---FILE: wiki/concepts/foo.md---\nbody\n---end file---\n"
         b = _core.parse_file_blocks(text)
         self.assertEqual(len(b), 1)
         self.assertNotIn("end file", b[0][1].lower())
 
-    @unittest.expectedFailure
     def test_tolerates_spaces_after_leading_dashes_in_opener(self):
-        # NashSU accepts `--- FILE: path ---`; skill's FILE_HEADER_RE requires `---FILE:`.
+        # NashSU OPENER_LINE accepts `--- FILE: path ---` (space after the dashes).
         text = "--- FILE: wiki/concepts/foo.md ---\nbody\n---END FILE---\n"
         self.assertEqual(len(_core.parse_file_blocks(text)), 1)
 
-    @unittest.expectedFailure
     def test_commonmark_nested_length_fences(self):
-        # CommonMark: a 3-tick fence must NOT close a 4-tick opener. The skill's
-        # FENCE_RE `^(```|~~~)` collapses 4-tick and 3-tick to the same marker,
-        # so the inner ``` wrongly pops the stack and the real content is dropped.
+        # CommonMark: a 3-tick fence must NOT close a 4-tick opener. FENCE_RE now
+        # tracks the fence char + run length, so the inner ``` stays as body.
         text = "\n".join([
             "---FILE: wiki/concepts/foo.md---",
             "````markdown", "```", "---END FILE---", "```", "````", "",
