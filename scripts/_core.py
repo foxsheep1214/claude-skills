@@ -655,9 +655,14 @@ def parse_file_blocks(response: str) -> list[tuple[str, str]]:
     # code fences so ---END FILE--- inside a code block doesn't close the outer block.
     # Accept both ---FILE:wiki/concepts/X.md--- (correct) and
     # ---FILE:concepts/X.md--- (LLM forgot wiki/ prefix; auto-correct strips it either way)
-    FILE_HEADER_RE = re.compile(r'^---FILE:\s*(wiki/)?(.+?)\s*---\s*$')
-    END_FILE_RE = re.compile(r'^---END FILE---\s*$')
-    FENCE_RE = re.compile(r'^(```|~~~)')
+    # NashSU parity (ingest.ts L263-264, L331): markers are case-insensitive and
+    # tolerant of interior whitespace (`--- END FILE ---`, `---end file---`,
+    # `--- FILE: path ---`). Fence delimiters follow CommonMark: 3+ backticks or
+    # tildes, ≤3 leading spaces; a fence closes only on the SAME char repeated at
+    # least as many times, so a 3-tick run can't close a 4-tick opener.
+    FILE_HEADER_RE = re.compile(r'^---\s*FILE:\s*(wiki/)?(.+?)\s*---\s*$', re.IGNORECASE)
+    END_FILE_RE = re.compile(r'^---\s*END\s+FILE\s*---\s*$', re.IGNORECASE)
+    FENCE_RE = re.compile(r'^\s{0,3}(`{3,}|~{3,})')
 
     # Known wiki subdirectories (must match WIKI_TYPE_DIRS)
     _KNOWN_SUBDIRS = (
@@ -666,24 +671,31 @@ def parse_file_blocks(response: str) -> list[tuple[str, str]]:
     )
 
     lines = response.split("\n")
-    fence_stack: list[str] = []  # track open fence markers
+    fence_marker: str | None = None  # the fence CHAR currently open ('`' or '~')
+    fence_len = 0                    # its run length (CommonMark close rule)
     current_path: str | None = None
     current_lines: list[str] = []
 
     for line in lines:
-        # Track CommonMark code fences (still add the line to content)
+        # Track CommonMark code fences (still add the line to content).
+        # A fence closes only on the SAME char repeated at least as many times,
+        # so a 3-tick run inside a 4-tick block doesn't truncate the page.
         is_fence_line = False
         fm = FENCE_RE.match(line)
         if fm:
-            marker = fm.group(1)
-            if not fence_stack:
-                fence_stack.append(marker)
-            elif fence_stack[-1] == marker:
-                fence_stack.pop()
+            run = fm.group(1)
+            char = run[0]
+            length = len(run)
+            if fence_marker is None:
+                fence_marker = char
+                fence_len = length
+            elif char == fence_marker and length >= fence_len:
+                fence_marker = None
+                fence_len = 0
             is_fence_line = True
 
         # Only match FILE/END FILE headers outside fences
-        if not fence_stack and not is_fence_line:
+        if fence_marker is None and not is_fence_line:
             end_match = END_FILE_RE.match(line)
             if end_match and current_path is not None:
                 content = "\n".join(current_lines).rstrip() + "\n"
