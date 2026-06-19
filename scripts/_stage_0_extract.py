@@ -961,6 +961,24 @@ def extract_text_scanned_pdf(file_path: Path, config: Config) -> str:
     total_imgs = sum(len(v) for v in stats.get("images", {}).values())
     print(f"[ocr] Done — {len(full_text):,} chars OCR text, {total_imgs} images extracted")
 
+    # Write manifest for scanned page images so Stage 3.5 can find them
+    slug = _media_slug(file_path, config)
+    media_dir = config.wiki_dir / "media" / slug
+    manifest_path = media_dir / "_manifest.json"
+    all_page_imgs = []
+    for f in sorted(media_dir.glob("p*.jpg")):
+        all_page_imgs.append({
+            "filename": f.name, "page": 0, "path": str(f.relative_to(config.wiki_root)),
+        })
+    if all_page_imgs:
+        _write_manifest(manifest_path, "mineru-ocr", file_path, all_page_imgs)
+        print(f"[ocr] Wrote manifest: {len(all_page_imgs)} page images")
+
+        # Run captioning on scanned page images
+        pending = _find_uncaptioned_mineru_images(media_dir)
+        if pending and config.caption_api_key:
+            _caption_images(pending, config, media_dir, source_label="minerU-scanned", batch_size=6)
+
     return full_text
 
 
