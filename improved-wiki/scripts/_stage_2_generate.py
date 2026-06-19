@@ -1238,9 +1238,9 @@ Example:
 ---END FILE---
 
 # Instructions
-- Your FIRST line MUST be `---FILE:wiki/sources/{source_rel}.md---`
+- Your FIRST line MUST be `---FILE:wiki/sources/{source_rel}.md---`, immediately followed by `---` (frontmatter start) on the NEXT line with NO blank line in between
 - Your LAST line MUST be `---END FILE---`
-- The frontmatter MUST use real data from the digest. DO NOT wrap frontmatter in ``` fences.
+- The frontmatter MUST use real data from the digest. NO ``` fences. NO blank lines before frontmatter.
 - Do NOT add extra sections beyond the 3 listed above. Link to concepts via [[wikilinks]].
 - tags: 3-8 relevant tags (do NOT leave empty)
 - related: 2-5 related wiki page slugs
