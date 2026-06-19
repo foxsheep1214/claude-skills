@@ -2,6 +2,8 @@
 
 2026-06-11 第一次 HardwareWiki 电源篇图 captioning 时摸出来的具体非平凡经验。每个 pitfall 都有验证记录。
 
+> **round ii 澄清 (2026-06-20)**：本技能的视觉任务分工是——**图片 caption（Stage 0.6）走 MiniMax VLM**（`anthropic/v1/messages` 多图批量，需 `MINIMAX_CN_API_KEY`）；**OCR / 文档 VLM 解析（Phase 0）走本地 minerU**（免费，`vlm-engine` 后端）。本文件历史上有几处把 MiniMax 的多图批量叫做"OCR"——那是早期对"figure 图片描述"的口语叫法，实际都是 **caption**。真正的文本 OCR 自始至终是本地 minerU。读下方 endpoint 矩阵 / 决策树时，把"OCR/caption"里的 OCR 部分理解为 caption 即可。
+
 ---
 
 ## Pitfall 1: macOS M3 跑 Qwen2-VL 缺 3 个包
@@ -156,7 +158,7 @@ req = urllib.request.Request(
 
 | endpoint | 多图支持 | auth header | 适用 |
 |---|---|---|---|
-| `https://api.minimaxi.com/anthropic/v1/messages` | ✅ 单请求 content blocks 数组（Anthropic 协议原生）| `Authorization: Bearer<key>` 或 `x-api-key: <key>`（均可用） | **OCR / caption 批量任务（首选）** |
+| `https://api.minimaxi.com/anthropic/v1/messages` | ✅ 单请求 content blocks 数组（Anthropic 协议原生）| `Authorization: Bearer<key>` 或 `x-api-key: <key>`（均可用） | **caption 批量任务（首选；OCR/文档解析走本地 minerU，不用此 endpoint）** |
 | `https://api.minimaxi.com/v1/coding_plan/vlm` | ❌ 只支持单图（`image_url` 必须是单字符串，不能传数组）| `Authorization: Bearer<key>` | mmx CLI 内部用 / 单图 sequential |
 
 **常见错配 → 错误对照**：
@@ -178,12 +180,12 @@ req = urllib.request.Request(
 ## 综合 Pipeline 决策树
 
 ```
-MiniMax M3 跑 OCR/caption?  (直接 HTTP，anthropic 协议)
+MiniMax M3 跑 caption?  (直接 HTTP，anthropic 协议；OCR/文档 VLM 解析走本地 minerU)
 ├─ < 50 张 → 单图单请求即可
 ├─ 50-1000 张 → 单请求 5-8 图批量（省 60%+ 时间，ingest.py `_caption_images()` 自动并行）
 └─ > 1000 张 + 不急 → Anthropic Message Batches（50% 折扣）
 
-mmx CLI 跑 OCR/caption?  (MiniMax CN 国内端，sequential)
+mmx CLI 跑 caption?  (MiniMax CN 国内端，sequential；mmx = MiniMax，只做 caption)
 ├─ < 50 张 → mmx vision describe --image foo.jpg --prompt "..."（~24 sec/图，含 CLI 启动）
 ├─ 50-300 张 → mmx CLI 可容忍，但 20-120 min 总耗时
 └─ > 300 张 → 不要用 mmx CLI，切到 HTTP batching（除非用户明确指定 mmx）
