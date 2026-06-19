@@ -65,7 +65,7 @@ def _find_media_for_source(source_path: Path, wiki_root: Path) -> Optional[tuple
         if src_match:
             raw_files = re.findall(r'"([^"]+)"', src_match.group(1))
             for rf in raw_files:
-                # raw/book/xxx.pdf → slug = book/xxx
+                # raw/Book/xxx.pdf → slug = book/xxx
                 parts = rf.split("/", 1)
                 if len(parts) >= 2:
                     type_dir = parts[0]  # book / datasheet / paper

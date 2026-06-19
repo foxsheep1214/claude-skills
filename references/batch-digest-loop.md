@@ -48,7 +48,7 @@ PDF paths and a parallelism limit directly on the command line.
 
 ```bash
 python3 ~/.agents/skills/improved-wiki/scripts/ingest.py \
-  ~/Documents/知识库/HardwareWiki/raw/book/*.pdf \
+  ~/Documents/知识库/HardwareWiki/raw/Book/*.pdf \
   --parallel 4
 ```
 
@@ -121,7 +121,7 @@ print(f"DONE: {success} OK, {failed} failed, {total} total")
 - **API key**: Set `LLM_API_KEY` (or `MINIMAX_CN_API_KEY`) in environment.
   `ingest.py` reads from `~/.agents/config.json` first, env vars as fallback.
 - **Project root**: `IMPROVED_WIKI_ROOT` must point to the project root
-  (e.g., `~/Documents/知识库/HardwareWiki`), not `raw/book/`.
+  (e.g., `~/Documents/知识库/HardwareWiki`), not `raw/Book/`.
 
 ## Running
 

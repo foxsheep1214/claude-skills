@@ -1,6 +1,6 @@
 # digest-applicationnote.md — Ingest template for vendor application notes
 
-> **Use this template** when a file lives at `raw/ApplicationNote/<...>/*.pdf`.
+> **Use this template** when a file lives at `raw/Applicationnote/<...>/*.pdf`.
 > App notes (TI SLVAxxx, ADI CN-xxxx, etc.) are "how to design X" documents. Focus on the design procedure, calculations, and worked example. Often pairs with a datasheet (cross-ref).
 
 ---

@@ -1,6 +1,6 @@
 # digest-datasheet.md — Ingest template for component datasheets
 
-> **Use this template** when a file lives at `raw/datasheet/<...>/*.pdf`.
+> **Use this template** when a file lives at `raw/Datasheet/<...>/*.pdf`.
 > Datasheets are heavily structured (tables, figures, pinouts). The Ingest focuses on extracting the "key specs" table, electrical characteristics, and typical application topology. The output is a source page + a few concepts + ALWAYS an entity page for the part number.
 
 ---

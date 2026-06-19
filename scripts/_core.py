@@ -305,14 +305,14 @@ class Config:
 # ── File-type detection ──
 
 FOLDER_TO_TEMPLATE = {
-    "book": "digest-book",
-    "paper": "digest-paper",
-    "datasheet": "digest-datasheet",
-    "applicationnote": "digest-applicationnote",
-    "designexample": "digest-designexample",
-    "presentation": "digest-presentation",
-    "standard": "digest-standard",
-    "news": "digest-news",
+    "Book": "digest-book",
+    "Paper": "digest-paper",
+    "Datasheet": "digest-datasheet",
+    "Applicationnote": "digest-applicationnote",
+    "Designexample": "digest-designexample",
+    "Presentation": "digest-presentation",
+    "Standard": "digest-standard",
+    "News": "digest-news",
 }
 
 
@@ -344,14 +344,18 @@ def detect_template_type(raw_file: Path, raw_root: Path, override: str | None) -
     if len(parts) == 1:
         return "digest-book"
     folder = parts[0]
+    # Case-insensitive lookup: "book" → "Book", "BOOK" → "Book"
+    folder_lower = folder.lower()
+    FOLDER_LOWER_MAP = {k.lower(): k for k in FOLDER_TO_TEMPLATE}
+    if folder_lower in FOLDER_LOWER_MAP:
+        return FOLDER_TO_TEMPLATE[FOLDER_LOWER_MAP[folder_lower]]
     if folder == "sources":
         if len(parts) >= 3:
             type_part = parts[1]
-            if type_part in FOLDER_TO_TEMPLATE:
-                return FOLDER_TO_TEMPLATE[type_part]
+            type_lower = type_part.lower()
+            if type_lower in FOLDER_LOWER_MAP:
+                return FOLDER_TO_TEMPLATE[FOLDER_LOWER_MAP[type_lower]]
         return "digest-book"
-    if folder in FOLDER_TO_TEMPLATE:
-        return FOLDER_TO_TEMPLATE[folder]
     available = sorted(FOLDER_TO_TEMPLATE.keys())
     match = min(available, key=lambda a: str_distance(folder, a))
     print(f"[detect] Unknown raw folder '{folder}' — treating as '{match}' "

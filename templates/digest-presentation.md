@@ -1,6 +1,6 @@
 # digest-presentation.md — Ingest template for slide decks
 
-> **Use this template** when a file lives at `raw/presentation/<...>/*.pdf`.
+> **Use this template** when a file lives at `raw/Presentation/<...>/*.pdf`.
 > Presentations (conference talks, internal reviews) are slide-by-slide. Output a per-slide summary plus a single key-claims / concepts extraction. Lighter than a book or paper.
 
 ---

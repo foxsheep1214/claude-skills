@@ -1398,7 +1398,7 @@ def _queue_entry_to_file(entry: dict, config: Config) -> Path | None:
     sp = entry.get("sourcePath", "")
     if not sp:
         return None
-    # sourcePath is like "raw/book/foo.pdf"
+    # sourcePath is like "raw/Book/foo.pdf"
     if sp.startswith("raw/"):
         sp = sp[4:]
     full = (config.raw_root / sp).expanduser().resolve()

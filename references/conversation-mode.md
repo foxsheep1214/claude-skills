@@ -28,7 +28,7 @@ Handled automatically by `ingest.py` Stage 0.5. For standalone use:
 python3 -c "
 from ingest import stage_0_5_extract_images, Config
 config = Config.from_env()
-stage_0_5_extract_images(Path('raw/book/Book.pdf'), config)
+stage_0_5_extract_images(Path('raw/Book/Book.pdf'), config)
 "
 ```
 
@@ -41,7 +41,7 @@ stage_0_5_extract_images(Path('raw/book/Book.pdf'), config)
 ```python
 import fitz
 
-doc = fitz.open("raw/book/Book.pdf")
+doc = fitz.open("raw/Book/Book.pdf")
 text = "\n\n".join(page.get_text() for page in doc)
 doc.close()
 
@@ -245,7 +245,7 @@ created: 2026-06-11
 updated: 2026-06-11
 tags: [...]
 related: []
-sources: ["raw/book/书名.pdf"]
+sources: ["raw/Book/书名.pdf"]
 ---
 
 # 标题
@@ -261,7 +261,7 @@ created: 2026-06-11
 updated: 2026-06-11
 tags: [...]
 related: [wiki/sources/书名.md, wiki/concepts/相关概念.md]
-sources: ["raw/book/书名.pdf"]
+sources: ["raw/Book/书名.pdf"]
 ---
 
 # 概念名

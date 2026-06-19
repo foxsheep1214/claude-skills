@@ -1,6 +1,6 @@
 # digest-designexample.md — Ingest template for reference designs
 
-> **Use this template** when a file lives at `raw/DesignExample/<...>/*.pdf`.
+> **Use this template** when a file lives at `raw/Designexample/<...>/*.pdf`.
 > Reference designs (TI PMPxxxx, ADI EVAL-xxx) are "complete circuit + BOM + measurement" documents. Focus on the topology, key components, design tradeoffs, and measured performance.
 
 ---

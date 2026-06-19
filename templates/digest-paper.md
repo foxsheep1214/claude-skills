@@ -1,6 +1,6 @@
 # digest-paper.md — Ingest template for academic / industry papers
 
-> **Use this template** when a file lives at `raw/paper/<...>/*.pdf`.
+> **Use this template** when a file lives at `raw/Paper/<...>/*.pdf`.
 > Differs from `digest-book.md` only in: (1) lighter output (2-5 concepts vs 10-50), (2) no chapter structure, (3) focuses on methodology + results + comparison to related work.
 
 ---
@@ -142,7 +142,7 @@ File contents in order:
 
 - **`paper_type: "whitepaper"`** — vendor whitepapers (TI, ADI, Maxim) often mix marketing with technical content. Treat the technical section as the "methodology", treat the marketing claims with appropriate skepticism in `key_claims`.
 - **`paper_type: "preprint"`** — flag the venue as unverified. Note in the source page that this is a preprint, not peer-reviewed.
-- **`topic_subfolder`** — this is the *destination* in the wiki, NOT the source folder. The pipeline reads it from the second-level folder under `raw/paper/`. Use it to assign the source page to the right wiki section (e.g. `wiki/sources/paper/02_硬件电路设计/<file>.md` if the paper is about hardware circuit design).
+- **`topic_subfolder`** — this is the *destination* in the wiki, NOT the source folder. The pipeline reads it from the second-level folder under `raw/Paper/`. Use it to assign the source page to the right wiki section (e.g. `wiki/sources/Paper/02_硬件电路设计/<file>.md` if the paper is about hardware circuit design).
 
 ---
 

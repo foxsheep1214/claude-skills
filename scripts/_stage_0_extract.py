@@ -1389,8 +1389,8 @@ def stage_0_5_extract_images(raw_file: Path, config: Config, min_size: int = 100
 def _raw_type_subdir(raw_file: Path, config: Config) -> str:
     """Return the raw/-relative parent directory for this file.
 
-    raw/book/Foo.pdf           → book
-    raw/datasheet/05_AMP/Bar.pdf → datasheet/05_AMP
+    raw/Book/Foo.pdf           → book
+    raw/Datasheet/05_AMP/Bar.pdf → datasheet/05_AMP
     """
     try:
         rel = raw_file.relative_to(config.raw_root)
@@ -1403,8 +1403,8 @@ def _raw_type_subdir(raw_file: Path, config: Config) -> str:
 def _media_slug(raw_file: Path, config: Config) -> str:
     """Derive media directory path from raw file path, mirroring raw/ structure.
 
-    raw/book/Foo.pdf           → book/Foo
-    raw/datasheet/05_AMP/Bar.pdf → datasheet/05_AMP/Bar
+    raw/Book/Foo.pdf           → book/Foo
+    raw/Datasheet/05_AMP/Bar.pdf → datasheet/05_AMP/Bar
     """
     try:
         rel = raw_file.relative_to(config.raw_root)

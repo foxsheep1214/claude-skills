@@ -11,9 +11,9 @@ This guide is the "first run" recipe for getting `improved-wiki` working on a br
 PROJECT=~/Documents/知识库/MyNewWiki
 mkdir -p $PROJECT/wiki/{sources,concepts,entities,queries,comparisons,findings,synthesis,media,thesis}
 # Mandatory 3 — every knowledge base needs these:
-mkdir -p $PROJECT/raw/{book,paper,presentation}
-# Optional — add per domain (HardwareWiki: datasheet/ApplicationNote/DesignExample; RadarWiki: standard; etc.):
-# mkdir -p $PROJECT/raw/{datasheet,ApplicationNote,DesignExample,standard,news}
+mkdir -p $PROJECT/raw/{Book,Paper,Presentation}
+# Optional — add per domain (HardwareWiki: Datasheet/Applicationnote/Designexample; RadarWiki: Standard; etc.):
+# mkdir -p $PROJECT/raw/{Datasheet,Applicationnote,Designexample,Standard,News}
 cd $PROJECT
 
 # 2. Copy the 4 anchor files from the skill's templates/
@@ -26,17 +26,17 @@ cp $SKILL_DIR/references/templates/overview.md  ./wiki/overview.md
 # 3. (raw/ subfolders already created in step 1)
 
 # 4. Drop your first batch of source files into raw/<type>/
-#    e.g. raw/book/My Book - 2024 - Author.pdf
+#    e.g. raw/Book/My Book - 2024 - Author.pdf
 
 # 5. Set the env var for the LLM API (do NOT commit this)
 export LLM_API_KEY=***
 export IMPROVED_WIKI_ROOT=$(pwd)
 
 # 6. Dry-run to verify detection
-$SKILL_DIR/scripts/ingest.py raw/book/My\ Book\ -\ 2024\ -\ Author.pdf --dry-run
+$SKILL_DIR/scripts/ingest.py raw/Book/My\ Book\ -\ 2024\ -\ Author.pdf --dry-run
 
 # 7. Process the first file for real
-$SKILL_DIR/scripts/ingest.py raw/book/My\ Book\ -\ 2024\ -\ Author.pdf
+$SKILL_DIR/scripts/ingest.py raw/Book/My\ Book\ -\ 2024\ -\ Author.pdf
 
 # 8. Inspect the output
 ls wiki/sources/
@@ -67,9 +67,9 @@ cd ~/Documents/知识库/MyWiki
 
 # Move sources into the new layout (per SKILL.md §12.1)
 mkdir -p raw
-mv raw/sources/book/*  raw/book/
-mv raw/sources/paper/* raw/paper/
-mv raw/sources/*/*.pdf raw/book/  # top-level PDFs
+mv raw/sources/book/*  raw/Book/
+mv raw/sources/paper/* raw/Paper/
+mv raw/sources/*/*.pdf raw/Book/  # top-level PDFs
 rm -rf raw/sources
 # ... adjust per your situation
 ```
@@ -108,7 +108,7 @@ After setup, the following should all be true:
 
 ```bash
 # Check 1: dry-run finds the file and reports the template
-$SKILL_DIR/scripts/ingest.py raw/book/X.pdf --dry-run
+$SKILL_DIR/scripts/ingest.py raw/Book/X.pdf --dry-run
 # Expected: prints "DRY RUN: would process X" and "template: digest-book"
 
 # Check 2: the wiki anchor files exist

@@ -42,7 +42,7 @@ But the **error message** still doesn't list recognized folders or suggest overr
 
 > **Symptom**: When a file is in a folder the script doesn't recognize, the error is `ValueError: Unknown raw folder 'sources'. Add to FOLDER_TO_TEMPLATE or set IMPROVED_WIKI_TYPE.`
 > 
-> **Why this matters**: the LLM Wiki app (NashSU) uses a different layout — `raw/sources/book/X.pdf` instead of `raw/book/X.pdf`. If the user has both kinds of projects, this error fires constantly and the user has to google the FOLDER_TO_TEMPLATE mapping.
+> **Why this matters**: the LLM Wiki app (NashSU) uses a different layout — `raw/sources/book/X.pdf` instead of `raw/Book/X.pdf`. If the user has both kinds of projects, this error fires constantly and the user has to google the FOLDER_TO_TEMPLATE mapping.
 > 
 > **One-line fix** (in `scripts/ingest.py`, the `detect_template_type` function): replace the `raise ValueError` block with one that:
 > 1. Lists all recognized first-level folders

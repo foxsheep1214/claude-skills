@@ -22,7 +22,7 @@ The key insight: **in Claude Code, the conversation IS the chat.** No separate U
 ### Step 0: Invocation
 
 ```
-User: /improved-wiki chat-ingest raw/book/Book.pdf
+User: /improved-wiki chat-ingest raw/Book/Book.pdf
 ```
 
 Or with a wiki project context:
@@ -37,13 +37,13 @@ Claude runs the same Stage 0 as auto-ingest:
 
 ```bash
 # Text extraction + PDF type detection (stops after Stage 0.5)
-python3 scripts/ingest.py raw/book/Book.pdf --stop-after-stage 0.5
+python3 scripts/ingest.py raw/Book/Book.pdf --stop-after-stage 0.5
 
 # Image extraction (stops after Stage 0.6)
-python3 scripts/ingest.py raw/book/Book.pdf --stop-after-stage 0.6
+python3 scripts/ingest.py raw/Book/Book.pdf --stop-after-stage 0.6
 
 # Image captioning (stops after Stage 0.6)
-python3 scripts/ingest.py raw/book/Book.pdf --stop-after-stage 0.6
+python3 scripts/ingest.py raw/Book/Book.pdf --stop-after-stage 0.6
 ```
 
 These are I/O operations — no LLM reasoning needed, no reason to involve the user.

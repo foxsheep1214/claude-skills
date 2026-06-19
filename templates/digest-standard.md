@@ -1,6 +1,6 @@
 # digest-standard.md — Ingest template for industry standards
 
-> **Use this template** when a file lives at `raw/standard/<...>/*.pdf`.
+> **Use this template** when a file lives at `raw/Standard/<...>/*.pdf`.
 > Standards (IEEE, IEC, MIL-STD, GB) are formal normative documents. Focus on clause structure, definitions, and conformance criteria. Often produces many "term" pages.
 
 ---

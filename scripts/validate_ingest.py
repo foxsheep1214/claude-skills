@@ -72,7 +72,8 @@ def find_cache_entry(slug: str) -> Optional[dict]:
     slug_norm = slug.strip().lower().replace(" ", "")
     for k, v in entries.items():
         # Strip book/, paper/, etc. prefix and .pdf suffix
-        key_norm = re.sub(r'^(book|paper|datasheet|ApplicationNote|DesignExample|presentation|standard|news)/', '', k)
+        # Case-insensitive: handles both old lowercase and new Titlecase dir names
+        key_norm = re.sub(r'^(book|paper|datasheet|applicationnote|designexample|presentation|standard|news)/', '', k, flags=re.IGNORECASE)
         key_norm = re.sub(r'\.(pdf|pptx|docx)$', '', key_norm)
         key_norm = key_norm.strip().lower().replace(" ", "")
         if slug_norm in key_norm or key_norm in slug_norm:
