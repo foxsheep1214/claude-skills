@@ -80,7 +80,7 @@ export CAPTION_MAX_WORKERS=8    # more parallel workers
 Direct call from Python (e.g., to repair failed captions for a specific book):
 ```python
 from ingest import _caption_images
-media_dir = Path("wiki/media/book/Some Book - 2024 - Author")
+media_dir = Path("wiki/media/Book/Some Book - 2024 - Author")
 images = [{"filename": f.name, "page": 0, "width": 0, "height": 0}
           for f in sorted(media_dir.iterdir())
           if f.suffix.lower() in ('.png', '.jpg', '.jpeg')]

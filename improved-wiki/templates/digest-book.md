@@ -1,6 +1,6 @@
 # digest-book.md — Ingest template for full-length books
 
-> **Use this template** when a file lives at `raw/book/<Title> - <Year> - <Author>.pdf`.
+> **Use this template** when a file lives at `raw/Book/<Title> - <Year> - <Author>.pdf`.
 > **The pipeline auto-selects** based on the first-level folder, but you can override with `--template=book`.
 
 ---
@@ -62,11 +62,11 @@ chunk_plan:
 The LLM takes the analysis and writes these files:
 
 1. **`wiki/sources/<Title> - <Year> - <Author>.md`** — the source page
-   - Frontmatter: `type: source`, `title`, `created`, `updated`, `tags`, `related: []`, `sources: ["raw/book/<file>.pdf"]`
+   - Frontmatter: `type: source`, `title`, `created`, `updated`, `tags`, `related: []`, `sources: ["raw/Book/<file>.pdf"]`
    - Body: book metadata table, chapter outline, summary, key claims, reading notes, "参见" with all new concept/entity pages
 
 2. **`wiki/concepts/<slug>.md`** — one page per key concept (10-50 expected for a book)
-   - Frontmatter: `type: concept`, `title`, `created`, `updated`, `tags`, `related: [...]`, `sources: ["raw/book/<file>.pdf"]`
+   - Frontmatter: `type: concept`, `title`, `created`, `updated`, `tags`, `related: [...]`, `sources: ["raw/Book/<file>.pdf"]`
    - Body: definition, derivation/algorithm, examples, "参见" with 3+ related pages
 
 3. **`wiki/entities/<slug>.md`** — one page per key entity

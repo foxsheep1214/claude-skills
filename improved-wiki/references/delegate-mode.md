@@ -19,7 +19,7 @@ When invoking improved-wiki from an agent (Claude Code, Hermes, etc.), use **del
 
 ```bash
 cd /path/to/wiki/project
-scripts/ingest.py raw/book/Book.pdf --delegate
+scripts/ingest.py raw/Book/Book.pdf --delegate
 ```
 
 **Output:** JSON with delegate task + checkpoint path
@@ -70,7 +70,7 @@ scripts/ingest.py \
 
 ```bash
 # Agent starts
-ingest.py raw/book/Book.pdf --delegate
+ingest.py raw/Book/Book.pdf --delegate
 # → exits 101, outputs phase1 task
 
 # Agent executes Phase 1

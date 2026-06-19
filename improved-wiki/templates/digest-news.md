@@ -1,6 +1,6 @@
 # digest-news.md — Ingest template for web clips and news articles
 
-> **Use this template** when a file lives at `raw/news/<...>/*.md` (or `.pdf` for archived articles).
+> **Use this template** when a file lives at `raw/News/<...>/*.md` (or `.pdf` for archived articles).
 > News and web clips are short-lived, low-effort. Output should be 1 source page + 0-2 concept pages. Mark `status: outdated` after 6 months via a periodic Lint pass.
 
 ---

@@ -37,7 +37,7 @@
 ### 示例对话流
 
 ```
-用户: 我加了几个文件到 raw/datasheet/05_放大器/，帮我改名
+用户: 我加了几个文件到 raw/Datasheet/05_放大器/，帮我改名
 Skill: 检查最近 30 分钟内新增的文件... 找到 3 个：
         ❌ LM358.pdf → TI - LM358.pdf
         ❌ opa2134.pdf → TI - OPA2134.pdf
@@ -46,7 +46,7 @@ Skill: 检查最近 30 分钟内新增的文件... 找到 3 个：
 ```
 
 ```
-用户: 我传了本书到 raw/book/
+用户: 我传了本书到 raw/Book/
 Skill: 检查 raw/NAMING.md... 不存在。
       raw/ 目前有这些文件夹：
         book/ (98 files), datasheet/ (236 files), paper/ (0 files)
@@ -60,7 +60,7 @@ Skill: 检查 raw/NAMING.md... 不存在。
 
 - 通用规则（分隔符、禁止字符）
 - 每种 raw 子目录的命名格式（含正例/反例）
-- Vendor 简称表（如果项目有 datasheet/ApplicationNote 等）
+- Vendor 简称表（如果项目有 Datasheet/Applicationnote 等）
 
 ## normalize_raw_names.py 约定
 

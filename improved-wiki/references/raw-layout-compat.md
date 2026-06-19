@@ -6,7 +6,7 @@ The `improved-wiki` pipeline auto-detects which of three `raw/` layouts your pro
 
 | Layout | Path shape | Example | Detected as |
 |---|---|---|---|
-| A. improved-wiki default | `raw/<type>/<topic>/<file>` | `raw/book/control/Automatic Control Systems - 2007 - Kuo.pdf` | type=book |
+| A. improved-wiki default | `raw/<type>/<topic>/<file>` | `raw/Book/control/Automatic Control Systems - 2007 - Kuo.pdf` | type=book |
 | B. LLM Wiki app legacy | `raw/sources/<type>/<file>` | `raw/sources/oldbook/file.pdf` | type=oldbook (or "book" if folder name not in `FOLDER_TO_TEMPLATE`) |
 | C. Flat (no type folder) | `raw/sources/<file>` | `raw/sources/Stoica.pdf` | type=book + warning |
 
@@ -86,14 +86,14 @@ If your project uses a layout the script doesn't handle, edit `FOLDER_TO_TEMPLAT
 
 ```python
 FOLDER_TO_TEMPLATE = {
-    "book": "digest-book.md",
-    "paper": "digest-paper.md",
-    "datasheet": "digest-datasheet.md",
-    "ApplicationNote": "digest-applicationnote.md",
-    "DesignExample": "digest-designexample.md",
-    "presentation": "digest-presentation.md",
-    "standard": "digest-standard.md",
-    "news": "digest-news.md",
+    "Book": "digest-book.md",
+    "Paper": "digest-paper.md",
+    "Datasheet": "digest-datasheet.md",
+    "Applicationnote": "digest-applicationnote.md",
+    "Designexample": "digest-designexample.md",
+    "Presentation": "digest-presentation.md",
+    "Standard": "digest-standard.md",
+    "News": "digest-news.md",
     "myCustomType": "digest-mycustom.md",   # ← add yours here
 }
 

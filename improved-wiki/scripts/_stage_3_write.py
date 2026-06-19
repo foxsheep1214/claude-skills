@@ -156,7 +156,7 @@ def _auto_correct_wiki_path(rel_path: str, content: str, config: Config | None =
         parts = rel_path.split("/")
         if len(parts) >= 2:
             # Case: 4+ part path — LLM added extra nesting
-            # wiki/sources/book/Title → sources/book/Title.md (keep type subdir, aligns with raw/)
+            # wiki/sources/Book/Title → sources/book/Title.md (keep type subdir, aligns with raw/)
             # wiki/concepts/topic/Title → concepts/Title.md (flatten — concepts have no subdirs)
             # wiki/entities/category/Name → entities/Name.md (flatten — entities have no subdirs)
             if len(parts) >= 4:

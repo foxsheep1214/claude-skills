@@ -47,8 +47,8 @@ raw/
     ├── book/
     ├── paper/
     ├── datasheet/
-    ├── ApplicationNote/
-    ├── DesignExample/
+    ├── Applicationnote/
+    ├── Designexample/
     ├── presentation/
     ├── standard/
     └── news/
@@ -87,11 +87,11 @@ wiki/sources/<raw-rel-path>.md
 
 ```
 # 示例
-raw/book/Free_Energy_Principle - 2025 - Proulx.pdf
-→ wiki/sources/book/Free_Energy_Principle - 2025 - Proulx.md
+raw/Book/Free_Energy_Principle - 2025 - Proulx.pdf
+→ wiki/sources/Book/Free_Energy_Principle - 2025 - Proulx.md
 
-raw/datasheet/ADI/ADL8113.pdf
-→ wiki/sources/datasheet/ADI/ADL8113.md
+raw/Datasheet/ADI/ADL8113.pdf
+→ wiki/sources/Datasheet/ADI/ADL8113.md
 ```
 
 ### 2.2 Concept / Entity / 其他页面
@@ -193,7 +193,7 @@ authors: [name1, name2]
 year: 2025
 url: ""
 venue: ""
-sources: ["raw/book/原文件.pdf"]
+sources: ["raw/Book/原文件.pdf"]
 ```
 
 ### 4.3 Finding 页面额外字段
@@ -224,8 +224,8 @@ wiki/media/<raw_subpath>/<source_stem>/
 ```
 
 **规则**：media/ 目录结构镜像 raw/ 结构，与 sources/ 对齐：
-- `raw/book/Foo.pdf` → `wiki/media/book/Foo/`
-- `raw/datasheet/05_AMP/ADL8113.pdf` → `wiki/media/datasheet/05_AMP/ADL8113/`
+- `raw/Book/Foo.pdf` → `wiki/media/Book/Foo/`
+- `raw/Datasheet/05_AMP/ADL8113.pdf` → `wiki/media/Datasheet/05_AMP/ADL8113/`
 
 `_media_slug()` 返回 raw 文件相对于 `raw/` 的父目录 + stem。
 
