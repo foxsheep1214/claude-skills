@@ -270,15 +270,31 @@ def main() -> int:
         print(f"  first 500 chars of user_content:\n  {user_content[:500]!r}")
         return 0
 
-    # LLM call
+    # LLM config: env vars override config.json
     api_key = os.environ.get("LLM_API_KEY", "")
+    base_url = os.environ.get("LLM_BASE_URL", "")
+    model = os.environ.get("LLM_MODEL", "")
+
+    if not (api_key and base_url and model):
+        # Read from ~/.agents/config.json (same source as ingest.py)
+        config_path = Path.home() / ".agents" / "config.json"
+        try:
+            if config_path.exists():
+                cfg = json.loads(config_path.read_text(encoding="utf-8"))
+                default = os.environ.get("LLM_PROVIDER") or cfg.get("default", "")
+                provider = cfg.get("providers", {}).get(default, {})
+                if provider:
+                    api_key = api_key or provider.get("api_key", "")
+                    base_url = base_url or provider.get("base_url", "")
+                    model = model or provider.get("models", {}).get("text", provider.get("model", ""))
+        except Exception:
+            pass
+
     if not api_key:
         print("ERROR: LLM_API_KEY not set. Export it (e.g. source ~/.hermes/.env) "
-              "and re-run, or use --dry-run to skip the LLM call.",
+              "or configure ~/.agents/config.json, or use --dry-run to skip the LLM call.",
               file=sys.stderr)
         return 2
-    base_url = os.environ.get("LLM_BASE_URL", "https://api.minimaxi.com")
-    model = os.environ.get("LLM_MODEL", "MiniMax-M3")
 
     print(f"[semantic-lint] Calling LLM ({model} @ {base_url}) ...")
     try:

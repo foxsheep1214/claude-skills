@@ -110,25 +110,25 @@ def load_provider_config(name: str | None = None) -> dict:
         try:
             cfg = json.loads(config_path.read_text(encoding="utf-8"))
             if name is None:
-                default = cfg.get("default", "minimax")
+                default = cfg.get("default", "")
                 name = os.environ.get("LLM_PROVIDER", default)
             provider = cfg.get("providers", {}).get(name)
             if provider:
                 models = provider.get("models", {})
                 return {
                     "api_key": os.environ.get("LLM_API_KEY") or provider.get("api_key", ""),
-                    "base_url": os.environ.get("LLM_BASE_URL") or provider.get("base_url", "https://api.minimaxi.com"),
-                    "model": os.environ.get("LLM_MODEL") or models.get("text", provider.get("model", "MiniMax-M3")),
+                    "base_url": os.environ.get("LLM_BASE_URL") or provider.get("base_url", ""),
+                    "model": os.environ.get("LLM_MODEL") or models.get("text", provider.get("model", "")),
                     "protocol": provider.get("protocol", "anthropic"),
                     "provider": name,
                 }
         except Exception:
             pass
     return {
-        "api_key": os.environ.get("LLM_API_KEY", "") or os.environ.get("MINIMAX_CN_API_KEY", ""),
-        "base_url": os.environ.get("LLM_BASE_URL", "https://api.minimaxi.com"),
-        "model": os.environ.get("LLM_MODEL", "MiniMax-M3"),
-        "protocol": "anthropic",
+        "api_key": os.environ.get("LLM_API_KEY", ""),
+        "base_url": os.environ.get("LLM_BASE_URL", ""),
+        "model": os.environ.get("LLM_MODEL", ""),
+        "protocol": os.environ.get("LLM_PROTOCOL", "anthropic"),
         "provider": "env",
     }
 

@@ -1,7 +1,7 @@
 """LLM API call helpers — extracted from ingest.py (2026-06-18).
 
-Provides retry logic and API call functions for Anthropic-protocol (MiniMax)
-and OpenAI-protocol (DeepSeek, OpenAI) endpoints.
+Provides retry logic and API call functions for Anthropic-protocol
+and OpenAI-protocol endpoints.
 
 All transient errors (5xx, 429, network, timeout, truncated responses) are
 retried with exponential backoff + jitter.  Non-retryable errors (4xx except
@@ -49,7 +49,7 @@ def _is_retryable_http_error(code: int | None) -> bool:
 def _is_retryable_exception(exc: Exception) -> bool:
     """Check whether an exception is plausibly transient.
 
-    Covers MiniMax CN cluster's observed error spectrum:
+    Covers common provider error spectrum:
     HTTP 500/502/503/520/529, 429, ReadTimeout, ConnectError,
     ChunkedEncodingError, JSONDecodeError (truncated response),
     IncompleteRead (truncated chunked response), RemoteDisconnected,
@@ -92,7 +92,7 @@ __all__ = [
 def call_anthropic_api(api_key: str, base_url: str, model: str,
                        prompt: str, max_tokens: int = 4096,
                        timeout: int = 600) -> tuple[str, str]:
-    """Call an Anthropic-protocol API (MiniMax or compatible).
+    """Call an Anthropic-protocol API.
 
     Uses Anthropic Messages API format:
       POST {base_url}/anthropic/v1/messages

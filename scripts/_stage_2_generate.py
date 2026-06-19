@@ -351,7 +351,7 @@ def stage_2_per_chunk_generation(
     all_file_blocks: list[tuple[str, str]] = []
     all_responses: list[str] = []
     generated_slugs: list[str] = []  # accumulates as chunks are processed
-    # DeepSeek V4: 1M ctx → compute_max_tokens(16384)=32768 output per chunk
+    # 1M ctx models: compute_max_tokens(16384)=32768 output per chunk
     gen_tokens = config.compute_max_tokens(16384)
 
     t0 = time.time()
