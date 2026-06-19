@@ -1203,11 +1203,12 @@ This page will be the authoritative entry for a book in the wiki.
 ```
 
 # Task
-Write a comprehensive source page at wiki/sources/{source_rel}.md.
+Write a comprehensive source page. Wrap it in FILE block format.
 
-**Required structure:**
+# ⚠️  CRITICAL — OUTPUT FORMAT
+Your ENTIRE response MUST be wrapped in EXACTLY ONE file block:
 
-```
+---FILE:wiki/sources/{source_rel}.md---
 ---
 type: source
 title: "{title}"
@@ -1226,26 +1227,23 @@ sources: ["raw/{source_rel}.pdf"]
 ## Table of Contents & Key Concepts
 
 For EACH chapter in the outline, write one comprehensive line:
-1. **Chapter Title:** list ALL key topics covered — aim for 5-15 items, comma-separated. Include specific component names, formulas, design methods, and techniques.
+1. **Chapter Title:** list ALL key topics — aim for 5-15 items, comma-separated.
 
 Example:
-1. **DC-DC Converters:** buck (step-down), boost (step-up), buck-boost, continuous vs discontinuous conduction mode, voltage-mode control, efficiency analysis, PWM, synchronous rectification.
+1. **DC-DC Converters:** buck, boost, buck-boost, CCM vs DCM, voltage-mode control, PWM, synchronous rectification.
 
 ## Key Takeaways
 
-The 5-10 most important claims, formulas, design rules, or conclusions. Each ONE sentence, actionable.
-```
+5-10 most important claims, formulas, design rules, or conclusions. Each ONE sentence.
+---END FILE---
 
 # Instructions
-- The frontmatter MUST be exactly as shown above with real data from the digest. Do NOT duplicate the title as an H1 heading.
-- ⚠️ CRITICAL: DO NOT wrap the YAML frontmatter in ```yaml fences. The first line MUST be `---`, the frontmatter ends with `---`, then the body follows immediately. No code blocks anywhere.
-- ⚠️ The source page MUST contain ONLY these 3 sections: ## Book Summary, ## Table of Contents & Key Concepts, ## Key Takeaways. Do NOT add extra sections (no 核心概念 list, no 关键实体 list, no 相关器件, no 关联知识点, no 来源说明). Link to concept/entity pages with [[wikilinks]] instead.
-- Chapter outline: list ALL key topics per chapter (aim for 5-15 items). Be comprehensive — this is the wiki's authoritative reference for what the book covers.
-- Key Takeaways: extract the most impactful claims from the digest's key_claims
-- tags: Generate 3-8 relevant tags from the book's content (e.g. [dc-dc-converter, power-electronics, magnetics]). Do NOT leave tags: [] empty.
-- related: Link to 2-5 related wiki pages by slug (e.g. [power-electronics, buck-converter])
-- Use [[wikilink]] syntax to link to concept pages (slugs should be concept-name-slug format)
-- The response MUST start with `---` (three dashes on the first line) — NO preamble, NO ``` fences, NO commentary
+- Your FIRST line MUST be `---FILE:wiki/sources/{source_rel}.md---`
+- Your LAST line MUST be `---END FILE---`
+- The frontmatter MUST use real data from the digest. DO NOT wrap frontmatter in ``` fences.
+- Do NOT add extra sections beyond the 3 listed above. Link to concepts via [[wikilinks]].
+- tags: 3-8 relevant tags (do NOT leave empty)
+- related: 2-5 related wiki page slugs
 - Math: $inline$ $$display$$
 """
 
