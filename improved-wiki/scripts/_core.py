@@ -584,12 +584,19 @@ def is_safe_ingest_path(rel_path: str) -> bool:
             continue
         if segment.endswith(" ") or segment.endswith("."):
             return False
-        if segment.lower() in _WINDOWS_RESERVED:
+        # Windows reserves device names with OR without an extension
+        # (CON, CON.md both refer to the device), so test the pre-dot stem too.
+        seg_stem = segment.split(".", 1)[0].lower()
+        if segment.lower() in _WINDOWS_RESERVED or seg_stem in _WINDOWS_RESERVED:
             return False
-    stem = Path(rel_path).stem
-    if stem in ("", "-", "--", "none", "null", "undefined", "n-a", "n/a"):
+    # Reject empty/garbage filenames. Path(".md").stem == ".md" (Python treats a
+    # leading-dot name as extension-less), so derive the real base name directly.
+    name = Path(rel_path).name
+    base = name[:-3] if name.endswith(".md") else Path(rel_path).stem
+    base = base.strip().strip(".").lower()
+    if base in ("", "-", "--", "none", "null", "undefined", "n-a", "n/a"):
         return False
-    if re.match(r'^\(.*\)$', stem):
+    if re.match(r'^\(.*\)$', base):
         return False
     return True
 

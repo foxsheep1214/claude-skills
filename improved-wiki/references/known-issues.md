@@ -4,6 +4,22 @@ This file tracks known issues with the skill's scripts. Each entry is small enou
 
 ---
 
+## Cleanup batch (2026-06-19, code review)
+
+| # | Change | Detail |
+|---|--------|--------|
+| 1 | **Removed ~546 lines of dead synthesis code** | `stage_2_synthesis`, `build_synthesis_prompt`, `stage_2_per_chunk_generation` + their exclusive helpers (`_classify_concepts_by_importance`, `_compute_uncovered_concepts`, `_concept_matches_page`, `_normalize_for_matching`, `COVERAGE_TARGETS`) in `_stage_2_generate.py`. These were the retired legacy multi-round synthesis path (SKILL.md §Key features) — 0 call sites from `ingest.py`. `__all__` updated. `_stage_2_generate.py`: 1882 → 1336 lines. |
+| 2 | **Hardened `is_safe_ingest_path`** (`_core.py`) | Now rejects empty filenames (`concepts/.md`) and Windows reserved names with extensions (`concepts/con.md`). Strictly additive — no previously-valid path is newly rejected. |
+| 3 | **Removed duplicate `__all__`** in `_llm_api.py` | The premature first definition (before the function defs) shadowed nothing useful; the canonical superset at file end remains. |
+| 4 | **Bare `except:` → `except Exception:`** in `_stage_0_extract.py` minerU restart loop | No longer swallows `KeyboardInterrupt`/`SystemExit`. |
+| 5 | **Added regression tests** | `scripts/tests/test_core_pure.py` — 23 stdlib `unittest` cases for `is_safe_ingest_path`, `parse_yaml_block` (CJK quotes), `parse_file_blocks` (slash/hyphen/fence), `detect_template_type` (layouts A/B/C), `str_distance`. Run: `python3 scripts/tests/test_core_pure.py`. All pass. |
+
+**Still open** (noted, not yet done): shell scripts (`run-queue.sh`, `wiki-lint.sh`, `wiki-monitor.sh`) lack `set -euo pipefail`; `--dry-run` cost estimate; several files still exceed the 800-line guideline (`ingest.py` 1827, `_stage_0_extract.py` 1787).
+
+**Reconciled (2026-06-19)**: stage-count wording unified across SKILL.md / ingest-stages-mandatory.md / initial-setup.md to **"~13 numbered stages + 2 pre-gates (0.1 dedup / 0.3 pilot OCR)"**. Earlier docs variously said "15-stage" / "~15 步" / 12-marker diagram — these were granularity mismatches (the diagram omitted the pre-gates and the bare write step), not a real stage merge. The genuine merges (Stage 1.5+2.1 → barrier-free; legacy multi-round synthesis retired) are documented in SKILL.md §Key features.
+
+---
+
 ## Recently Fixed (2026-06-19)
 
 **Fix batch**: 5 CRITICAL/HIGH issues fixed in one session (2026-06-19):

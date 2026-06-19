@@ -857,7 +857,7 @@ def extract_text_scanned_pdf(file_path: Path, config: Config) -> str:
                     # Server may need restart
                     api_proc.terminate()
                     try: api_proc.wait(timeout=5)
-                    except: api_proc.kill()
+                    except Exception: api_proc.kill()
                     time.sleep(3)
                     api_proc = _sp.Popen(
                         [str(venv_python), "-m", "mineru.cli.fast_api",
