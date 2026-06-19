@@ -1,16 +1,18 @@
 ---
 name: improved-wiki
-description: "Class-level umbrella for the Karpathy/NashSU LLM-Wiki ingestion pipeline (15-stage ingest + lint + graph). Three modes: auto-ingest (batch), chat-ingest (interactive), deep-research (closed-loop web→wiki, NashSU deep-research.ts parity). Use when ingesting a PDF/PPTX/DOCX, researching a topic into the wiki, validating an ingest, debugging failed tasks, or auditing wiki completeness. Phase 0 OCR uses local minerU (free). Lint includes knowledge graph + Louvain community detection."
+description: "Class-level umbrella for the Karpathy/NashSU LLM-Wiki ingestion pipeline (~13 numbered ingest stages + 2 pre-gates + lint + graph). Three modes: auto-ingest (batch), chat-ingest (interactive), deep-research (closed-loop web→wiki, NashSU deep-research.ts parity). Use when ingesting a PDF/PPTX/DOCX, researching a topic into the wiki, validating an ingest, debugging failed tasks, or auditing wiki completeness. Phase 0 OCR uses local minerU (free). Lint includes knowledge graph + Louvain community detection."
 tags: [ingest, mandatory, nashsu, pipeline, scan-pdf, mineru, local-ocr, knowledge-graph, louvain]
 related_skills: [karpathy-llm-wiki, llm-wiki-local]
 ---
 
 # improved-wiki
 
-Karpathy LLM-Wiki pattern + NashSU v0.4.25 pipeline. 15 ingest Stages (4 Phases) + lint + graph (auto-triggered).
+Karpathy LLM-Wiki pattern + NashSU v0.4.25 pipeline. ~13 numbered ingest Stages (4 Phases) + 2 pre-gates (0.1 dedup / 0.3 pilot OCR) + lint + graph (auto-triggered).
 
 ```
-Ingest: 0→0.5→0.6→1→1.5→2.0→2.x→2.3→2.5→2.6→3.5→[4]
+Pre-gates: [0.1 source dedup] → [0.3 pilot OCR]   (gate ingest; not in the numbered data-flow below)
+Ingest: 0→0.5→0.6→1→1.5→2.0→2.x→2.3→2.5→3→2.6→3.5→[4]
+        (numbered stages per ingest.py; "2.x" = per-chunk concept/entity gen; "3" = file write)
 
 Phase 0: Pre-processing (text extraction, image extract, caption, pilot OCR)
 Phase 1: Analysis        (global digest, sequential chunk analysis)

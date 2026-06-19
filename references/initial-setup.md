@@ -174,5 +174,5 @@ Plan accordingly. The cron at 02:00 daily will only have time to process 1-2 sca
 ## See also
 
 - `SKILL.md` — End-to-end pipeline reference
-- `references/ingest-stages-mandatory.md` — 15-stage checklist
+- `references/ingest-stages-mandatory.md` — ingest stage checklist (~13 numbered stages + 2 pre-gates)
 - `references/cron-installation.md` — How to install the cron job, with crontab snippets
