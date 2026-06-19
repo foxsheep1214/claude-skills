@@ -690,8 +690,12 @@ def extract_text_scanned_pdf(file_path: Path, config: Config) -> str:
         return _assemble_ocr_text(out_dir, [end for _, end in chunks])
 
     import subprocess as _sp
+    # Use venv python (minerU is only installed in venv, not system python)
+    venv_python = Path.home() / ".venv" / "bin" / "python3"
+    if not venv_python.exists():
+        venv_python = Path(sys.executable)
     api_proc = _sp.Popen(
-        [sys.executable, "-m", "mineru.cli.fast_api",
+        [str(venv_python), "-m", "mineru.cli.fast_api",
          "--host", "127.0.0.1", "--port", str(MINERU_API_PORT)],
         stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
     )
@@ -764,7 +768,21 @@ def extract_text_scanned_pdf(file_path: Path, config: Config) -> str:
                 r = urllib.request.urlopen(req, timeout=1200)
                 resp = json.loads(r.read())
                 if resp.get("status") == "completed":
-                    md = resp.get("results", {}).get(chunk_pdf.name, {}).get("md_content", "")
+                    results = resp.get("results", {})
+                    # API returns key as original filename (may be stem without .pdf)
+                    md = ""
+                    for rk in (chunk_pdf.name, chunk_pdf.stem):
+                        if rk in results and isinstance(results[rk], dict):
+                            md = results[rk].get("md_content", "")
+                            if md:
+                                break
+                    # Fallback: take first result
+                    if not md:
+                        for rk, rv in results.items():
+                            if isinstance(rv, dict):
+                                md = rv.get("md_content", "")
+                                if md:
+                                    break
                     if md:
                         chunk_out = out_dir / f"_chunk_{start:04d}-{end:04d}"
                         chunk_out.mkdir(parents=True, exist_ok=True)
@@ -790,7 +808,17 @@ def extract_text_scanned_pdf(file_path: Path, config: Config) -> str:
                             tr = urllib.request.urlopen(f"http://127.0.0.1:{MINERU_API_PORT}/tasks/{task_id}")
                             td = json.loads(tr.read())
                             if td.get("status") == "completed":
-                                md = td.get("results", {}).get(chunk_pdf.name, {}).get("md_content", "")
+                                tdr = td.get("results", {})
+                                md = ""
+                                for rk in (chunk_pdf.name, chunk_pdf.stem):
+                                    if rk in tdr and isinstance(tdr[rk], dict):
+                                        md = tdr[rk].get("md_content", "")
+                                        if md: break
+                                if not md:
+                                    for rk, rv in tdr.items():
+                                        if isinstance(rv, dict):
+                                            md = rv.get("md_content", "")
+                                            if md: break
                                 if md:
                                     chunk_out = out_dir / f"_chunk_{start:04d}-{end:04d}"
                                     chunk_out.mkdir(parents=True, exist_ok=True)
