@@ -820,7 +820,7 @@ def extract_text_scanned_pdf(file_path: Path, config: Config) -> str:
     total_imgs = sum(len(v) for v in stats.get("images", {}).values())
     print(f"[ocr] Done — {len(full_text):,} chars OCR text, {total_imgs} images extracted")
 
-    # ── Caption filtered minerU images with minimax ──
+    # ── Caption filtered minerU images with caption provider ──
     slug = _media_slug(file_path, config)
     media_dir = config.wiki_dir / "media" / slug
     pending_imgs = _find_uncaptioned_mineru_images(media_dir)
@@ -880,7 +880,7 @@ def _caption_images(images: list[dict], config: Config, media_dir: Path,
 
     Batches are processed in PARALLEL via ThreadPoolExecutor to minimize
     total wall-clock time. Each batch sends multi-image API request to
-    the caption provider (MiniMax via Anthropic protocol).
+    the caption provider (via Anthropic protocol).
 
     Saves one .caption.txt per image."""
     if not images:
@@ -997,7 +997,7 @@ def _preprocess_image_for_caption(img_path: Path, max_dim: int = 1568) -> str:
     im = Image.open(img_path)
     w, h = im.size
 
-    # Normalize to RGB (harmless: MiniMax M3 handles grayscale fine; this
+    # Normalize to RGB (harmless: caption model handles grayscale fine; this
     # just ensures consistent encoding across PDF extraction variants)
     if im.mode in ('L', 'LA', 'P', 'PA'):
         im = im.convert('RGB')

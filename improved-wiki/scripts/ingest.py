@@ -488,7 +488,7 @@ def stage_3_5_inject_images(config: Config, raw_file: Path, source_path: Path,
             section += f"| `{name}` | {cap_short} |\n"
         if len(images_in_media) > 200:
             section += f"| ... | ({len(images_in_media) - 200} more) |\n"
-        section += f"\n> Caption 由 MiniMax M3 生成。图片文件见 `wiki/media/{slug}/`\n"
+        section += f"\n> Caption 由 {config.caption_model} 生成。图片文件见 `wiki/media/{slug}/`\n"
         content += section
         tmp = source_path.with_suffix(source_path.suffix + ".tmp")
         tmp.write_text(content, encoding="utf-8")
