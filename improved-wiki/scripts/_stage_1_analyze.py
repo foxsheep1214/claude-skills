@@ -359,6 +359,13 @@ concepts_found:
     definition: "..."      # the concept's definition as stated in the book
     key_details: ["...", "..."]   # 2-4 key facts / formulas / design rules
 
+# ⚠️  CONCEPT NAMING RULES (CRITICAL):
+#   - name MUST be a SHORT, SPECIFIC topic (3-6 words), e.g. "DC-Link Voltage Control", "IGBT Thermal Modeling"
+#   - NEVER use the book title or filename as a concept name
+#   - NEVER include "Chunk N", "Chapter N" or page numbers in the name
+#   - If the chunk covers multiple topics, list each topic as a SEPARATE concept
+#   - Use the actual technical term from the book, not a generic description
+
 claims:
   - claim: "..."
     evidence: "..."
