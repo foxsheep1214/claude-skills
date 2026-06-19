@@ -1832,6 +1832,7 @@ def stage_2_5_comparison_generation(
             print("[stage_2_5_comp] 2.5A: no disambiguation needed")
 
     # 2.5B: In-source concept comparison
+    response_25b = ""
     if len(concept_titles) >= 2:
         if verbose:
             print(f"[stage_2_5_comp] 2.5B In-source comparison — {len(concept_titles)} concepts...")
