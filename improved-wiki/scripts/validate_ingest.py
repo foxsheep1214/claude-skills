@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""validate_ingest.py — per-project 15-stage ingest validator
+"""validate_ingest.py — per-project 13-stage ingest validator
 
 Aligns with ingest.py actual output: reads from .llm-wiki/ingest-cache.json
 cache entry + disk state.  Does NOT look for intermediate files (full.txt,
@@ -111,7 +111,7 @@ def main():
         print(f"  ⚪ {label}: {detail}")
 
     print("=" * 60)
-    print(f"15-stage ingest validation")
+    print(f"13-stage ingest validation")
     print(f"Project: {PROJECT_ROOT}")
     print(f"Source:  {SOURCE_SLUG}")
     print("=" * 60)
@@ -237,36 +237,45 @@ def main():
         check("cache entry found", False)
 
     # ═══════════════════════════════════════════════
-    # Stage 2.5: Review suggestions
+    # Stage 2.3: Query generation (conditional)
     # ═══════════════════════════════════════════════
-    print("\n[Stage 2.5] Review suggestions")
-    rs_path = RUNTIME / "review-suggestions.json"
-    if rs_path.exists():
-        items = json.loads(rs_path.read_text()).get("items", [])
-        check("review-suggestions.json has items", len(items) >= 0, f"{len(items)} items")
-    elif entry:
-        ri = stages.get("review_items", -1)
-        if ri == 0:
-            note("auto-skipped", "<4 FILE blocks — ingest.py skips Stage 2.5")
-        elif ri > 0:
-            check("review-suggestions.json exists", False, f"cache says {ri} items but file not found")
+    print("\n[Stage 2.3] Query generation")
+    queries_dir = WIKI / "queries"
+    query_pages = list(queries_dir.glob("*.md")) if queries_dir.is_dir() else []
+    src_query_pages = [p for p in query_pages
+                       if SOURCE_SLUG in p.read_text(encoding="utf-8", errors="ignore")] if query_pages else []
+    if entry:
+        tmpl = (entry.get("template") or "").lower()
+        qg = stages.get("queries_generated", 0)
+        if tmpl in ("datasheet", "standard"):
+            note("auto-skipped", f"template={tmpl} (datasheet/standard skip Stage 2.3)")
         else:
-            note("not found", "may have been skipped")
+            check(f"{qg} query page(s) generated", 0 <= qg <= 5,
+                  f"cache={qg} disk_attributed={len(src_query_pages)} (0-5 valid; 0 = ---QUERIES: 0---)")
     else:
-        check("review-suggestions.json exists", False)
+        note("no cache entry", f"disk queries/ has {len(query_pages)} page(s) total")
 
     # ═══════════════════════════════════════════════
-    # Stage 2.6: Aggregate pages
+    # Stage 2.5 (cmp): Comparison generation (conditional)
     # ═══════════════════════════════════════════════
-    print("\n[Stage 2.6] Aggregate pages (programmatic append only)")
-    for name in ("index.md", "log.md", "overview.md"):
-        p = WIKI / name
-        check(f"wiki/{name} exists and non-empty",
-              p.exists() and p.stat().st_size > 0,
-              f"{p.stat().st_size} bytes" if p.exists() else "missing")
+    print("\n[Stage 2.5 cmp] Comparison generation")
+    comparisons_dir = WIKI / "comparisons"
+    comp_pages = list(comparisons_dir.glob("*.md")) if comparisons_dir.is_dir() else []
+    src_comp_pages = [p for p in comp_pages
+                      if SOURCE_SLUG in p.read_text(encoding="utf-8", errors="ignore")] if comp_pages else []
+    if entry:
+        cg = stages.get("comparisons_generated", 0)
+        fb = stages.get("file_blocks_generated", 0)
+        if fb == 0:
+            note("auto-skipped", "no concept output — Stage 2.5 cmp skipped")
+        else:
+            check(f"{cg} comparison page(s) generated", 0 <= cg <= 2,
+                  f"cache={cg} disk_attributed={len(src_comp_pages)} (0-2 valid; 0 = ---COMPARISONS: 0---)")
+    else:
+        note("no cache entry", f"disk comparisons/ has {len(comp_pages)} page(s) total")
 
     # ═══════════════════════════════════════════════
-    # Stage 3: Write files
+    # Stage 3: Write files (+ source page coverage)
     # ═══════════════════════════════════════════════
     print("\n[Stage 3] Write files")
     sources = list((WIKI / "sources").rglob("*.md")) if (WIKI / "sources").is_dir() else []
@@ -282,6 +291,15 @@ def main():
         check("sources/concepts/entities all populated",
               len(sources) > 0 and len(concepts) > 0 and len(entities) > 0,
               f"sources={len(sources)} concepts={len(concepts)} entities={len(entities)}")
+    # Source page coverage (project-wide health check; folded from old Stage 3.7)
+    if CACHE_PATH.exists():
+        _cache = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
+        _entries = _cache.get("entries", {})
+        ingested = sum(1 for v in _entries.values()
+                       if isinstance(v, dict) and (v.get("filesWritten") or v.get("hash")))
+        check(f"ingested files covered by source pages",
+              ingested <= len(sources),
+              f"ingested={ingested} sources={len(sources)}")
 
     # ═══════════════════════════════════════════════
     # Stage 3.5: Image injection
@@ -310,51 +328,55 @@ def main():
         check("source page exists", False)
 
     # ═══════════════════════════════════════════════
-    # Stage 3.7: Source page coverage (ingested only)
+    # Stage 2.5 (rev): Review suggestions + review items
     # ═══════════════════════════════════════════════
-    print("\n[Stage 3.7] Source page coverage")
-    if CACHE_PATH.exists():
-        cache = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
-        entries = cache.get("entries", {})
-        ingested = sum(1 for v in entries.values()
-                       if isinstance(v, dict) and (v.get("filesWritten") or v.get("hash")))
-        src_count = len(list((WIKI / "sources").rglob("*.md"))) if (WIKI / "sources").is_dir() else 0
-        check(f"ingested files covered by source pages",
-              ingested <= src_count,
-              f"ingested={ingested} sources={src_count}")
+    print("\n[Stage 2.5 rev] Review suggestions + items")
+    rs_path = RUNTIME / "review-suggestions.json"
+    if rs_path.exists():
+        items = json.loads(rs_path.read_text()).get("items", [])
+        check("review-suggestions.json has items", len(items) >= 0, f"{len(items)} items")
+    elif entry:
+        ri = stages.get("review_items", -1)
+        if ri == 0:
+            note("auto-skipped", "<4 FILE blocks — ingest.py skips Stage 2.5 rev")
+        elif ri > 0:
+            check("review-suggestions.json exists", False, f"cache says {ri} items but file not found")
+        else:
+            note("not found", "may have been skipped")
     else:
-        note("no cache, skipping")
-
-    # ═══════════════════════════════════════════════
-    # Stage 4: Review items
-    # ═══════════════════════════════════════════════
-    print("\n[Stage 4] Review items")
+        check("review-suggestions.json exists", False)
+    # Review items on disk (merged from old Stage 4)
     reviews_dir = WIKI / "REVIEW"
     review_files = list(reviews_dir.rglob("*.md")) if reviews_dir.is_dir() else []
     review_json = RUNTIME / "review.json"
     if review_files:
-        check(f"wiki/REVIEW/ has per-item .md files (recursive search)",
+        check(f"wiki/REVIEW/ has per-item .md files",
               len(review_files) >= 1,
               f"{len(review_files)} files")
     elif review_json.exists():
         rj = json.loads(review_json.read_text())
-        items = rj.get("findings", [])
-        check("review.json present", len(items) >= 0, f"{len(items)} findings")
+        ritems = rj.get("findings", [])
+        check("review.json present", len(ritems) >= 0, f"{len(ritems)} findings")
     elif entry:
         ri = stages.get("review_items", -1)
         if ri <= 0:
-            note("no review items", "Stage 2.5 was auto-skipped")
+            note("no review items", "Stage 2.5 rev was auto-skipped")
         else:
             check("review output found", False, f"cache says {ri} items but no review files on disk")
     else:
         check("review output found", False)
 
     # ═══════════════════════════════════════════════
-    # Stage 5: Hash cache
+    # Stage 2.6: Aggregate pages + hash cache
     # ═══════════════════════════════════════════════
-    print("\n[Stage 5] Hash cache")
+    print("\n[Stage 2.6] Aggregate pages + hash cache")
+    for name in ("index.md", "log.md", "overview.md"):
+        p = WIKI / name
+        check(f"wiki/{name} exists and non-empty",
+              p.exists() and p.stat().st_size > 0,
+              f"{p.stat().st_size} bytes" if p.exists() else "missing")
+    # Hash cache (merged from old Stage 5)
     if entry:
-        # Verify hash against raw file
         raw_root = PROJECT_ROOT / "raw"
         rel = entry.get("key", "")
         raw_file = raw_root / rel
@@ -373,9 +395,9 @@ def main():
         check("ingest-cache.json has matching entry", False, f"slug={SOURCE_SLUG}")
 
     # ═══════════════════════════════════════════════
-    # Stage 6: Embeddings (optional)
+    # Stage 4: Embeddings (optional)
     # ═══════════════════════════════════════════════
-    print("\n[Stage 6] Embeddings (optional)")
+    print("\n[Stage 4] Embeddings (optional)")
     lance = RUNTIME / "lancedb"
     embed_cache = RUNTIME / "embed-cache.json"
     lance_present = lance.is_dir() and bool(list(lance.glob("*.lance")))

@@ -251,7 +251,7 @@ Karpathy LLM-Wiki 模式 + NashSU LLM Wiki app (v0.4.25) 的 `autoIngestImpl()` 
 ## 强制顺序（不能乱）
 
 ```
-0.1 → 0.3 → 0 → 0.5 → 0.6 → 1 → 1.5 → 2.0 → 2 → 2.3 → 2.5 → 3 → 3.5 → 2.5(review) → 2.6 → [4]
+0.1 → 0.3 → 0 → 0.5 → 0.6 → 1 → 1.5 → 2.0 → 2 → 2.3 → 2.5(cmp) → 3 → 3.5 → 2.5(rev) → 2.6 → [4]
 ```
 
 - **Stage 0.3 Pilot 是新强制前置**（2026-06-11）：任何 PDF 走 Stage 0 之前必须先 5-10 页 pilot 验证
@@ -329,10 +329,10 @@ Karpathy LLM-Wiki 模式 + NashSU LLM Wiki app (v0.4.25) 的 `autoIngestImpl()` 
 | Stage | 门禁检查 | 失败行为 |
 |-------|---------|---------|
 | Stage 0 | 提取文本 ≥ 500 字符；MinerU ≥ 2000 字符 | RuntimeError |
-| Stage 1 | Global Digest 含 5 个必需 key；≥ 1 个 concept | RuntimeError |
+| Stage 1 | Global Digest 含 6 个必需 key；≥ 1 个 concept | RuntimeError |
 | Stage 1.5 | chunk 分析非空 | RuntimeError |
 | Stage 2 | ≥ 1 个 FILE block；source page 存在；路径正确 | RuntimeError |
-| Stage 3 | source page 落盘 | RuntimeError |
+| Stage 3 | source page 落盘 | warning（不中止；无 `_verify_stage_3` hard gate） |
 
 **Ingest 末尾自动运行 `validate_ingest.py`**（全阶段验证），结果打印到 stdout。
 
@@ -370,6 +370,7 @@ for k, v in cache['entries'].items():
 - **2026-06-14**：Stage 0.1 去重检查新增；Stage 0 三信号检测升级（Johnson 事故）；NashSU v0.4.23 parity audit 完成
 - **2026-06-16**：新增 Stage 2.3 Query + 2.5 Comparison；阶段间实时验证门禁
 - **2026-06-19**：全面重编号对齐 `ingest.py` 代码（废弃 Phase.序列），清理所有过时引用
+- **2026-06-19**：`validate_ingest.py` 重编号对齐本文（旧 Stage 4/5/6 → 2.5(rev)/2.6/4，旧 3.7 并入 Stage 3）；新增 Stage 2.3 query / 2.5 cmp 两个验证段；`ingest.py` cache `stages` 新增 `queries_generated`/`comparisons_generated` 字段；修正自动验证表 Stage 1 "5 个 key"→"6 个"、Stage 3 "RuntimeError"→"warning（不中止）"
 - **2026-06-17**：高层知识空缺检测移至 lint 系统（`knowledge-gap-lint.md`）；REVIEW 目录分子目录；Phase 4+5 合并；Stage 3.1 合并入 3.5；Stage 4 合并入 2.5 review
 - **2026-06-17**：新增 **Stage 16-18 知识图谱后处理**（Lint 阶段，不在 ingest 管线内）。四信号加权图构建 + Louvain 社区检测 + 图谱洞察输出。脚本：`scripts/build_knowledge_graph.py`。触发时机：批量 ingest 后按需运行，不在单次 ingest 中自动执行。
 
