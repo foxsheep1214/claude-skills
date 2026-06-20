@@ -26,6 +26,7 @@
 #   $ ./wiki-lint.sh --strict                   # exit 1 for critical issues
 #   $ ./wiki-lint.sh --semantic                 # also run LLM semantic lint
 #   $ ./wiki-lint.sh --fix                      # auto-fix: missing-frontmatter, missing-domain
+#   $ ./wiki-lint.sh --fix-links                # apply suggested_target/source wikilink fixes
 #   $ ./wiki-lint.sh --json-only                # old behavior: JSON only, no wiki/lint/ pages
 #
 # Configuration via env:
@@ -80,6 +81,7 @@ SUMMARY=false
 STRICT=false
 SEMANTIC=false
 AUTO_FIX=false
+FIX_LINKS=false
 JSON_ONLY=false
 SEMANTIC_LIMIT=""
 SEMANTIC_TOKENS=""
@@ -91,6 +93,7 @@ for arg in "$@"; do
     --strict)     STRICT=true ;;
     --semantic)   SEMANTIC=true ;;
     --fix)        AUTO_FIX=true ;;
+    --fix-links)  FIX_LINKS=true ;;
     --json-only)  JSON_ONLY=true ;;
     --semantic-limit=*) SEMANTIC_LIMIT="${arg#*=}" ;;
     --semantic-tokens=*) SEMANTIC_TOKENS="${arg#*=}" ;;
@@ -150,50 +153,37 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Optional
 
 sys.path.insert(0, os.environ.get("SCRIPT_DIR", ""))
 from _lint_suggest import run_structural_lint
+from _lint_domains import load_valid_domains
 
 wiki_dir = Path(os.environ["WIKI_DIR"])
+skill_root = Path(os.environ["SCRIPT_DIR"]).parent
+project_root = wiki_dir.parent
 findings: list[dict] = []
 now_ms = int(time.time() * 1000)
 
-# 1. Collect all wiki pages and build a dual-index slug map.
-#    Matches NashSU app's runStructuralLint() (src/lib/lint.ts L46-65):
-#      - Case-insensitive resolution: [[Transformer]] matches transformer.md
-#      - Dual indexing: both the relative path AND the basename are indexed,
-#        so short wikilinks like [[foo]] resolve when the file is
-#        entities/foo.md (and full-path [[entities/foo]] also works).
-STATE_SKIP = {"lint-cache.json", "ingest-cache.json", "ingest-queue.json", "ingest-lock"}
+# 1. Collect all wiki pages (exclude state files, anchor files, and the
+#    lint/ directory — scanning lint pages creates infinite feedback).
+#    No slug_map here: broken-link/orphan/no-outlinks detection + suggestions
+#    are delegated to run_structural_lint (single source of truth), which
+#    builds its own case-insensitive dual-index slug map internally.
+STATE_SKIP = {"lint-cache.json", "ingest-cache.json", "ingest-queue.json", "ingest-lock",
+              "domains.md"}  # domains.md is a project config file, not a wiki page
 ANCHOR_FILES = {"index.md", "log.md"}  # NashSU parity: only these 2 excluded from structural lint
 
-slug_map: dict[str, str] = {}        # lowercased key -> original stem
 pages: dict[str, Path] = {}          # original stem -> Path
 for path in sorted(wiki_dir.rglob("*.md")):
     rel = path.relative_to(wiki_dir)
     if rel.name in STATE_SKIP or rel.name in ANCHOR_FILES:
         continue
-    # Skip lint/ directory — scanning lint pages creates infinite feedback
-    # (lint pages reference other lint pages via [[wikilinks]])
     if rel.parts[0] == "lint":
         continue
     rel_stem = str(rel.with_suffix(""))       # e.g. "entities/foo-bar"
-    basename_stem = path.stem                  # e.g. "foo-bar"
     pages[rel_stem] = path
-    # NashSU parity: last-write-wins (Map.set), not first-write-wins
-    slug_map[rel_stem.lower()] = rel_stem
-    slug_map[basename_stem.lower()] = rel_stem
 
-def resolve_slug(target: str) -> Optional[str]:
-    """Case-insensitive wikilink resolution (NashSU parity). Returns the
-    original (non-lowercased) stem if the target exists, else None."""
-    if target in pages:
-        return target
-    return slug_map.get(target.lower())
-
-# 2. Read every page's content (pass 1).
-WIKILINK_RE = re.compile(r"\[\[([^\]\|]+?)(?:\|[^\]]+)?\]\]")
+# 2. Read every page's content.
 contents: dict[str, str] = {}  # stem -> text
 for stem, path in pages.items():
     try:
@@ -208,90 +198,25 @@ for stem, path in pages.items():
             "createdAt": now_ms,
         })
 
-# 2b. NashSU-parity fix suggestions via run_structural_lint (the same engine
-#     validate_ingest.py uses). broken-link → suggested_target,
-#     orphan → suggested_source, no-outlinks → suggested_target.
-#     Computed once here so the detection findings below can attach them.
+# 3. Structural lint (broken-link / orphan / no-outlinks) WITH suggestions —
+#    single source of truth: run_structural_lint. This replaces the previous
+#    duplicate out_links/in_links/broken_links scan (which recomputed what
+#    run_structural_lint already computes internally). Page ids and createdAt
+#    are attached here; the engine already supplies severity / detail /
+#    broken_target / suggested_target / suggested_source.
 structural_pages = [(str(pages[s].relative_to(wiki_dir)), contents[s]) for s in pages if s in contents]
-_orphan_src: dict[str, Optional[str]] = {}
-_nolink_tgt: dict[str, Optional[str]] = {}
-_broken_tgt: dict[tuple, Optional[str]] = {}
+_bl_counter = 0
 for _f in run_structural_lint(structural_pages):
-    _t = _f["type"]
-    if _t == "orphan":
-        _orphan_src[_f["page"]] = _f.get("suggested_source")
-    elif _t == "no-outlinks":
-        _nolink_tgt[_f["page"]] = _f.get("suggested_target")
-    elif _t == "broken-link":
-        _broken_tgt[(_f["page"], _f.get("broken_target"))] = _f.get("suggested_target")
-
-# 3. Scan for [[wikilinks]] (pass 2) — broken-link findings now carry suggestions.
-out_links: dict[str, set[str]] = {stem: set() for stem in pages}
-broken_links: list[dict] = []
-
-for stem, path in pages.items():
-    text = contents.get(stem)
-    if text is None:
-        continue
-    for m in WIKILINK_RE.finditer(text):
-        target = m.group(1).strip()
-        out_links[stem].add(target)
-        if resolve_slug(target) is None:
-            _page = str(path.relative_to(wiki_dir))
-            broken_links.append({
-                "type": "broken-link",
-                "severity": "warning",
-                "page": _page,
-                "detail": f"Broken link: [[{target}]] — target page not found.",
-                "broken_target": target,
-                "suggested_target": _broken_tgt.get((_page, target)),
-                "id": f"lint-bl-{stem}-{len(broken_links)}",
-                "createdAt": now_ms,
-            })
-
-# 3. Compute in-links (inverse of out-links, case-insensitive resolution)
-in_links: dict[str, set[str]] = {stem: set() for stem in pages}
-for src, targets in out_links.items():
-    for tgt in targets:
-        resolved = resolve_slug(tgt)
-        if resolved is not None and resolved in in_links:
-            in_links[resolved].add(src)
-
-# 4. Find orphans (no in-links) — NashSU parity: no frontmatter/char filters
-for stem, path in pages.items():
-    if in_links[stem]:
-        continue
-    try:
-        path.read_text(encoding="utf-8")
-    except Exception:
-        continue
-    findings.append({
-        "type": "orphan",
-        "severity": "info",
-        "page": str(path.relative_to(wiki_dir)),
-        "detail": "No other pages link to this page.",
-        "suggested_source": _orphan_src.get(str(path.relative_to(wiki_dir))),
-        "id": f"lint-orphan-{stem}",
-        "createdAt": now_ms,
-    })
-
-# 5. Find no-outlinks — NashSU parity: no frontmatter/char filters
-for stem, path in pages.items():
-    if out_links[stem]:
-        continue
-    try:
-        path.read_text(encoding="utf-8")
-    except Exception:
-        continue
-    findings.append({
-        "type": "no-outlinks",
-        "severity": "info",
-        "page": str(path.relative_to(wiki_dir)),
-        "detail": "This page has no [[wikilink]] references to other pages.",
-        "suggested_target": _nolink_tgt.get(str(path.relative_to(wiki_dir))),
-        "id": f"lint-nol-{stem}",
-        "createdAt": now_ms,
-    })
+    _stem_key = re.sub(r"\.md$", "", _f["page"])
+    if _f["type"] == "broken-link":
+        _bl_counter += 1
+        _f["id"] = f"lint-bl-{_stem_key}-{_bl_counter}"
+    elif _f["type"] == "orphan":
+        _f["id"] = f"lint-orphan-{_stem_key}"
+    elif _f["type"] == "no-outlinks":
+        _f["id"] = f"lint-nol-{_stem_key}"
+    _f["createdAt"] = now_ms
+    findings.append(_f)
 
 # 6. Find missing frontmatter
 for stem, path in pages.items():
@@ -312,21 +237,12 @@ for stem, path in pages.items():
 # 7. Find pages with missing or invalid 'domain' field
 #    Domain is required for concept and entity pages (Plan B: disambiguation).
 #    Source/comparison/synthesis/etc pages are exempt.
-VALID_DOMAINS = {
-    "circuit-fundamentals", "power-electronics", "thermal-management",
-    "emc", "signal-integrity", "digital-circuits", "pcb-design",
-    "rf-microwave", "radar-systems", "analog-circuits",
-    "semiconductor-devices", "reliability-engineering", "general",
-    "computer-architecture", "manufacturing", "packaging",
-    "electronics", "hardware", "organization",
-    # Expanded from HardwareWiki lint analysis (2026-06-17)
-    "physics", "analog", "mathematics", "electrical-engineering",
-    "analog-circuit-design", "digital-design", "hardware-design",
-    "power-integrity", "signals-and-systems", "control-systems",
-    "high-speed-serial-io", "standards", "system", "systems",
-    "engineering", "organizations", "test-and-measurement",
-    "embedded-systems", "motor-control", "magnetic-design",
-}
+#    Valid-domain set is loaded from <project>/wiki/domains.md (project-level
+#    override) or <skill>/references/domains.md (skill default) — NOT
+#    hardcoded. If neither parses (empty set), invalid-domain is skipped
+#    (lenient) so non-hardware wikis aren't flagged for using their own
+#    domains. missing-domain is always checked (presence of the field).
+VALID_DOMAINS = load_valid_domains(project_root, skill_root)
 
 def _normalize_domain(d: str) -> str:
     """Normalize domain strings: lowercase, spaces→dashes, common aliases."""
@@ -384,7 +300,7 @@ for stem, path in pages.items():
             "id": f"lint-md-{stem}",
             "createdAt": now_ms,
         })
-    elif _normalize_domain(domain_found) not in VALID_DOMAINS:
+    elif VALID_DOMAINS and _normalize_domain(domain_found) not in VALID_DOMAINS:
         findings.append({
             "type": "invalid-domain",
             "severity": "warning",
@@ -393,9 +309,6 @@ for stem, path in pages.items():
             "id": f"lint-id-{stem}",
             "createdAt": now_ms,
         })
-
-# 7. Add broken-links last
-findings.extend(broken_links)
 
 print(json.dumps(findings, ensure_ascii=False, indent=2))
 PYEOF
@@ -467,9 +380,16 @@ for f in findings:
 
     page_path = lint_dir / filename
 
-    # Suggested fix from the NashSU-parity suggestion engine
+    # Suggested fix from the NashSU-parity suggestion engine.
+    # suggested_target / suggested_source are short_names like
+    # "concepts/transformer.md" — strip the .md so the rendered [[wikilink]]
+    # resolves (slug_map keys are stems without the extension).
     sug_target = f.get('suggested_target')
     sug_source = f.get('suggested_source')
+    if sug_target:
+        sug_target = re.sub(r'\.md$', '', sug_target)
+    if sug_source:
+        sug_source = re.sub(r'\.md$', '', sug_source)
     suggestion = ''
     if sug_target:
         suggestion = f'\n## Suggested Fix\nLink to [[{sug_target}]] — closest existing page by slug/title similarity.\n'
@@ -607,6 +527,81 @@ print(fixed)
 PYEOF
 )
   echo "[lint] Auto-fix: repaired $FIXED issues"
+fi
+
+# ── Auto-fix links (--fix-links; applies the suggestion engine's output) ──
+# broken-link → replace [[broken]] with [[suggested]] in the source page
+# no-outlinks → append a "## Related" link to the suggested target
+# orphan      → append a "## Related" link to this page in the suggested source
+# Only acts when a suggestion exists. Wiki pages are edited in place; re-run
+# wiki-lint.sh afterwards to confirm the findings clear.
+if [ "$FIX_LINKS" = true ]; then
+  echo "[lint] Auto-fix-links: applying suggestion-engine wikilink fixes..."
+  FIXED_LINKS=$(python3 << PYEOF
+import json, re, pathlib
+with open('${LINT_CACHE}', 'r') as fh:
+    cache = json.load(fh)
+wiki_dir = pathlib.Path('${WIKI_DIR}')
+items = cache if isinstance(cache, list) else cache.get('findings', cache.get('items', []))
+
+def _slug(short_name):
+    return re.sub(r'\.md\$', '', short_name)
+
+fixed = 0
+for f in items:
+    t = f.get('type', '')
+    page_rel = f.get('page', '')
+    if not page_rel:
+        continue
+    src_path = wiki_dir / page_rel
+
+    if t == 'broken-link':
+        sug = f.get('suggested_target')
+        broken = f.get('broken_target')
+        if not sug or not broken or not src_path.exists():
+            continue
+        sug_slug = _slug(sug)
+        # Replace [[broken]] and [[broken|alias]] → [[suggested|alias]] (or [[suggested]])
+        pattern = re.compile(r'\[\[' + re.escape(broken) + r'(\|[^\]]+)?\]\]')
+        new_text, n = pattern.subn(
+            lambda m: f'[[{sug_slug}{m.group(1) or ""}]]',
+            src_path.read_text(encoding='utf-8'),
+        )
+        if n > 0:
+            src_path.write_text(new_text, encoding='utf-8')
+            fixed += n
+            print(f"  fixed broken-link: {page_rel} [[{broken}]] → [[{sug_slug}]] ({n}x)")
+
+    elif t == 'no-outlinks':
+        sug = f.get('suggested_target')
+        if not sug or not src_path.exists():
+            continue
+        sug_slug = _slug(sug)
+        text = src_path.read_text(encoding='utf-8')
+        addition = f"\n\n## Related\n\n- [[{sug_slug}]]\n"
+        if f'[[{sug_slug}]]' not in text:
+            src_path.write_text(text.rstrip() + addition, encoding='utf-8')
+            fixed += 1
+            print(f"  fixed no-outlinks: {page_rel} → appended [[{sug_slug}]]")
+
+    elif t == 'orphan':
+        sug = f.get('suggested_source')
+        if not sug:
+            continue
+        sug_path = wiki_dir / sug
+        if not sug_path.exists():
+            continue
+        orphan_slug = _slug(page_rel)
+        text = sug_path.read_text(encoding='utf-8')
+        addition = f"\n\n## Related\n\n- [[{orphan_slug}]]\n"
+        if f'[[{orphan_slug}]]' not in text:
+            sug_path.write_text(text.rstrip() + addition, encoding='utf-8')
+            fixed += 1
+            print(f"  fixed orphan: {sug} → appended [[{orphan_slug}]]")
+print(fixed)
+PYEOF
+)
+  echo "[lint] Auto-fix-links: applied $FIXED_LINKS wikilink fix(es)"
 fi
 
 exit 0

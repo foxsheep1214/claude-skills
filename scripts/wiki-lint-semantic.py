@@ -74,6 +74,12 @@ STATE_FILES = {
 SUMMARY_CHARS = 500
 # Concatenated sample for language detection (NashSU: 2000 chars)
 LANG_SAMPLE_CHARS = 2000
+# Batch size: pages per LLM call. A single concatenated call over a 7594-page
+# wiki blows the conversation model's context, so summaries are split into
+# batches. Each batch is one conversation handoff (exit 101 → agent answers →
+# resume → next batch). The slug is content-hashed, so each batch resumes
+# independently and the loop is idempotent across re-invokes.
+SEMANTIC_BATCH_PAGES = 200
 
 
 # ── language directive (NashSU parity: _language.detect_language port) ───────────
@@ -179,6 +185,50 @@ def build_prompt(summaries: list[tuple[str, str]]) -> tuple[str, str]:
     return system_prompt, user_content
 
 
+def chunk_batches(summaries: list[tuple[str, str]],
+                  batch_pages: int | None = None) -> list[list[tuple[str, str]]]:
+    """Split summaries into batches of at most ``batch_pages`` pages each.
+
+    Keeping each LLM call bounded lets the semantic lint scale to large wikis
+    (a 7594-page HardwareWiki would otherwise produce a single multi-MB
+    prompt). Returns ``[summaries]`` (one batch) when there are fewer pages
+    than the batch size — the common small-wiki case.
+
+    ``batch_pages`` defaults to the module global ``SEMANTIC_BATCH_PAGES``
+    resolved at call time (not def time) so tests can monkeypatch it.
+    """
+    if batch_pages is None:
+        batch_pages = SEMANTIC_BATCH_PAGES
+    if batch_pages <= 0 or len(summaries) <= batch_pages:
+        return [summaries]
+    return [summaries[i:i + batch_pages]
+            for i in range(0, len(summaries), batch_pages)]
+
+
+def dedup_findings(findings: list[dict]) -> list[dict]:
+    """Dedup semantic findings across batches.
+
+    Batches are disjoint by page, but the LLM may emit the same issue keyed
+    under different titles or repeat a cross-page contradiction from both
+    ends. Dedup key: (lowercased page, raw_type, first 80 chars of detail).
+    First occurrence wins.
+    """
+    seen: set[tuple] = set()
+    out: list[dict] = []
+    for f in findings:
+        detail = f.get("detail", "")
+        raw_type = ""
+        m = re.match(r"\[(\w+)\]", detail)
+        if m:
+            raw_type = m.group(1)
+        key = (f.get("page", "").lower(), raw_type, detail[:80])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(f)
+    return out
+
+
 # ── main ─────────────────────────────────────────────────────────────────────
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
@@ -217,23 +267,42 @@ def main() -> int:
     system_prompt, user_content = build_prompt(summaries)
 
     if args.dry_run:
-        print(f"[semantic-lint] DRY-RUN: would send {len(user_content):,} chars to LLM")
+        batches = chunk_batches(summaries)
+        print(f"[semantic-lint] DRY-RUN: {len(summaries)} pages in {len(batches)} batch(es) "
+              f"(batch size {SEMANTIC_BATCH_PAGES})")
+        print(f"[semantic-lint] DRY-RUN: batch 1 would send {len(user_content):,} chars to LLM")
         print(f"  system_prompt: {len(system_prompt):,} chars")
         print(f"  first 500 chars of user_content:\n  {user_content[:500]!r}")
         return 0
 
-    # Conversation mode: write prompt → raise ConversationPending (exit 101) →
-    # agent answers + re-invokes → cached result read here.
-    llm_call = make_conversation_llm_call(state_dir, stage_prefix="semantic-lint")
-    try:
-        raw = llm_call(system_prompt, user_content)
-    except ConversationPending:
-        return 101
-
+    # Conversation mode, batched: each batch is one handoff (write prompt →
+    # exit 101 → agent answers → re-invoke → cache hit → next batch). The
+    # content-hashed slug makes each batch independently resumable, so the
+    # loop is safe to re-enter after every 101.
     now_ms = int(time.time() * 1000)
-    findings = parse_lint_blocks(raw, now_ms)
-    print(f"[semantic-lint] Parsed {len(findings)} semantic finding(s) from LLM output "
-          f"({len(raw):,} chars raw)")
+    llm_call = make_conversation_llm_call(state_dir, stage_prefix="semantic-lint")
+    batches = chunk_batches(summaries)
+    findings: list[dict] = []
+    for i, batch in enumerate(batches, 1):
+        batch_system, batch_user = build_prompt(batch)
+        try:
+            raw = llm_call(batch_system, batch_user)
+        except ConversationPending:
+            print(f"[semantic-lint] Batch {i}/{len(batches)} pending "
+                  f"({len(batch)} pages) — awaiting conversation answer", file=sys.stderr)
+            return 101
+        batch_findings = parse_lint_blocks(raw, now_ms)
+        findings.extend(batch_findings)
+        print(f"[semantic-lint] Batch {i}/{len(batches)}: {len(batch_findings)} finding(s) "
+              f"from {len(batch)} pages ({len(raw):,} chars raw)")
+
+    findings = dedup_findings(findings)
+    # Renumber ids: parse_lint_blocks numbers per-batch from 0, so cross-batch
+    # ids collide. Assign stable, unique ids after dedup.
+    for n, f in enumerate(findings):
+        f["id"] = f"lint-semantic-{n}"
+    print(f"[semantic-lint] Parsed {len(findings)} semantic finding(s) "
+          f"({len(batches)} batch(es), after dedup)")
 
     # Atomic write
     tmp = out_path.with_suffix(out_path.suffix + ".tmp")

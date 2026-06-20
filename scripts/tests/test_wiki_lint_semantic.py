@@ -80,5 +80,91 @@ class TestSemanticLintConversation(unittest.TestCase):
                     os.environ["IMPROVED_WIKI_ROOT"] = old_root
 
 
+class TestBatching(unittest.TestCase):
+    def test_chunk_batches_small_returns_single(self):
+        wls = _load_module()
+        summaries = [("p%d.md" % i, "text") for i in range(5)]
+        batches = wls.chunk_batches(summaries, batch_pages=200)
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(len(batches[0]), 5)
+
+    def test_chunk_batches_splits_at_boundary(self):
+        wls = _load_module()
+        summaries = [("p%d.md" % i, "text") for i in range(7)]
+        batches = wls.chunk_batches(summaries, batch_pages=3)
+        self.assertEqual(len(batches), 3)
+        self.assertEqual([len(b) for b in batches], [3, 3, 1])
+
+    def test_dedup_findings_collapses_cross_batch_dupes(self):
+        wls = _load_module()
+        findings = [
+            {"page": "Add a datasheet", "detail": "[suggestion] link a datasheet"},
+            {"page": "add a datasheet", "detail": "[suggestion] link a datasheet"},
+            {"page": "Add a datasheet", "detail": "[stale] outdated ref"},
+            {"page": "Other", "detail": "[suggestion] something else"},
+        ]
+        out = wls.dedup_findings(findings)
+        self.assertEqual(len(out), 3)
+
+
+class TestSemanticLintBatchedE2E(unittest.TestCase):
+    def test_two_batches_resume_separately(self):
+        """3 pages, batch size 2 → 2 batches. Round 1: batch 1 pending (101).
+        Answer it; round 2: batch 2 pending (101). Answer it; round 3: both
+        cached → 0, findings merged + deduped + renumbered."""
+        wls = _load_module()
+        original_batch = wls.SEMANTIC_BATCH_PAGES
+        wls.SEMANTIC_BATCH_PAGES = 2
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            wiki = root / "wiki" / "concepts"
+            wiki.mkdir(parents=True)
+            for name in ("buck", "boost", "flyback"):
+                (wiki / f"{name}.md").write_text(_page(
+                    f"type: concept\ntitle: {name}\n",
+                    f"# {name}\nA {name} converter.",
+                ), encoding="utf-8")
+
+            old_root = os.environ.get("IMPROVED_WIKI_ROOT")
+            old_argv = sys.argv
+            os.environ["IMPROVED_WIKI_ROOT"] = str(root)
+            sys.argv = ["wiki-lint-semantic.py"]
+            conv_dir = root / ".llm-wiki" / "conversation" / "semantic-lint"
+            try:
+                self.assertEqual(wls.main(), 101)
+                md1 = [p for p in conv_dir.glob("*.md")
+                       if not p.with_suffix(".txt").exists()]
+                self.assertEqual(len(md1), 1)
+                md1[0].with_suffix(".txt").write_text(
+                    "---LINT: suggestion | info | Buck note---\n"
+                    "PAGES: concepts/buck.md\n Buck detail.\n---END LINT---\n",
+                    encoding="utf-8")
+
+                self.assertEqual(wls.main(), 101)
+                md2 = [p for p in conv_dir.glob("*.md")
+                       if not p.with_suffix(".txt").exists()]
+                self.assertEqual(len(md2), 1)
+                md2[0].with_suffix(".txt").write_text(
+                    "---LINT: suggestion | info | Flyback note---\n"
+                    "PAGES: concepts/flyback.md\n Flyback detail.\n---END LINT---\n",
+                    encoding="utf-8")
+
+                self.assertEqual(wls.main(), 0)
+                findings = json.loads(
+                    (root / ".llm-wiki" / "lint-semantic.json").read_text("utf-8"))
+                self.assertEqual(len(findings), 2)
+                self.assertEqual({f["page"] for f in findings},
+                                 {"Buck note", "Flyback note"})
+                ids = [f["id"] for f in findings]
+                self.assertEqual(len(set(ids)), len(ids))
+            finally:
+                wls.SEMANTIC_BATCH_PAGES = original_batch
+                sys.argv = old_argv
+                if old_root is None:
+                    os.environ.pop("IMPROVED_WIKI_ROOT", None)
+                else:
+                    os.environ["IMPROVED_WIKI_ROOT"] = old_root
+
+
 if __name__ == "__main__":
     unittest.main()
