@@ -114,7 +114,9 @@ calling agent's model to do that work.
 - **Aggregate repair safety** (NashSU parity): proportional size caps for index + overview, FILE block output filtering
 - **Wikilink enrichment**: auto-adds `[[wikilinks]]` after page write (NashSU enrich-wikilinks parity)
 - **Source lifecycle**: `--delete` removes source page + cache + orphan concepts/entities + media
-- **Lint auto-fix**: `wiki-lint.sh --fix` repairs missing-domain and missing-frontmatter
+- **Lint auto-fix**: `wiki-lint.sh --fix` repairs missing-domain and missing-frontmatter; `--fix-links` applies the suggestion engine's `suggested_target`/`suggested_source` (rewrites broken `[[wikilinks]]`, appends `## Related` links for orphan/no-outlinks)
+- **Project-level domains**: `wiki-lint.sh` reads the valid-domain set from `<project>/wiki/domains.md` (override) or the skill default — not hardcoded, so RadarWiki / 自然科学知识库 use their own domains without spurious `invalid-domain` findings
+- **Semantic lint batching**: `wiki-lint-semantic.py` splits page summaries into 200-page batches (one conversation handoff each) so it scales to 7594-page wikis without blowing context; cross-batch findings are deduped
 - **Queue watch**: `--watch --drain` daemon mode consuming `ingest-queue.json`
 - **Auto-validation**: `validate_ingest.py` runs at end of every ingest; per-stage gate functions (`_verify_stage_0_text`, `_verify_stage_1_5_chunks`, etc.)
 - **NashSU parity**: aligned with `ingest.ts` v0.4.25 on heading path, overlap suffix, accumulating digest, CJK slug, PPTX/DOCX, sources union merge, schema routing, aggregate repair caps, page merge, wikilink enrichment, source lifecycle. Chunk pipeline improved to barrier-free (analyze→generate per chunk, unified for all chunk counts)
