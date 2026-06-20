@@ -81,6 +81,29 @@ class TestConversationHandoff(unittest.TestCase):
             self.assertEqual(text, "digest: ready")
             self.assertEqual(stop, "end_turn")
 
+    def test_cached_result_survives_replay_for_multi_stage_resume(self):
+        # Regression: ingest.py replays every stage from the top on each
+        # re-invoke. If a consumed .txt is deleted, earlier stages re-prompt
+        # on the next invoke and the pipeline never advances past stage 1.
+        # A cached result must remain readable on a second consume.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            cfg = _make_config(tmp, conversation=True)
+            with self.assertRaises(ConversationPending):
+                _llm_api.call_anthropic_protocol("build a digest", cfg, max_tokens=2048)
+            conv_dir = cfg.runtime_dir / "conversation" / cfg.conversation_prefix
+            md = next(conv_dir.glob("*.md"))
+            md.with_suffix(".txt").write_text("digest: ready", encoding="utf-8")
+
+            # First consume (stage 1 of this invoke).
+            t1, _ = _llm_api.call_anthropic_protocol("build a digest", cfg, max_tokens=2048)
+            self.assertEqual(t1, "digest: ready")
+            # Second consume (stage 1 of the NEXT invoke — replay).
+            t2, _ = _llm_api.call_anthropic_protocol("build a digest", cfg, max_tokens=2048)
+            self.assertEqual(t2, "digest: ready")
+            # The .txt must still exist for future replays.
+            self.assertTrue(md.with_suffix(".txt").exists())
+
     def test_without_conversation_mode_raises(self):
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
