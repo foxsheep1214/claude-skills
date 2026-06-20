@@ -715,11 +715,17 @@ def extract_text_scanned_pdf(file_path: Path, config: Config) -> str:
         doc.close()
         raise RuntimeError(f"minerU API failed to start on port {MINERU_API_PORT}")
 
-    # Run minerU on each pending chunk
+    # Run minerU on each pending chunk (with progress tracking)
+    # Caller: extract_text_mineru() which is called by ingest.py during Stage 0
+    # Data schema: chunk_times (list of float) tracks completed chunk times for ETA estimation
+    chunk_times = []  # Track completion times for ETA estimation
+    total_start = time.time()
+
     for ci, (start, end) in enumerate(chunks):
         chunk_key = f"{start}-{end}"
         if chunk_key in stats["completed_chunks"]:
-            print(f"  [{ci+1:3d}/{len(chunks)}] pages {start+1}-{end} — (cached)")
+            percent = (ci + 1) * 100 // len(chunks)
+            print(f"  [{ci+1:3d}/{len(chunks)}] [{percent:3d}%] pages {start+1}-{end} — (cached)")
             continue
 
         # Create chunk PDF
@@ -735,8 +741,17 @@ def extract_text_scanned_pdf(file_path: Path, config: Config) -> str:
             stats["failed_chunks"].append({"chunk": chunk_key, "error": str(e)})
             continue
 
-        # Submit chunk to minerU API (direct HTTP)
-        print(f"  [{ci+1:3d}/{len(chunks)}] pages {start+1}-{end} — minerU API...", end=" ", flush=True)
+        # Submit chunk to minerU API (direct HTTP) with progress tracking
+        percent = (ci + 1) * 100 // len(chunks)
+        # Calculate ETA based on completed chunks
+        if chunk_times:
+            avg_time = sum(chunk_times) / len(chunk_times)
+            remaining_chunks = len(chunks) - ci - 1
+            eta_sec = remaining_chunks * avg_time
+            eta_str = f"ETA: {int(eta_sec)}s" if eta_sec < 60 else f"ETA: {int(eta_sec/60):.1f}m"
+        else:
+            eta_str = "computing ETA..."
+        print(f"  [{ci+1:3d}/{len(chunks)}] [{percent:3d}%] pages {start+1}-{end} — minerU API ({eta_str})...", end=" ", flush=True)
         t0 = time.time()
         mineru_ok = False
         md_path: Path | None = None
@@ -799,10 +814,14 @@ def extract_text_scanned_pdf(file_path: Path, config: Config) -> str:
                         # results[rk]["images"] = {basename: "data:image/...;base64,..."}
                         # results[rk]["content_list"] = [{type, img_path, page_idx}, ...]
                         _harvest_mineru_figures(results, start, file_path, config, chunk_out)
-                        print(f"OK ({time.time()-t0:.0f}s, {len(md)} chars)")
+                        chunk_time = time.time() - t0
+                        chunk_times.append(chunk_time)  # Track for ETA calculation
+                        print(f"OK ({chunk_time:.0f}s, {len(md)} chars)")
                         mineru_ok = True
                     else:
-                        print(f"EMPTY ({time.time()-t0:.0f}s)")
+                        chunk_time = time.time() - t0
+                        chunk_times.append(chunk_time)  # Track for ETA calculation
+                        print(f"EMPTY ({chunk_time:.0f}s)")
                         mineru_ok = True
                     break
                 elif resp.get("status") == "failed":
@@ -836,10 +855,14 @@ def extract_text_scanned_pdf(file_path: Path, config: Config) -> str:
                                     md_path = chunk_out / f"{chunk_pdf.stem}.md"
                                     md_path.write_text(md, encoding="utf-8")
                                     _harvest_mineru_figures(tdr, start, file_path, config, chunk_out)
-                                    print(f"OK ({time.time()-t0:.0f}s, {len(md)} chars)")
+                                    chunk_time = time.time() - t0
+                                    chunk_times.append(chunk_time)  # Track for ETA calculation
+                                    print(f"OK ({chunk_time:.0f}s, {len(md)} chars)")
                                     mineru_ok = True
                                 else:
-                                    print(f"EMPTY ({time.time()-t0:.0f}s)")
+                                    chunk_time = time.time() - t0
+                                    chunk_times.append(chunk_time)  # Track for ETA calculation
+                                    print(f"EMPTY ({chunk_time:.0f}s)")
                                     mineru_ok = True
                                 break
                             elif td.get("status") == "failed":
