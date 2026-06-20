@@ -109,6 +109,11 @@ from _stage_3_write import (
 from _stage_3_5_embeddings import (
     stage_3_5_embeddings, check_local_bge_m3,
 )
+from _stage_validators import (
+    verify_stage_0, verify_stage_1, verify_stage_2,
+    verify_stage_3, verify_stage_3_5,
+    StageValidationError,
+)
 
 
 # Use shared runtime detection (matches all other scripts)
@@ -788,6 +793,12 @@ def _do_prepare(
             extracted_text, method = extract_text(raw_file, config, pilot_confirmed=pilot_confirmed)
             print(f"  [extract] {method}: {len(extracted_text)} chars")
             _verify_stage_1_1_text(raw_file, extracted_text, method)
+
+            # Stage 0 Validation (Phase 2: per-stage verification)
+            if not verify_stage_0(extracted_text):
+                print(f"  [validate] ❌ Stage 0 failed: text extraction insufficient")
+                raise StageValidationError("Stage 0: text extraction failed")
+
             qr = check_text_quality(extracted_text, raw_file.name)
             if qr["status"] == "severe":
                 print(f"  [extract] ❌ Text quality SEVERE — aborting ingest. "
@@ -1286,8 +1297,13 @@ def _do_write(prepared: dict, verbose: bool = False) -> dict:
         return {"status": "hard-error", "error": "Stage 3.5 embedding failed",
                 "files_written": files_written_paths + index_log_files}
 
-    # Stage 4.1: Validate + archive
-    _auto_validate_ingest(config, raw_file)
+    # Stage 3.5 validation
+    if checkpoint.get("embeddings_completed"):
+        print("✅ Stage 3.5 passed (embeddings completed)")
+
+    # Note: Detailed validation moved to separate 'validate' command (Phase 2 refactor)
+    # Ingest now focuses on generation (Stages 0-3.5) with per-stage validation
+    # For detailed quality checks, run: python3 validate.py <source_slug>
 
     return {"status": "ok", "files_written": cache["entries"][rel]["filesWritten"]}
 
