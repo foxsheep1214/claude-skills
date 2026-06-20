@@ -683,6 +683,19 @@ def extract_text_scanned_pdf(file_path: Path, config: Config) -> str:
     if stats_path.exists():
         stats = json.loads(stats_path.read_text(encoding="utf-8"))
 
+    # Initialize structured logging (JSON Lines format)
+    log_file = out_dir / "ocr_log.jsonl"
+    def log_event(event_type: str, **kwargs):
+        """Write structured event to JSON Lines log."""
+        import datetime as _dt
+        entry = {
+            "timestamp": _dt.datetime.now().isoformat(),
+            "event_type": event_type,
+            **kwargs
+        }
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
     # Start a persistent minerU API server (one per book, shared across chunks)
     pending = [c for c in chunks if f"{c[0]}-{c[1]}" not in stats["completed_chunks"]]
     if not pending:
@@ -860,11 +873,15 @@ def extract_text_scanned_pdf(file_path: Path, config: Config) -> str:
                         chunk_time = time.time() - t0
                         chunk_times.append(chunk_time)  # Track for ETA calculation
                         print(f"OK ({chunk_time:.0f}s, {len(md)} chars)")
+                        log_event("chunk_complete", chunk=ci+1, total=len(chunks),
+                                 elapsed_sec=round(chunk_time, 2), chars=len(md), attempt=attempt+1)
                         mineru_ok = True
                     else:
                         chunk_time = time.time() - t0
                         chunk_times.append(chunk_time)  # Track for ETA calculation
                         print(f"EMPTY ({chunk_time:.0f}s)")
+                        log_event("chunk_complete", chunk=ci+1, total=len(chunks),
+                                 elapsed_sec=round(chunk_time, 2), chars=0, attempt=attempt+1)
                         mineru_ok = True
                     break
                 elif resp.get("status") == "failed":
@@ -963,6 +980,7 @@ def extract_text_scanned_pdf(file_path: Path, config: Config) -> str:
         if not mineru_ok:
             stats["failed_chunks"].append({"chunk": chunk_key, "error": "minerU API failed after retries"})
             _save_mineru_stats(stats_path, stats)
+            log_event("chunk_error", chunk=ci+1, total=len(chunks), error="max retries exceeded")
             w = 64
             lines = [
                 f"ALL RETRIES EXHAUSTED — CHUNK PERMANENTLY FAILED",
@@ -1185,6 +1203,8 @@ def _caption_images(images: list[dict], config: Config, media_dir: Path,
                 if salvaged:
                     captions = [{"idx": int(idx), "caption": cap} for idx, cap in salvaged]
                     print(f"  batch {bi+1}: JSON truncated ({text_len} chars) — salvaged {len(captions)}/{len(batch)} captions")
+                    log_event("json_truncation", batch=bi+1, response_len=text_len,
+                             recovered=len(captions), total=len(batch))
                 else:
                     # Recovery 2: single caption truncated mid-string (no closing quote)
                     m = re.search(r'"caption"\s*:\s*"((?:[^"\\]|\\.)*)$', text)
