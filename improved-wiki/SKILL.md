@@ -71,6 +71,7 @@ calling agent's model to do that work.
 - `references/review-sweep.md` ⭐ — auto-resolve review items satisfied by new ingests (NashSU sweep-reviews.ts parity)
 - `references/conversation-mode.md` — **primary LLM execution mode**: the current conversation does each ingest LLM step with its own model (no scripts, no API key)
 - `references/delegate-mode.md` — **primary LLM execution mode** for batch/automated ingest: `ingest.py --conversation` hands each LLM step to the calling agent
+- `references/nashsu-search-architecture.md` — NashSU 源码实证：graph-relevance.ts（纯确定性 4 信号）+ search.rs（hybrid keyword+vector+RRF，远程 embedding API，无本地模型）。澄清 "NashSU parity" 在搜索侧的实际覆盖范围
 
 **Conventions**:
 - `references/naming-conventions.md` — file naming, frontmatter, wikilink, directory conventions (NashSU-aligned)

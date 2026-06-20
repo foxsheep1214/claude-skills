@@ -560,8 +560,11 @@ def _conversation_llm_call(prompt: str, config: Config, max_tokens=None) -> tupl
             print(f"[conv:{slug}] Result appears to be a prompt copy — regenerating")
             result_file.unlink(missing_ok=True)
         else:
-            result_file.unlink(missing_ok=True)
-            pending_md.unlink(missing_ok=True)
+            # Keep the .txt (and .md) on disk: ingest.py replays every stage
+            # from the top on each re-invoke, so earlier stages must still
+            # find their cached result or the pipeline re-prompts stage 1
+            # forever and never advances. Deletion is only for the stale
+            # (prompt-copy) case above.
             print(f"[conv:{slug}] Read response ({len(response)} chars)")
             _mark_task_done(config, slug)
             return response, "end_turn"
