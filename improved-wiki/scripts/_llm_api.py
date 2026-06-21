@@ -110,28 +110,92 @@ def _is_retryable_exception(exc: Exception) -> bool:
 
 _DIRECT_MAX_RETRIES = 3
 
-# Per-call HTTP socket timeout. Default 300s: GLM generates ~4K tokens in ~45s,
-# so a 16K-token page generation takes ~3 min; 300s gives margin for the largest
-# generation calls while still retrying a dropped connection in ~5 min (vs the
-# old 600s default that made flaky endpoints look like a frozen ingest). Note:
-# with stream=False the server generates the full response before sending, so
-# this timeout is effectively the max generation time — keep it ≥ worst-case
-# generation. Override with the LLM_HTTP_TIMEOUT env var (seconds).
-_HTTP_TIMEOUT_DEFAULT = int(os.environ.get("LLM_HTTP_TIMEOUT", "300"))
+# Per-read socket timeout for the streaming HTTP connection. With stream=True
+# the server sends data as it generates, so the timeout applies to each SSE
+# chunk read — an active (even slow) generation never times out because data
+# keeps flowing, while a truly stalled connection still fails in ~60s. This
+# fixes the root cause of the old non-streaming design where a >300s generation
+# hit the socket timeout mid-generation. Override via LLM_HTTP_TIMEOUT env.
+_HTTP_TIMEOUT_DEFAULT = int(os.environ.get("LLM_HTTP_TIMEOUT", "60"))
 
 
-def _direct_http_post(url: str, headers: dict, body: dict, timeout: int | None = None
-                      ) -> dict:
-    """POST JSON to ``url``, return parsed JSON. Raises on HTTP/transport error."""
+def _stream_post(url: str, headers: dict, body: dict,
+                 parse_fn, timeout: int | None = None) -> tuple[str, str]:
+    """POST with stream=True, parse SSE events via ``parse_fn(resp)``.
+
+    Reads the response line-by-line so the socket timeout applies per-read:
+    active generation keeps the connection alive (data flows), a stall times
+    out fast. Returns ``(text, stop_reason)``.
+    """
     if timeout is None:
         timeout = _HTTP_TIMEOUT_DEFAULT
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
         url, data=data, method="POST",
-        headers={**headers, "Content-Type": "application/json"},
+        headers={**headers, "Content-Type": "application/json",
+                 "Accept": "text/event-stream"},
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read())
+        return parse_fn(resp)
+
+
+def _parse_anthropic_stream(resp) -> tuple[str, str]:
+    """Parse Anthropic-protocol SSE stream → (text, stop_reason)."""
+    parts: list[str] = []
+    stop = "end_turn"
+    for raw in resp:
+        line = raw.decode("utf-8", errors="replace").rstrip("\n").rstrip("\r")
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].lstrip()
+        if payload == "[DONE]" or not payload:
+            continue
+        try:
+            evt = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        et = evt.get("type")
+        if et == "content_block_delta":
+            d = evt.get("delta") or {}
+            if d.get("type") == "text_delta":
+                parts.append(d.get("text", ""))
+        elif et == "message_delta":
+            d = evt.get("delta") or {}
+            if d.get("stop_reason"):
+                stop = d["stop_reason"]
+        elif et == "error":
+            raise RuntimeError(f"anthropic stream error: {evt.get('error', evt)}")
+    return "".join(parts), stop
+
+
+def _parse_openai_stream(resp) -> tuple[str, str]:
+    """Parse OpenAI-protocol SSE stream → (text, finish_reason)."""
+    parts: list[str] = []
+    stop = "stop"
+    for raw in resp:
+        line = raw.decode("utf-8", errors="replace").rstrip("\n").rstrip("\r")
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].lstrip()
+        if payload == "[DONE]":
+            break
+        if not payload:
+            continue
+        try:
+            evt = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        if evt.get("error"):
+            raise RuntimeError(f"openai stream error: {evt.get('error', evt)}")
+        choices = evt.get("choices") or []
+        if choices:
+            delta = choices[0].get("delta") or {}
+            if delta.get("content"):
+                parts.append(delta["content"])
+            fr = choices[0].get("finish_reason")
+            if fr:
+                stop = fr
+    return "".join(parts), stop
 
 
 def call_anthropic_direct(prompt: str, config, max_tokens: int | None = None,
@@ -174,17 +238,9 @@ def call_anthropic_direct(prompt: str, config, max_tokens: int | None = None,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": max_tokens,
             "temperature": 0.3,
-            "stream": False,
+            "stream": True,
         }
-
-        def _parse(resp: dict) -> tuple[str, str]:
-            choices = resp.get("choices") or []
-            if not choices:
-                raise RuntimeError(f"openai response had no choices: {resp}")
-            msg = choices[0].get("message", {})
-            text = msg.get("content", "") or ""
-            stop = choices[0].get("finish_reason", "stop")
-            return text, stop
+        parse_fn = _parse_openai_stream
     else:
         url = f"{base_url}/v1/messages"
         headers = {
@@ -196,22 +252,15 @@ def call_anthropic_direct(prompt: str, config, max_tokens: int | None = None,
             "max_tokens": max_tokens,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.3,
+            "stream": True,
         }
-
-        def _parse(resp: dict) -> tuple[str, str]:
-            content = resp.get("content") or []
-            text = "".join(
-                c.get("text", "") for c in content if c.get("type") == "text"
-            )
-            stop = resp.get("stop_reason", "end_turn")
-            return text, stop
+        parse_fn = _parse_anthropic_stream
 
     last_exc: Exception | None = None
     for attempt in range(_DIRECT_MAX_RETRIES):
         try:
             _progress(label or f"direct:{protocol}", attempt + 1, _DIRECT_MAX_RETRIES)
-            resp = _direct_http_post(url, headers, body)
-            text, stop = _parse(resp)
+            text, stop = _stream_post(url, headers, body, parse_fn)
             if not text.strip():
                 raise RuntimeError("empty response from LLM")
             return text, stop
