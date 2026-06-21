@@ -108,27 +108,6 @@ def verify_stage_3(generation_result: Optional[Dict[str, Any]]) -> bool:
     return True
 
 
-def verify_stage_3_6(embeddings_result: Optional[Dict[str, Any]]) -> bool:
-    """Verify Stage 3.6: Embeddings (vector generation).
-    
-    Requirements:
-    - At least 1 embedding vector created
-    - Embedding mode is valid ('local_bge_m3' or 'dialogue_llm')
-    """
-    if not embeddings_result:
-        return False
-
-    embedding_mode = embeddings_result.get("embedding_mode")
-    if embedding_mode not in ("local_bge_m3", "dialogue_llm"):
-        return False
-
-    vectors_created = embeddings_result.get("vectors_created", 0)
-    if vectors_created < 1:
-        return False
-
-    return True
-
-
 def verify_stage_write(files_written_paths: List[str], wiki_root: Path) -> bool:
     """Verify Stage 3.1-3.4: File writing and caching.
     
@@ -177,7 +156,5 @@ def quick_stage_check(stage_name: str, result: Any) -> bool:
         return verify_stage_2(result) if isinstance(result, dict) else False
     elif stage_name == "stage_3":
         return verify_stage_3(result) if isinstance(result, dict) else False
-    elif stage_name == "stage_3_6":
-        return verify_stage_3_6(result) if isinstance(result, dict) else False
     else:
         return False
