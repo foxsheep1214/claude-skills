@@ -26,6 +26,7 @@ generation and live elsewhere (`_stage_1_extract.py`); they are unaffected.
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.error
 import urllib.request
@@ -109,10 +110,19 @@ def _is_retryable_exception(exc: Exception) -> bool:
 
 _DIRECT_MAX_RETRIES = 3
 
+# Per-call HTTP socket timeout. Default 180s: a 4K-token call takes ~45s and a
+# 16K-token generation ~2-3 min on GLM, so 180s fits normal generation while
+# ensuring a dropped connection retries in ~3 min instead of hanging 10 min on
+# the old 600s default (which made flaky endpoints look like a frozen ingest).
+# Override with the LLM_HTTP_TIMEOUT env var (seconds).
+_HTTP_TIMEOUT_DEFAULT = int(os.environ.get("LLM_HTTP_TIMEOUT", "180"))
 
-def _direct_http_post(url: str, headers: dict, body: dict, timeout: int = 600
+
+def _direct_http_post(url: str, headers: dict, body: dict, timeout: int | None = None
                       ) -> dict:
     """POST JSON to ``url``, return parsed JSON. Raises on HTTP/transport error."""
+    if timeout is None:
+        timeout = _HTTP_TIMEOUT_DEFAULT
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
         url, data=data, method="POST",
