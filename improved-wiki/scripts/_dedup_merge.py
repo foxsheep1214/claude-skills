@@ -1,40 +1,25 @@
 #!/usr/bin/env python3
-"""merge_duplicate_pages.py — merge wiki pages that share the same title.
+"""_dedup_merge.py — deterministic phase-1 dedup engine.
 
-Same-title pages are the same concept (the knowledge base names by title), so
-variant slugs produced by non-deterministic LLM path generation are redundant.
-This script is the deterministic complement to dedup_sweep.py: it handles
-exact-title collisions (language suffixes like -zh, macOS " 2" collisions,
-case variants, parenthesized variants) without any LLM call.
+Merges wiki pages that share the same ``title:`` frontmatter (case-insensitive).
+Same-title pages are the same concept; variant slugs (-zh language suffix,
+macOS " 2" collisions, case variants, parenthesized variants, underscore slugs)
+are produced by non-deterministic LLM path generation and are redundant.
 
-  1. Groups concept/entity pages by lowercased `title:` frontmatter.
-  2. Picks a canonical slug per group (lowercase-kebab, no language suffix,
-     no macOS " 2" collision, no parens, richest body on ties).
-  3. Merges non-canonical pages into the canonical one:
-       - frontmatter tags/related/sources  → union
-       - created/updated                   → earliest/latest
-       - body                              → richest (most bytes)
-       - title                             → best-cased (the richest file's)
-  4. Builds a redirect map (every non-canonical slug → canonical slug) and
-     rewrites `[[wikilinks]]` + `related:` arrays across the whole wiki/.
-  5. Deletes non-canonical files.
+This is the deterministic complement to ``_dedup`` (NashSU's LLM semantic
+dedup). It needs no LLM and runs in seconds. ``dedup_sweep.py`` runs phase 1
+(this module) before phase 2 (LLM semantic) so obvious variant duplicates are
+cheaply removed before spending LLM calls on synonym / cross-language pairs.
 
-Usage:
-  python3 merge_duplicate_pages.py <wiki_root>            # dry-run, print plan
-  python3 merge_duplicate_pages.py <wiki_root> --apply    # execute
-  python3 merge_duplicate_pages.py <wiki_root> --scope concepts   # limit
+Public entry point: ``run(wiki_root, apply=True, scope=...)`` → report dict.
 """
 from __future__ import annotations
 
-import argparse
 import json
 import re
-import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-
-# ── frontmatter / link parsing ──────────────────────────────────────────────
 
 _FM_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n(.*)$", re.DOTALL)
 _TITLE_RE = re.compile(r'^title:\s*["\']?(.+?)["\']?\s*$', re.MULTILINE)
@@ -43,13 +28,17 @@ _RELATED_RE = re.compile(r'^related:\s*\[(.*)\]\s*$', re.MULTILINE)
 _SOURCES_RE = re.compile(r'^sources:\s*\[(.*)\]\s*$', re.MULTILINE)
 _CREATED_RE = re.compile(r'^created:\s*(\S+)\s*$', re.MULTILINE)
 _UPDATED_RE = re.compile(r'^updated:\s*(\S+)\s*$', re.MULTILINE)
-
 _WIKILINK_RE = re.compile(r"\[\[([^\]|]+?)(?:\|([^\]]+?))?\]\]")
 _QSTR_RE = re.compile(r'"([^"]*)"')
 
+LANG_SUFFIX_RE = re.compile(r"-(zh|en|ja|ko|fr|de|es|ru|ar)$")
+DOMAIN_SUFFIXES = {
+    "emc", "pcb", "rf", "emi", "mcu", "fpga", "asic", "soc", "dsp",
+    "adc", "dac", "pll", "ddr", "pcie", "usb", "analog", "power",
+}
+
 
 def _parse_list(raw: str) -> list[str]:
-    """Parse a YAML inline list value: [a, "b", c] → [a, b, c]."""
     if not raw or raw.strip() == "[]":
         return []
     items = _QSTR_RE.findall(raw)
@@ -59,13 +48,12 @@ def _parse_list(raw: str) -> list[str]:
 
 
 def _dump_list(items: list[str]) -> str:
-    """Serialize a list back to a quoted YAML inline list (dedup, order-preserving)."""
     seen: list[str] = []
-    seen_set: set[str] = set()
+    s: set[str] = set()
     for it in items:
         k = it.lower()
-        if k not in seen_set:
-            seen_set.add(k)
+        if k not in s:
+            s.add(k)
             seen.append(it)
     if not seen:
         return "[]"
@@ -81,11 +69,11 @@ def _dump_list(items: list[str]) -> str:
 @dataclass
 class Page:
     path: Path
-    folder: str            # "concepts" | "entities"
-    slug: str              # filename without .md
+    folder: str
+    slug: str
     title: str
-    raw_fm: str            # raw frontmatter block (between the --- lines)
-    body: str              # content after frontmatter
+    raw_fm: str
+    body: str
     size: int
     tags: list[str] = field(default_factory=list)
     related: list[str] = field(default_factory=list)
@@ -112,9 +100,11 @@ def load_page(path: Path, folder: str) -> Page | None:
         return None
     title = tm.group(1).strip()
     slug = path.stem
+
     def g(rx, default=""):
         mm = rx.search(fm)
         return mm.group(1).strip() if mm else default
+
     return Page(
         path=path, folder=folder, slug=slug, title=title,
         raw_fm=fm, body=body, size=len(text),
@@ -124,30 +114,21 @@ def load_page(path: Path, folder: str) -> Page | None:
     )
 
 
-# ── canonical selection ────────────────────────────────────────────────────
-
-_LANG_SUFFIX_RE = re.compile(r"-(zh|en|ja|ko|fr|de|es|ru|ar)$")
-_DOMAIN_SUFFIXES = {
-    "emc", "pcb", "rf", "emi", "mcu", "fpga", "asic", "soc", "dsp",
-    "adc", "dac", "pll", "ddr", "pcie", "usb", "analog", "power",
-}
-
-
 def canonical_score(page: Page) -> tuple:
-    """Higher is more canonical. Returns a sort key (max() picks highest)."""
+    """Higher is more canonical. max() picks highest."""
     slug = page.slug
     score = 0.0
-    if _LANG_SUFFIX_RE.search(slug):          score -= 1000   # -zh/-en dup
-    if re.search(r"\s\d+$", slug):            score -= 1000   # macOS " 2"
-    if "(" in slug or ")" in slug:            score -= 500    # parenthesized
-    if " " in slug:                           score -= 100    # space in slug (collision-prone)
-    if slug != slug.lower():                  score -= 200    # case variant
-    if "_" in slug:                           score -= 30     # underscore slug (prefer hyphen)
+    if LANG_SUFFIX_RE.search(slug):          score -= 1000
+    if re.search(r"\s\d+$", slug):           score -= 1000
+    if "(" in slug or ")" in slug:           score -= 500
+    if " " in slug:                          score -= 100
+    if slug != slug.lower():                 score -= 200
+    if "_" in slug:                          score -= 30
     parts = slug.split("-")
-    if len(parts) > 1 and parts[-1].lower() in _DOMAIN_SUFFIXES:
-        score -= 50                                            # domain-disambiguator suffix
-    score -= min(len(slug), 80) * 0.1                          # prefer shorter
-    score += page.size * 0.001                                 # prefer richer body
+    if len(parts) > 1 and parts[-1].lower() in DOMAIN_SUFFIXES:
+        score -= 50
+    score -= min(len(slug), 80) * 0.1
+    score += page.size * 0.001
     return (score, page.size)
 
 
@@ -155,11 +136,10 @@ def pick_canonical(pages: list[Page]) -> Page:
     return max(pages, key=canonical_score)
 
 
-# ── merge ──────────────────────────────────────────────────────────────────
-
 def _norm_link(s: str) -> str:
     s = s.strip()
     s = re.sub(r"\.md$", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"^wiki:", "", s, flags=re.IGNORECASE)
     s = re.sub(r"^wiki/", "", s, flags=re.IGNORECASE)
     return s.strip().lower()
 
@@ -176,24 +156,20 @@ def _dedup(items: list[str]) -> list[str]:
 
 
 def merge_group(pages: list[Page], canonical: Page) -> Page:
-    """Merge all pages into canonical (in place). Returns canonical."""
     all_tags: list[str] = []
     all_related: list[str] = []
     all_sources: list[str] = []
     richest = max(pages, key=lambda p: p.size)
     earliest = min((p.created for p in pages if p.created), default="")
     latest = max((p.updated for p in pages if p.updated), default="")
-
     sibling_keys = {_norm_link(x.short_name) for x in pages if x is not canonical}
     for p in pages:
         all_tags.extend(p.tags)
         all_sources.extend(p.sources)
         for r in p.related:
-            # drop refs to non-canonical siblings (they'd be self-refs after merge)
             if _norm_link(r) in sibling_keys:
                 continue
             all_related.append(r)
-
     canonical.tags = _dedup(all_tags)
     canonical.sources = _dedup(all_sources)
     canonical.related = _dedup(all_related)
@@ -204,12 +180,8 @@ def merge_group(pages: list[Page], canonical: Page) -> Page:
     return canonical
 
 
-# ── serialization ──────────────────────────────────────────────────────────
-
 def serialize(page: Page) -> str:
-    """Rebuild frontmatter with merged fields, preserving unhandled fields."""
     fm = page.raw_fm
-    # title: quote if it contains YAML-special chars
     if any(c in page.title for c in '":[]{}'):
         title_line = f'title: "{page.title}"'
     else:
@@ -225,65 +197,52 @@ def serialize(page: Page) -> str:
     return f"---\n{fm}\n---\n{page.body}"
 
 
-# ── wikilink rewrite ───────────────────────────────────────────────────────
-
 def build_redirect_index(redirects: dict[str, str]) -> dict[str, str]:
-    """redirects: {non_canon_short_name: canon_short_name}.
-    Returns lookup keyed by every normalized form of the old slug."""
     index: dict[str, str] = {}
     for old, new in redirects.items():
-        old_folder, old_slug = old.split("/", 1)
-        new_folder, new_slug = new.split("/", 1)
-        index[_norm_link(old)] = new            # full form concepts/磁畴-zh
-        index[_norm_link(old_slug)] = new_slug  # basename form 磁畴-zh
+        old_slug = old.split("/", 1)[1]
+        new_slug = new.split("/", 1)[1]
+        for f in ("concepts", "entities"):
+            index[f"{f}/{old_slug.lower()}"] = new
+        index[old_slug.lower()] = new_slug
     return index
 
 
 def rewrite_links_in_text(text: str, index: dict[str, str]) -> tuple[str, int]:
-    n = 0
+    n = [0]
+
     def repl(m: re.Match) -> str:
-        nonlocal n
-        target = m.group(1)
-        display = m.group(2)
-        norm = _norm_link(target)
-        if norm in index:
-            n += 1
-            new_target = index[norm]
-            return f"[[{new_target}|{display}]]" if display else f"[[{new_target}]]"
+        tgt, disp = m.group(1), m.group(2)
+        key = _norm_link(tgt)
+        if key in index:
+            n[0] += 1
+            new = index[key]
+            return f"[[{new}|{disp}]]" if disp else f"[[{new}]]"
         return m.group(0)
     text = _WIKILINK_RE.sub(repl, text)
 
     def rel_repl(m: re.Match) -> str:
-        nonlocal n
         items = _parse_list(m.group(1))
-        new_items = []
+        out = []
         for it in items:
-            norm = _norm_link(it)
-            if norm in index:
-                new_items.append(index[norm])
-                n += 1
+            key = _norm_link(it)
+            if key in index:
+                out.append(index[key]); n[0] += 1
             else:
-                new_items.append(it)
-        return f"related: {_dump_list(new_items)}"
+                out.append(it)
+        return f"related: {_dump_list(out)}"
     text = _RELATED_RE.sub(rel_repl, text)
-    return text, n
+    return text, n[0]
 
 
-# ── main ───────────────────────────────────────────────────────────────────
-
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("wiki_root")
-    ap.add_argument("--apply", action="store_true")
-    ap.add_argument("--scope", nargs="*", default=["concepts", "entities"])
-    args = ap.parse_args()
-    wiki = Path(args.wiki_root) / "wiki"
-    if not wiki.is_dir():
-        print(f"ERROR: {wiki} not found", file=sys.stderr)
-        return 2
+def run(wiki_root: Path, *, apply: bool = True,
+        scope: list[str] | None = None) -> dict:
+    """Run deterministic phase-1 dedup. I/O only when apply=True."""
+    wiki = wiki_root / "wiki"
+    scope = scope or ["concepts", "entities"]
 
     by_title: dict[tuple[str, str], list[Page]] = defaultdict(list)
-    for folder in args.scope:
+    for folder in scope:
         d = wiki / folder
         if not d.is_dir():
             continue
@@ -293,9 +252,7 @@ def main() -> int:
                 by_title[(folder, page.title.strip().lower())].append(page)
 
     groups = [g for g in by_title.values() if len(g) > 1]
-    total_redundant = sum(len(g) - 1 for g in groups)
-    print(f"=== {'APPLY' if args.apply else 'DRY RUN'} ===")
-    print(f"groups: {len(groups)}  redundant files: {total_redundant}")
+    redundant = sum(len(g) - 1 for g in groups)
 
     redirects: dict[str, str] = {}
     merged_canonicals: list[Page] = []
@@ -307,23 +264,27 @@ def main() -> int:
             if p.short_name != canon.short_name:
                 redirects[p.short_name] = canon.short_name
 
-    print(f"\n--- plan sample (first 25 groups) ---")
-    for g in groups[:25]:
-        canon = pick_canonical(g)
-        others = [p.slug for p in g if p.short_name != canon.short_name]
-        print(f"  keep {canon.short_name:55s}  ← {', '.join(others)}")
-    print(f"  ... ({len(groups)} groups total, {total_redundant} files to delete)")
+    report: dict = {
+        "groups": len(groups),
+        "redundant": redundant,
+        "deleted": 0,
+        "rewrites": 0,
+        "files_touched": 0,
+        "apply": apply,
+        "samples": [
+            {"keep": pick_canonical(g).short_name,
+             "merge": [p.slug for p in g if p.short_name != pick_canonical(g).short_name]}
+            for g in groups[:20]
+        ],
+    }
 
-    if not args.apply:
-        print("\n(dry-run; pass --apply to execute)")
-        return 0
+    if not apply or not groups:
+        return report
 
     for page in merged_canonicals:
         page.path.write_text(serialize(page), encoding="utf-8")
-    print(f"\nwrote {len(merged_canonicals)} merged canonical pages")
 
     index = build_redirect_index(redirects)
-    print(f"redirect index entries: {len(index)}")
     total_rewrites = 0
     files_touched = 0
     for md in wiki.rglob("*.md"):
@@ -336,7 +297,6 @@ def main() -> int:
             md.write_text(new_text, encoding="utf-8")
             total_rewrites += n
             files_touched += 1
-    print(f"rewrote {total_rewrites} link references across {files_touched} files")
 
     deleted = 0
     for old_short, _ in redirects.items():
@@ -345,10 +305,8 @@ def main() -> int:
         if target.exists():
             target.unlink()
             deleted += 1
-    print(f"deleted {deleted} non-canonical files")
-    print("\n=== DONE ===")
-    return 0
 
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    report["deleted"] = deleted
+    report["rewrites"] = total_rewrites
+    report["files_touched"] = files_touched
+    return report

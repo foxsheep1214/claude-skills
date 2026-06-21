@@ -102,6 +102,7 @@ AUTO_FIX=false
 FIX_LINKS=false
 JSON_ONLY=false
 SWEEP=false
+DEDUP=false
 SEMANTIC_LIMIT=""
 SEMANTIC_TOKENS=""
 SEM_ARGS=()
@@ -115,6 +116,8 @@ for arg in "$@"; do
     --fix-links)  FIX_LINKS=true ;;
     --json-only)  JSON_ONLY=true ;;
     --sweep)       SWEEP=true ;;
+    --dedup)       DEDUP=true ;;
+    --dry-run)     ;;  # consumed; forwarded to dedup_sweep by the --dedup branch
     --semantic-limit=*) SEMANTIC_LIMIT="${arg#*=}" ;;
     --semantic-tokens=*) SEMANTIC_TOKENS="${arg#*=}" ;;
     --help|-h)
@@ -124,6 +127,19 @@ for arg in "$@"; do
     *) echo "Unknown arg: $arg" >&2; exit 2 ;;
   esac
 done
+
+# --dedup: run two-phase duplicate-page merge. Standalone action — NOT run after
+# ingest, only on explicit request. Phase 1 deterministic auto-applies (deletes
+# files); --semantic adds phase 2 (LLM). --dry-run previews without writes.
+if [ "$DEDUP" = true ]; then
+  DEDUP_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/dedup_sweep.py"
+  DEDUP_ARGS=("$DEDUP_SCRIPT")
+  [ "$SEMANTIC" = true ] && DEDUP_ARGS+=(--semantic)
+  for a in "$@"; do
+    case "$a" in --dry-run) DEDUP_ARGS+=(--dry-run) ;; esac
+  done
+  exec python3 "${DEDUP_ARGS[@]}" --project "$WIKI_ROOT"
+fi
 
 if [ ! -d "$WIKI_DIR" ]; then
   echo "ERROR: wiki/ does not exist under $WIKI_ROOT" >&2
