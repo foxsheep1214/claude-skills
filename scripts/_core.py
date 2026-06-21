@@ -72,8 +72,10 @@ def heartbeat(msg: str = "") -> None:
 
 def llm_call_progress(label: str, attempt: int = 1, retries: int = 0) -> None:
     tag = file_tag()
-    retry_hint = f" (retry {attempt}/{retries+1})" if retries else ""
-    print(f"  {tag}→ {label}{retry_hint}...", end=" ", flush=True)
+    # Show "retry" only on actual retries (attempt > 1). Printing "(retry 1/4)"
+    # on a first attempt is misleading — it's the initial try, not a retry.
+    hint = f" (retry {attempt - 1}/{retries})" if retries and attempt > 1 else ""
+    print(f"  {tag}→ {label}{hint}...", end=" ", flush=True)
 
 
 def llm_call_done(elapsed: float, chars: int | None = None) -> None:
@@ -112,6 +114,28 @@ class ConversationPending(BaseException):
 # ── Configuration ──
 
 def load_provider_config(name: str | None = None) -> dict:
+    # Priority 1: the current agent's own provider (ambient ANTHROPIC_* env).
+    # Ingest text-generation follows whichever agent/model runs the skill —
+    # GLM-5.2 this session, Deepseek V4 Pro next session, … — without any
+    # hardcoded model in config.json. Skipped when a specific provider is
+    # explicitly requested (name arg or LLM_PROVIDER env), so callers can
+    # still force a particular provider when needed.
+    explicit = name or os.environ.get("LLM_PROVIDER")
+    if not explicit:
+        agent_key = os.environ.get("ANTHROPIC_AUTH_TOKEN") or os.environ.get("ANTHROPIC_API_KEY")
+        agent_url = os.environ.get("ANTHROPIC_BASE_URL")
+        agent_model = os.environ.get("ANTHROPIC_MODEL")
+        if agent_key and agent_url and agent_model:
+            return {
+                "api_key": agent_key,
+                "base_url": agent_url.rstrip("/"),
+                "model": agent_model,
+                "protocol": "anthropic",
+                "provider": "agent",
+            }
+    # Priority 2: config.json provider (named, default, or LLM_PROVIDER).
+    # Fallback for non-agent contexts (cron, standalone CLI) where no agent
+    # env is present.
     config_path = Path.home() / ".agents" / "config.json"
     if config_path.exists():
         try:

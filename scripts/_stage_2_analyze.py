@@ -209,7 +209,7 @@ def stage_2_1_global_digest(
     """Stage 1: One LLM call for book-level structural summary."""
     print(f"[stage 2.1] Global Digest — sending {min(len(extracted_text), config.source_budget):,} chars to LLM...")
     prompt = build_global_digest_prompt(extracted_text, file_path, config, template)
-    response, stop_reason = call_anthropic_protocol(prompt, config, max_tokens=8192)
+    response, stop_reason = call_anthropic_protocol(prompt, config, max_tokens=8192, label="global digest")
     if verbose:
         print(f"[stage 2.1] Raw response ({len(response)} chars, stop={stop_reason}):\n{response[:3000]}...\n")
     digest = parse_yaml_block(response)
@@ -490,7 +490,7 @@ def stage_2_2_chunk_analysis(
 
             try:
                 t_chunk = time.time()
-                response, stop_reason = call_anthropic_protocol(prompt, config, max_tokens=8192)
+                response, stop_reason = call_anthropic_protocol(prompt, config, max_tokens=8192, label=f"chunk {i+1} analysis")
                 analysis = parse_yaml_block(response)
                 analysis["_chunk_index"] = i + 1
                 analysis["_chunk_size"] = chunk_len

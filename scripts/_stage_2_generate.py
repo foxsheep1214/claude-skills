@@ -725,7 +725,7 @@ def _generate_chunk(
             if attempt == 0:
                 print(f"  [chunk {chunk_idx+1}] generating ({concepts_n}c/{entities_n}e)...",
                       flush=True)
-            response, stop_reason = call_anthropic_protocol(prompt, config, max_tokens=gen_tokens)
+            response, stop_reason = call_anthropic_protocol(prompt, config, max_tokens=gen_tokens, label=f"chunk {chunk_idx+1} generation")
             blocks = parse_file_blocks(response)
             dt = time.time() - t0
             tag = f" (retry #{attempt})" if attempt > 0 else ""
@@ -920,7 +920,7 @@ Example:
 """
 
     gen_tokens = config.compute_max_tokens(8192)
-    response, stop_reason = call_anthropic_protocol(prompt, config, max_tokens=gen_tokens)
+    response, stop_reason = call_anthropic_protocol(prompt, config, max_tokens=gen_tokens, label="source page")
     if verbose:
         print(f"[stage 2.4] Source page generated ({len(response):,} chars, stop={stop_reason})")
     else:
