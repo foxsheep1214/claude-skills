@@ -638,7 +638,7 @@ def ingest_one(
     _run_post_ingest_lint(config)
     _run_post_ingest_graph(config)
     _auto_embed_new_pages(config, files_written)
-    _auto_validate_ingest(config, raw_file)
+    stage_4_1_validate_ingest(config, raw_file)
 
     return {"status": "ok", "files_written": files_written}
 
@@ -1770,7 +1770,7 @@ def ingest_watch(
         lock.release()
 
 
-def _auto_validate_ingest(config: Config, raw_file: Path) -> None:
+def stage_4_1_validate_ingest(config: Config, raw_file: Path) -> None:
     """Run validate_ingest.py inline for the just-completed source.
 
     Superpowers Iron Law: every ingest MUST produce fresh verification evidence

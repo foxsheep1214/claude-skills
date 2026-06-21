@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""validate_ingest.py — per-project 13-stage ingest validator
+"""Stage 4.1: per-project ingest validator (final verification gate).
+
+validate_ingest.py — per-project 13-stage ingest validator
 
 Aligns with ingest.py actual output: reads from .llm-wiki/ingest-cache.json
 cache entry + disk state.  Does NOT look for intermediate files (full.txt,
@@ -38,11 +40,11 @@ SOURCES_DIR = WIKI / "sources"
 CACHE_KEY = os.environ.get("CACHE_KEY", "")
 
 
-def find_cache_entry(slug: str) -> Optional[dict]:
+def _stage_4_1_find_cache_entry(slug: str) -> Optional[dict]:
     """Find the cache entry whose key or filesWritten contains *slug*.
 
     Matching strategy (in order):
-      1. Exact CACHE_KEY env var match (set by ingest.py's _auto_validate_ingest)
+      1. Exact CACHE_KEY env var match (set by ingest.py's stage_4_1_validate_ingest)
       2. slug appears in cache key (substring)
       3. slug appears in filesWritten paths
       4. Normalized match: strip common prefixes (book/, paper/, datasheet/)
@@ -83,7 +85,7 @@ def find_cache_entry(slug: str) -> Optional[dict]:
     return None
 
 
-def find_media_dir(slug: str) -> Optional[Path]:
+def _stage_4_1_find_media_dir(slug: str) -> Optional[Path]:
     """Find media directory matching slug (recursive search — media/ mirrors raw/)."""
     if not MEDIA_DIR.is_dir():
         return None
@@ -109,7 +111,7 @@ _LINT_STATE_FILES = {
 _LINT_SKIP_DIRS = {"lint", "REVIEW", "media"}
 
 
-def collect_structural_lint_findings(wiki_dir: Path) -> list[dict]:
+def _stage_4_1_collect_structural_lint_findings(wiki_dir: Path) -> list[dict]:
     """Run structural lint with deterministic link suggestions over wiki/.
 
     Returns findings from _lint_suggest.run_structural_lint — broken-link,
@@ -156,10 +158,10 @@ def main():
     print("=" * 60)
 
     # ── Resolve cache entry ──
-    entry = find_cache_entry(SOURCE_SLUG)
+    entry = _stage_4_1_find_cache_entry(SOURCE_SLUG)
     stages = entry.get("stages", {}) if entry else {}
 
-    media = find_media_dir(SOURCE_SLUG)
+    media = _stage_4_1_find_media_dir(SOURCE_SLUG)
     source_page = None
     if SOURCES_DIR.is_dir():
         for f in SOURCES_DIR.rglob("*.md"):
@@ -473,7 +475,7 @@ def main():
     # ═══════════════════════════════════════════════
     print("\n[Lint suggestions] Structural (wiki-wide, non-gating)")
     try:
-        lint_findings = collect_structural_lint_findings(WIKI)
+        lint_findings = _stage_4_1_collect_structural_lint_findings(WIKI)
     except Exception as e:  # defensive: lint must never break the validator
         lint_findings = []
         note("structural lint skipped", f"{type(e).__name__}: {e}")
