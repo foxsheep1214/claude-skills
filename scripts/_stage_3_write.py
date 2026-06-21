@@ -17,6 +17,7 @@ from _core import (
     source_slug_from_raw_path,
 )
 from _llm_api import call_anthropic_protocol
+from _frontmatter_array import parse_frontmatter_array
 
 __all__ = ["write_wiki_file", "stage_3_4_aggregate_repair", "canonicalize_sources_field", "stamp_frontmatter_dates", "sanitize_ingested_content", "is_safe_ingest_path", "wiki_path_for_source", "merge_page_content", "_auto_correct_wiki_path", "_contains_cjk", "_make_cjk_slug", "backup_existing_page"]
 
@@ -337,13 +338,11 @@ def canonicalize_sources_field(content: str, canonical_source: str) -> str:
     fm = content[3:end]
     body = content[end + 4:]
 
-    # Parse existing sources
-    existing_sources: list[str] = []
-    src_match = re.search(r'^sources:\s*\[(.*?)\]', fm, re.MULTILINE)
-    if src_match:
-        src_text = src_match.group(1)
-        # Extract individual source strings (quoted or unquoted)
-        existing_sources = [s.strip().strip('\'"') for s in src_text.split(",") if s.strip()]
+    # Parse existing sources (quote-aware: a filename containing commas must
+    # stay one element, not split on every comma). The old naive src_text.split(",")
+    # broke sources like "raw/Book/Flexible Electronics, Volume 1...pdf" into
+    # fragments and then re-appended the full path → a 4-item corrupted array.
+    existing_sources: list[str] = parse_frontmatter_array(content, "sources")
 
     # Normalize canonical source for comparison
     canon_norm = canonical_source.lower().replace("\\", "/").rstrip("/")
