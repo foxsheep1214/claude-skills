@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""dedup_sweep.py — two-phase duplicate-page detection + merge.
+"""cross_source_dedup.py — 跨源去重 (cross-source dedup): lint-time, whole-wiki.
+
+Runs OFFLINE (user-invoked, not during ingest) across the ENTIRE wiki to merge
+duplicates that accumulated across multiple ingests. Distinct from Stage 2.5
+源内去重 (intra-source dedup, `_stage_2_5_dedup.py`) which is a conservative
+inline filter on one source's blocks before write. This module is thorough:
+two-phase, backs up, writes a report, and rewrites all `[[wikilinks]]` +
+`related:` across the wiki so merges leave no broken links.
 
 Phase 1 (deterministic, no LLM): merge pages sharing the same ``title:``
 frontmatter — variant slugs (-zh, macOS " 2", case, parens). Seconds, no API
@@ -19,12 +26,12 @@ Dedup is NOT run after ingest — it is a standalone lint-command action
 pass ``--dry-run`` to preview.
 
 Usage:
-  python3 dedup_sweep.py                          # phase 1, auto-apply
-  python3 dedup_sweep.py --semantic               # phase 1 + phase 2 (LLM)
-  python3 dedup_sweep.py --dry-run                # preview only, no writes
-  python3 dedup_sweep.py --deterministic-only     # skip phase 2
-  python3 dedup_sweep.py --project /path/to/wiki
-  python3 dedup_sweep.py --whitelist whitelist.json
+  python3 cross_source_dedup.py                          # phase 1, auto-apply
+  python3 cross_source_dedup.py --semantic               # phase 1 + phase 2 (LLM)
+  python3 cross_source_dedup.py --dry-run                # preview only, no writes
+  python3 cross_source_dedup.py --deterministic-only     # skip phase 2
+  python3 cross_source_dedup.py --project /path/to/wiki
+  python3 cross_source_dedup.py --whitelist whitelist.json
 
 Exit codes: 0 done; 101 conversation pending (phase 2 only); 2 config error.
 """

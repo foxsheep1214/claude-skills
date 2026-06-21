@@ -1,6 +1,6 @@
 """_llm_call.py — conversation-mode LLM handoff for standalone sweep tools.
 
-Sweep tools (``dedup_sweep.py``, ``wiki-lint-semantic.py``) call LLM steps in a
+Sweep tools (``cross_source_dedup.py``, ``wiki-lint-semantic.py``) call LLM steps in a
 ``(system, user) -> str`` shape. This module builds that callable on top of the
 shared :func:`_llm_api.conversation_handoff` primitive — the same primitive
 ingest.py's conversation router uses — so there is one cache-read / prompt-write
