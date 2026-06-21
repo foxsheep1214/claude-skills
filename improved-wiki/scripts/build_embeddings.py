@@ -137,40 +137,55 @@ def chunk_text(text, max_chars=1500, overlap=200):
 
 
 def collect_pages():
+    """Walk wiki/<type>/ subdirs for .md pages.
+
+    wiki/sources/ mirrors raw/<type>/<any-subdir>/<file> (see
+    naming-conventions.md), so it can nest arbitrarily deep
+    (wiki/sources/Datasheet/ADI/ADL8113.md) — must walk recursively,
+    not os.listdir() the top level only, or whole type folders go
+    silently unembedded.
+    """
     pages = []
-    for sub in ["sources", "concepts", "entities", "queries", "comparisons", "findings", "synthesis"]:
+    for sub in ["sources", "concepts", "entities", "queries", "comparisons",
+                "findings", "synthesis", "thesis"]:
         d = f"{WIKI}/{sub}"
         if not os.path.exists(d):
             continue
-        for f in sorted(os.listdir(d)):
-            if not f.endswith(".md"):
-                continue
-            stem = f[:-3]
-            if stem in SKIP_STEMS:
-                continue
-            path = f"{d}/{f}"
-            try:
-                content = open(path, encoding="utf-8").read()
-            except Exception:
-                continue
-            if content.startswith("---"):
-                end = content.find("\n---", 3)
-                body = content[end + 4:] if end != -1 else content
-            else:
-                body = content
-            title = ""
-            m = re.search(r"^title:\s*[\"']?([^\"'\n]+)[\"']?", content, re.MULTILINE)
-            if m:
-                title = m.group(1).strip()
-            heading_match = re.search(r"^#\s+(.+)$", body, re.MULTILINE)
-            heading = heading_match.group(1) if heading_match else ""
-            pages.append({
-                "page_id": stem,
-                "path": f"{sub}/{f}",
-                "title": title,
-                "heading": heading,
-                "body": body,
-            })
+        for dirpath, _dirnames, filenames in os.walk(d):
+            for f in sorted(filenames):
+                if not f.endswith(".md"):
+                    continue
+                stem = f[:-3]
+                if stem in SKIP_STEMS:
+                    continue
+                path = os.path.join(dirpath, f)
+                rel_path = os.path.relpath(path, WIKI)
+                # path-derived id: avoids collisions between same-named
+                # pages nested under different type subdirs (e.g. two
+                # manufacturers' datasheets both named "LM2596.md")
+                page_id = rel_path[:-3].replace(os.sep, "/")
+                try:
+                    content = open(path, encoding="utf-8").read()
+                except Exception:
+                    continue
+                if content.startswith("---"):
+                    end = content.find("\n---", 3)
+                    body = content[end + 4:] if end != -1 else content
+                else:
+                    body = content
+                title = ""
+                m = re.search(r"^title:\s*[\"']?([^\"'\n]+)[\"']?", content, re.MULTILINE)
+                if m:
+                    title = m.group(1).strip()
+                heading_match = re.search(r"^#\s+(.+)$", body, re.MULTILINE)
+                heading = heading_match.group(1) if heading_match else ""
+                pages.append({
+                    "page_id": page_id,
+                    "path": rel_path.replace(os.sep, "/"),
+                    "title": title,
+                    "heading": heading,
+                    "body": body,
+                })
     return pages
 
 

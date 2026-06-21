@@ -436,9 +436,9 @@ def main():
         check("ingest-cache.json has matching entry", False, f"slug={SOURCE_SLUG}")
 
     # ═══════════════════════════════════════════════
-    # Stage 4: Embeddings (optional)
+    # Stage 3.6: Embeddings (mandatory attempt — local Ollama bge-m3)
     # ═══════════════════════════════════════════════
-    print("\n[Stage 3.6] Embeddings (optional)")
+    print("\n[Stage 3.6] Embeddings (mandatory attempt)")
     lance = RUNTIME / "lancedb"
     embed_cache = RUNTIME / "embed-cache.json"
     lance_present = lance.is_dir() and bool(list(lance.glob("*.lance")))
@@ -466,9 +466,20 @@ def main():
               "WARNING: embed-cache.json empty/missing — embeddings may be stale")
     elif lance_present or embed_cache_exists:
         # Partial: one exists but not the other
-        note("partial", f"lance={'yes' if lance_present else 'no'}, embed-cache={'populated' if embed_cache_exists else 'no'}")
+        check("lancedb + embed-cache consistency", False,
+              f"lance={'yes' if lance_present else 'no'}, embed-cache={'populated' if embed_cache_exists else 'no'}")
     else:
-        note("skipped", "LanceDB not enabled; OK if wiki < 100 pages")
+        sys.path.insert(0, str(_script_dir))
+        from ingest import _stage_3_6_check_embed_capability
+        base_url = os.environ.get("EMBEDDING_BASE_URL", "http://127.0.0.1:11434/v1")
+        model = os.environ.get("EMBEDDING_MODEL", "bge-m3")
+        cap_ok, cap_reason = _stage_3_6_check_embed_capability(base_url, model)
+        if cap_ok:
+            check("embeddings present", False,
+                  "本地 Ollama bge-m3 可用但 wiki 尚未 embed — 补跑 build_embeddings.py")
+        else:
+            check("embeddings present", False,
+                  f"本地能力不可用（{cap_reason}）— 安装后补跑 build_embeddings.py")
 
     # ═══════════════════════════════════════════════
     # Structural lint suggestions (wiki-wide, non-gating)

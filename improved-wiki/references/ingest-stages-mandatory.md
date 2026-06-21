@@ -364,11 +364,12 @@ Phase 0 包含 3 个前置检查，必须按顺序执行：
   )
   ```
 
-### 3.6 · Embeddings
-- **作用**：把 wiki/ 下的页面 chunk 化 + embed，写到 LanceDB
+### 3.6 · Embeddings ⭐ **强制尝试（2026-06-21 起）**
+- **作用**：把 wiki/ 下的页面 chunk 化 + embed，写到 LanceDB。默认本地 Ollama bge-m3（`http://127.0.0.1:11434/v1`），**不再需要显式 export `EMBEDDING_BASE_URL`**——只要本地 Ollama 跑着且模型已拉取就会自动执行。
+- **本地能力缺失时**：不再静默跳过。打印安装提醒（`ollama serve` / `ollama pull bge-m3` / `pip install lancedb`）+ 补跑命令，但**不阻断 ingest**（页面已在 Stage 3.1 落盘）。`validate_ingest.py` 会把这种情况记为 ❌ 而不是 `note skipped`，让缺失可见。
 - **跳过代价**：检索只能用纯关键词（wiki < 100 页可接受，> 100 页必须 embeddings）
 - **产物**：`lancedb/` 表 + `embed-cache.json`
-- **go/no-go**：LanceDB 表存在 + 已写 ≥ N 个 chunk
+- **go/no-go**：LanceDB 表存在 + 已写 ≥ N 个 chunk；本地能力不可用时，go/no-go 改为"安装提醒已打印 + 补跑命令已给出"
 
 ---
 
@@ -404,7 +405,7 @@ Phase 0 包含 3 个前置检查，必须按顺序执行：
 - 3.5 是 conditional（overall_score < 0.65 时标记为 needs_review）
 - 3.4 程序化 append index/log + LLM 重写 overview（喂入现有内容防丢失）
 - 3.4 在所有 stage 之后（写最终缓存）；hard error（磁盘满/权限）阻止 cache save
-- 3.6 auto-run 当 `EMBEDDING_BASE_URL` 已设置时；否则手动 `build_embeddings.py`
+- 3.6 强制尝试，默认本地 Ollama bge-m3；本地能力不可用时打印安装提醒（不阻断 ingest），手动补跑 `build_embeddings.py`
 
 ---
 
@@ -430,7 +431,7 @@ Phase 0 包含 3 个前置检查，必须按顺序执行：
 - [ ] **Stage 3.2：source 页含 `## Embedded Images` 段**
 - [ ] **Stage 3.4：ingest-cache.json 含本次所有 raw 文件 hash**（且 `validate_ingest.py` 通过；ingest.py 末尾自动运行）
 - [ ] **Stage 3.5：quality_metrics 已记录；overall_score 已计算**；如 <0.65 已标记为 needs_review
-- [ ] 3.6：lancedb 表已更新（如启用 embeddings）
+- [ ] **3.6：lancedb 表已更新**；本地能力不可用时确认安装提醒已打印并记录待补跑
 
 **关键新增 stage**（2026-06-20 优化）：
 - **Stage 2.3**（增量学习）—— 避免新源生成孤儿概念
@@ -527,6 +528,7 @@ for k, v in cache['entries'].items():
 - **2026-06-20**：知识图谱从 lint 剥离，改为独立 **Graph 命令**（与 Ingest / Lint 并列，对齐 NashSU graph-view 架构——KG 在 NashSU 本就由 `graph-view.tsx` 按需构建，不属于 lint）。脚本重命名 `build_knowledge_graph.py` → `graph.py`。Stage 16-18 框架改为「Graph 命令」段。
 
 - **2026-06-21（三）**：拆分 `_run_chunk_pipeline` 为 `_analyze_all_chunks` → Stage 2.3 → `_generate_all_chunks`。Stage 2.3 的 `incremental_associations` 现回灌进每个 chunk 的生成 prompt（`build_per_chunk_gen_prompt` 新增 `existing_refs` 段，列出已有 wiki 页 wikilink，LLM 不再重复生成）。原 `_chunk_pipeline_serial`/`_chunk_pipeline_parallel` 合并为统一 analyze/generate 两阶段（分析仍分串行/并行，生成统一串行）。
+- **2026-06-21（四）**：Stage 3.6（Embeddings）从"`EMBEDDING_BASE_URL` 显式设置才跑"改为**强制尝试**——默认值直接指向本地 Ollama bge-m3（`http://127.0.0.1:11434/v1`），不需要 export 任何环境变量。新增 `_stage_3_6_check_embed_capability()` 探测 lancedb 是否已装 + Ollama 是否可连 + 模型是否已拉取；本地能力不可用时打印安装提醒（ollama serve / ollama pull bge-m3 / pip install lancedb）+ 补跑命令，但不阻断 ingest。`validate_ingest.py` 同步把"未启用 embeddings"从 `note skipped` 升级为 `check` 失败项，使缺失在验证摘要里可见而非被静默忽略。根因：此前默认行为依赖用户记得手动 export 变量，即使本地 Ollama+bge-m3 已就位也会被当作"未配置"而静默跳过。
 
 ## Graph 命令：知识图谱（Stage 16-18）
 
