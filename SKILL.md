@@ -11,7 +11,7 @@ Karpathy LLM-Wiki pattern + NashSU v0.4.25 pipeline. Three peer commands: **Inge
 
 ```
 Phase 0: [0.1 raw-naming] → [0.2 source dedup] → [0.3 pilot OCR]  (pre-processing gates)
-Ingest: 1.1→1.2→1.3→2.1→2.2→2.3→2.4→2.5→2.6→2.7→2.8→2.9→2.10→3.1→3.2→3.4→3.5→[3.6]→4.1
+Ingest: 1.1→1.2→1.3→2.1→2.2→2.3→2.4→2.5→2.6→2.7→2.8→2.9→2.10→3.1→3.2→3.4→3.5→3.6→4.1
         (numbered stages per ingest.py; "2.x" = per-chunk concept/entity gen + quality review; "3" = file write)
 
 Phase 0: Pre-processing gates  (raw naming, source dedup, pilot OCR)
@@ -45,7 +45,7 @@ Text generation has two paths (round iii, 2026-06-21), routed by
 
 Two other external-API dependencies (not text generation):
 - **Stage 1.3 image captioning** → MiniMax VLM (`anthropic/v1/messages` multi-image batch). This is the only MiniMax dependency; it needs `MINIMAX_CN_API_KEY` / `LLM_API_KEY` for the caption endpoint only.
-- **Stage 3.6 embeddings** → optional; configured separately if you want vector retrieval. Not routed through MiniMax.
+- **Stage 3.6 embeddings** → mandatory attempt (2026-06-21): defaults to local Ollama bge-m3 (`http://127.0.0.1:11434/v1`), no env var export required. If Ollama isn't running, the model isn't pulled, or `lancedb` isn't installed, prints an install reminder instead of silently skipping — never aborts the ingest. Not routed through MiniMax.
 
 ## Entry points
 

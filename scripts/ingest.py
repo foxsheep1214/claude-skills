@@ -1414,7 +1414,8 @@ def _do_write(prepared: dict, verbose: bool = False) -> dict:
     # Ingest now focuses on generation (Stages 0-3.5) with per-stage validation
     # For detailed quality checks, run: python3 validate.py <source_slug>
     # Stage 3.6 (embeddings) runs in the post-ingest section of ingest_one —
-    # single entry point, soft-skip when EMBEDDING_BASE_URL is unset.
+    # single entry point, mandatory attempt against local Ollama bge-m3
+    # (prints an install reminder instead of silently skipping if unavailable).
 
     return {"status": "ok", "files_written": cache["entries"][rel]["filesWritten"]}
 
@@ -1774,19 +1775,57 @@ def stage_4_1_validate_ingest(config: Config, raw_file: Path) -> None:
         print(f"[validate] ✅ All 15 stages verified — ingest complete")
 
 
-def stage_3_6_embed_new_pages(config: Config, files_written: list[str]) -> None:
-    """Stage 3.6: embed wiki pages for semantic retrieval (single entry point).
+def _stage_3_6_check_embed_capability(base_url: str, model: str) -> tuple[bool, str]:
+    """Probe local embedding capability: lancedb installed + Ollama reachable + model pulled.
 
-    NashSU parity (ingest.ts L1127-1146). Runs only if EMBEDDING_BASE_URL is set
-    and lancedb is installed; otherwise soft-skips — embeddings are optional
-    infrastructure and never fail the ingest. Delegates to build_embeddings.py
-    (default Ollama http://127.0.0.1:11434/v1).
+    Returns (ok, reason). reason is empty when ok, otherwise a human-readable
+    cause used to build the install reminder.
     """
-    if not os.environ.get("EMBEDDING_BASE_URL"):
-        return
     try:
         import lancedb  # noqa: F401
     except ImportError:
+        return False, "lancedb 未安装"
+
+    import urllib.request
+    root = base_url.rstrip("/")
+    if root.endswith("/v1"):
+        root = root[: -len("/v1")]
+    try:
+        with urllib.request.urlopen(f"{root}/api/tags", timeout=3) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return False, f"无法连接本地 Ollama（{root}）"
+
+    names = {m.get("model", "").split(":")[0] for m in data.get("models", [])}
+    if model.split(":")[0] not in names:
+        return False, f"Ollama 已运行，但模型 {model} 未拉取"
+    return True, ""
+
+
+def stage_3_6_embed_new_pages(config: Config, files_written: list[str]) -> None:
+    """Stage 3.6: embed wiki pages for semantic retrieval (mandatory attempt).
+
+    NashSU parity (ingest.ts L1127-1146), upgraded 2026-06-21: always attempts
+    embedding against local Ollama bge-m3 (default http://127.0.0.1:11434/v1)
+    rather than gating behind an explicit EMBEDDING_BASE_URL export. If the
+    local capability is missing (Ollama not running, model not pulled, or
+    lancedb not installed), prints an actionable install reminder instead of
+    silently skipping. A missing local model never aborts the ingest — pages
+    are already written to disk by Stage 3.1 — but the gap is now visible
+    instead of silent.
+    """
+    base_url = os.environ.get("EMBEDDING_BASE_URL", "http://127.0.0.1:11434/v1")
+    model = os.environ.get("EMBEDDING_MODEL", "bge-m3")
+
+    ok, reason = _stage_3_6_check_embed_capability(base_url, model)
+    if not ok:
+        print(f"[stage 3.6] ⚠️  Embeddings 不可用：{reason}")
+        print("[stage 3.6] 请安装后补跑（wiki 检索质量会下降到纯关键词，>100 页的 wiki 必须补）：")
+        print("  1. brew install ollama          # 如未安装")
+        print("  2. ollama serve                 # 如未启动")
+        print(f"  3. ollama pull {model}")
+        print("  4. pip install lancedb")
+        print(f"  5. python3 scripts/build_embeddings.py --project {config.wiki_root} embed")
         return
 
     skip_files = {"index.md", "log.md", "overview.md", "schema.md"}
