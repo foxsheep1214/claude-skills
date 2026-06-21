@@ -68,7 +68,7 @@ with an EXACT slug match below. Output ONLY a JSON array:
 {body_sample}"""
 
     try:
-        response, _ = call_anthropic_direct(prompt, config, max_tokens=2048)
+        response, _ = call_anthropic_direct(prompt, config, max_tokens=2048, label="wikilink enrichment")
         text = response.strip()
         if text.startswith("```"):
             text = text.split("```", 2)[1]

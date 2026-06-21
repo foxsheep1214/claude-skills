@@ -122,13 +122,16 @@ def _direct_http_post(url: str, headers: dict, body: dict, timeout: int = 600
         return json.loads(resp.read())
 
 
-def call_anthropic_direct(prompt: str, config, max_tokens: int | None = None
-                          ) -> tuple[str, str]:
+def call_anthropic_direct(prompt: str, config, max_tokens: int | None = None,
+                          label: str = "") -> tuple[str, str]:
     """Direct HTTP text-generation call. Returns (text, stop_reason).
 
     Uses ``config.llm_protocol`` ("openai" or "anthropic"), ``config.llm_base_url``,
     ``config.llm_model``, ``config.llm_api_key``. Retries transient errors with
     jittered backoff (``_retry_jitter`` / ``_is_retryable_exception``).
+
+    ``label`` is shown in the progress line (e.g. "chunk 1 generation") so the
+    user can see what the call is for, not just "direct:anthropic".
 
     Raises ``RuntimeError`` if no API key is configured, or if all retries fail.
     """
@@ -194,7 +197,7 @@ def call_anthropic_direct(prompt: str, config, max_tokens: int | None = None
     last_exc: Exception | None = None
     for attempt in range(_DIRECT_MAX_RETRIES):
         try:
-            _progress(f"direct:{protocol}", attempt + 1, _DIRECT_MAX_RETRIES)
+            _progress(label or f"direct:{protocol}", attempt + 1, _DIRECT_MAX_RETRIES)
             resp = _direct_http_post(url, headers, body)
             text, stop = _parse(resp)
             if not text.strip():
@@ -295,8 +298,8 @@ def conversation_handoff(
     raise ConversationPending()
 
 
-def call_anthropic_protocol(prompt: str, config, max_tokens: int | None = None
-                            ) -> tuple[str, str]:
+def call_anthropic_protocol(prompt: str, config, max_tokens: int | None = None,
+                            label: str = "") -> tuple[str, str]:
     """Route a text-generation LLM call.
 
     Path selection (round iii):
@@ -307,6 +310,8 @@ def call_anthropic_protocol(prompt: str, config, max_tokens: int | None = None
         configured provider). This is the default and the only parallelizable
         path.
 
+    ``label`` is forwarded to the progress line (e.g. "chunk 1 generation").
+
     Returns (text_content, stop_reason).
     """
     if getattr(config, 'conversation_mode', False):
@@ -316,7 +321,7 @@ def call_anthropic_protocol(prompt: str, config, max_tokens: int | None = None
                 "(ingest.py must call set_conversation_router at startup)."
             )
         return _conversation_router(prompt, config, max_tokens)
-    return call_anthropic_direct(prompt, config, max_tokens)
+    return call_anthropic_direct(prompt, config, max_tokens, label=label)
 
 
 __all__ = [
