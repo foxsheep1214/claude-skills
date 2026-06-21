@@ -55,7 +55,7 @@ Karpathy LLM-Wiki 模式 + NashSU LLM Wiki app (v0.4.25) 的 `autoIngestImpl()` 
 | 2.10 | `stage_2_10_review_suggestions`（`_stage_2_10_review.py`） | 生成内容质量审查 |
 | 3.4 | `stage_3_4_aggregate_repair` | 聚合修复 + 缓存 |
 | 3.5 | `_stage_3_5_calculate_quality_score`（`_stage_3_5_quality.py`） | 质量评分卡 |
-| 3.6 | `stage_3_6_embeddings`（`_stage_3_6_embeddings.py`） | 嵌入向量化 |
+| 3.6 | `stage_3_6_embed_new_pages`（`ingest.py` post-ingest） | 嵌入向量化（单一入口，soft-skip）|
 | 4.1 | `_auto_validate_ingest`（`validate_ingest.py`） | 最终验证 |
 
 > **编号即执行顺序**：本文 Stage 编号采用「Phase.Stage」形式（Phase 0 前置检查 / 1 原始素材提取 / 2 消化主流程 / 3 材料写入 / 4 验证检查），编号从上到下严格递增，与代码实际执行顺序一致（2026-06-20 重编号，旧编号 2.0/2.5rev/2.6 实际在 Stage 3 之后执行的错位已消除）。

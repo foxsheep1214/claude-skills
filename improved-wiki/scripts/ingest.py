@@ -116,12 +116,10 @@ from _stage_3_write import (
     write_wiki_file, merge_page_content,
 )
 from _stage_3_2_inject_images import stage_3_2_inject_images
-from _stage_3_6_embeddings import stage_3_6_embeddings
 from _enrich_wikilinks import enrich_wikilinks
 from _stage_validators import (
     verify_stage_0, verify_stage_1, verify_stage_2,
-    verify_stage_3, verify_stage_3_6,
-    StageValidationError,
+    verify_stage_3,     StageValidationError,
 )
 
 
@@ -637,7 +635,7 @@ def ingest_one(
     # ── Post-ingest (unique to single-book path) ──
     _run_post_ingest_lint(config)
     _run_post_ingest_graph(config)
-    _auto_embed_new_pages(config, files_written)
+    stage_3_6_embed_new_pages(config, files_written)
     stage_4_1_validate_ingest(config, raw_file)
 
     return {"status": "ok", "files_written": files_written}
@@ -1443,20 +1441,11 @@ def _do_write(prepared: dict, verbose: bool = False) -> dict:
         stage_1_2_result.get("count", 0), stage_1_3_result.get("captioned", 0),
         file_blocks, _q_review, _q_stats, _q_dedup_ran, verbose=verbose)
 
-    # Stage 3.6: Embeddings (强制执行，2026-06-20)
-    checkpoint = {"files_written": files_written_paths + index_log_files}
-    if not stage_3_6_embeddings(checkpoint, config.wiki_dir, []):
-        print("❌ Stage 3.6 embedding 失败")
-        return {"status": "hard-error", "error": "Stage 3.6 embedding failed",
-                "files_written": files_written_paths + index_log_files}
-
-    # Stage 3.6 validation
-    if checkpoint.get("embeddings_completed"):
-        print("✅ Stage 3.6 passed (embeddings completed)")
-
     # Note: Detailed validation moved to separate 'validate' command (Phase 2 refactor)
     # Ingest now focuses on generation (Stages 0-3.5) with per-stage validation
     # For detailed quality checks, run: python3 validate.py <source_slug>
+    # Stage 3.6 (embeddings) runs in the post-ingest section of ingest_one —
+    # single entry point, soft-skip when EMBEDDING_BASE_URL is unset.
 
     return {"status": "ok", "files_written": cache["entries"][rel]["filesWritten"]}
 
@@ -1816,11 +1805,13 @@ def stage_4_1_validate_ingest(config: Config, raw_file: Path) -> None:
         print(f"[validate] ✅ All 15 stages verified — ingest complete")
 
 
-def _auto_embed_new_pages(config: Config, files_written: list[str]) -> None:
-    """NashSU parity (ingest.ts L1127-1146): embed new pages after successful ingest.
+def stage_3_6_embed_new_pages(config: Config, files_written: list[str]) -> None:
+    """Stage 3.6: embed wiki pages for semantic retrieval (single entry point).
 
-    Runs only if EMBEDDING_BASE_URL is set and lancedb is installed.
-    Skips index.md, log.md, overview.md, and schema.md.
+    NashSU parity (ingest.ts L1127-1146). Runs only if EMBEDDING_BASE_URL is set
+    and lancedb is installed; otherwise soft-skips — embeddings are optional
+    infrastructure and never fail the ingest. Delegates to build_embeddings.py
+    (default Ollama http://127.0.0.1:11434/v1).
     """
     if not os.environ.get("EMBEDDING_BASE_URL"):
         return
@@ -1837,18 +1828,13 @@ def _auto_embed_new_pages(config: Config, files_written: list[str]) -> None:
     if not new_files:
         return
 
-    print(f"[stage 3.6] Auto-embedding {len(new_files)} new pages...")
-    try:
-        from build_embeddings import embed_pages
-        embed_pages(config.wiki_dir, config.runtime_dir, new_files)
-    except ImportError:
-        # Fallback: run build_embeddings.py as subprocess
-        import subprocess
-        script = Path(__file__).parent / "build_embeddings.py"
-        subprocess.run(
-            [sys.executable, str(script), "--project", str(config.wiki_root), "embed"],
-            capture_output=True, timeout=300,
-        )
+    print(f"[stage 3.6] Embedding {len(new_files)} new pages...")
+    import subprocess
+    script = Path(__file__).parent / "build_embeddings.py"
+    subprocess.run(
+        [sys.executable, str(script), "--project", str(config.wiki_root), "embed"],
+        capture_output=True, timeout=300,
+    )
     print(f"[stage 3.6] Embedding complete")
 
 
