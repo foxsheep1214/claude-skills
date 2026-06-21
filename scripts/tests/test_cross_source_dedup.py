@@ -1,9 +1,9 @@
-"""Tests for dedup_sweep — orchestration over a tmp wiki with a mock LLM.
+"""Tests for cross_source_dedup — orchestration over a tmp wiki with a mock LLM.
 
 No real network: the mock llm_call branches on the system prompt to serve
 either the detector response or the merger merged-page.
 
-Run:  python3 scripts/tests/test_dedup_sweep.py
+Run:  python3 scripts/tests/test_cross_source_dedup.py
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-import dedup_sweep as ds  # noqa: E402
+import cross_source_dedup as ds  # noqa: E402
 import _dedup  # noqa: E402
 from _frontmatter_array import parse_frontmatter_array  # noqa: E402
 

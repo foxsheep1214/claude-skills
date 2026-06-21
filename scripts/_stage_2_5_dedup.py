@@ -1,9 +1,14 @@
-"""Stage 2.5: Concept Dedup & Merge (deterministic candidate + LLM confirm)
+"""Stage 2.5: 源内去重 (intra-source dedup) — concept collapse within ONE source.
 
-Deterministic phase finds candidate duplicate groups (title word-overlap or
-definition Jaccard >= 0.6). LLM phase confirms each group and picks the
-canonical primary; unconfirmed groups are left intact (conservative — never
-merge on LLM failure).
+Runs during ingest, BEFORE write, as a filter on the LLM's just-generated
+file_blocks for this one book. Catches the case where the LLM names the same
+concept twice within a single source (e.g. emits both `PAO` and `聚磷菌`
+blocks). Deterministic candidate (title word-overlap or definition Jaccard
+>= 0.6) + LLM confirm per group; unconfirmed groups are left intact
+(conservative — never merge on LLM failure). Does NOT rewrite cross-references
+(pages not written yet) and does NOT look at the existing wiki (cross-source
+awareness is Stage 2.3's job). This is distinct from the lint-time cross-source
+dedup (跨源去重, `cross_source_dedup.py`) which merges across the whole wiki.
 
 Refactored 2026-06-21 for explicit stage naming.
 """

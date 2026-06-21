@@ -101,7 +101,7 @@ def _stage_4_1_find_media_dir(slug: str) -> Optional[Path]:
 
 
 # ── Structural lint suggestions (wiki-wide, non-gating) ─────────────────────
-# Mirrors dedup_sweep exclusions: anchors + state + lint/REVIEW/media dirs.
+# Mirrors cross_source_dedup exclusions: anchors + state + lint/REVIEW/media dirs.
 _LINT_ANCHOR_FILES = {"index.md", "log.md", "overview.md"}
 _LINT_STATE_FILES = {
     "lint-cache.json", "ingest-cache.json", "ingest-queue.json",

@@ -7,7 +7,7 @@ macOS " 2" collisions, case variants, parenthesized variants, underscore slugs)
 are produced by non-deterministic LLM path generation and are redundant.
 
 This is the deterministic complement to ``_dedup`` (NashSU's LLM semantic
-dedup). It needs no LLM and runs in seconds. ``dedup_sweep.py`` runs phase 1
+dedup). It needs no LLM and runs in seconds. ``cross_source_dedup.py`` runs phase 1
 (this module) before phase 2 (LLM semantic) so obvious variant duplicates are
 cheaply removed before spending LLM calls on synonym / cross-language pairs.
 
