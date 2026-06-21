@@ -1,37 +1,32 @@
 #!/usr/bin/env python3
-"""dedup_sweep.py — runnable entrypoint for the semantic dedup subsystem.
+"""dedup_sweep.py — two-phase duplicate-page detection + merge.
 
-Wires `_dedup` (port of NashSU dedup.ts) into a real wiki/ sweep:
+Phase 1 (deterministic, no LLM): merge pages sharing the same ``title:``
+frontmatter — variant slugs (-zh, macOS " 2", case, parens). Seconds, no API
+key.  (``_dedup_merge.run``)
 
-  1. Walk wiki/ content pages, build EntitySummary for each (skips pages
-     with no frontmatter).
-  2. LLM-driven detect_duplicate_groups (same-topic, different-name slugs:
-     EN/中文, singular/plural, abbrev/full, synonyms). Not-duplicates
-     whitelist honored.
-  3. DRY-RUN (default): print candidate groups + write dedup-report.json.
-     No writes.
-  4. --apply: for each group, merge into the canonical slug — LLM body
-     merge + deterministic frontmatter union + cross-ref rewrite — then
-     backup every touched file, write canonical + rewrites, delete the
-     merged-away pages, and prune index.md.
+Phase 2 (LLM semantic): detect same-topic different-name slugs (synonyms,
+EN/中文, singular/plural, abbrev/full) via NashSU's ``_dedup`` engine, then
+LLM body-merge each group.
 
-The LLM callable is the conversation-mode handoff from
-`_llm_call.make_conversation_llm_call`: each LLM step (detect + per-group
-merge) writes a prompt file and raises ConversationPending (exit 101); the
-calling agent answers with the current conversation's model, writes the
-result, and re-invokes — the sweep resumes with every prior call cached.
-No external LLM API key is needed (text generation is conversation-only).
-All merge I/O is reversible via the backup dir.
+LLM path (phase 2): **direct HTTP API** by default (``call_anthropic_direct`` —
+same entry point ingest uses; parallelizable, fast), needing ``LLM_API_KEY``.
+Falls back to conversation-mode handoff (``make_conversation_llm_call``) when no
+key is configured, so the calling agent's model does the work.
+
+Dedup is NOT run after ingest — it is a standalone lint-command action
+(``wiki-lint.sh --dedup``). When invoked, it auto-applies (deletes files);
+pass ``--dry-run`` to preview.
 
 Usage:
-  python3 dedup_sweep.py                            # dry-run: report only
-  python3 dedup_sweep.py --apply                    # execute merges
-  python3 dedup_sweep.py --project /path/to/wiki    # override root
-  python3 dedup_sweep.py --whitelist whitelist.json # extra not-duplicates
+  python3 dedup_sweep.py                          # phase 1, auto-apply
+  python3 dedup_sweep.py --semantic               # phase 1 + phase 2 (LLM)
+  python3 dedup_sweep.py --dry-run                # preview only, no writes
+  python3 dedup_sweep.py --deterministic-only     # skip phase 2
+  python3 dedup_sweep.py --project /path/to/wiki
+  python3 dedup_sweep.py --whitelist whitelist.json
 
-Exit codes: 0 done (report written); 101 conversation pending (agent must
-answer the prompt under <runtime>/conversation/dedup/ and re-invoke); 2
-config/usage error.
+Exit codes: 0 done; 101 conversation pending (phase 2 only); 2 config error.
 """
 from __future__ import annotations
 
@@ -41,6 +36,7 @@ import os
 import sys
 from datetime import date, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Callable
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -48,11 +44,12 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 import _dedup  # noqa: E402
+import _dedup_merge  # noqa: E402
 from _core import ConversationPending  # noqa: E402
 from _paths import detect_runtime_dir  # noqa: E402
-from _llm_call import make_conversation_llm_call  # noqa: E402
+from _llm_api import call_anthropic_direct  # noqa: E402
+from _llm_call import make_conversation_llm_call  # noqa: E402 (fallback)
 
-# Files / dirs excluded from dedup scanning (anchors, state, self-output).
 ANCHOR_FILES = {"index.md", "log.md", "overview.md"}
 STATE_FILES = {
     "lint-cache.json", "lint.json", "ingest-cache.json", "ingest-queue.json",
@@ -63,13 +60,51 @@ STATE_FILES = {
 SKIP_DIRS = {"lint", "REVIEW", "media"}
 
 
-def collect_wiki_pages(wiki_dir: Path) -> list[tuple[str, str]]:
-    """Return [(project_relative_path, content), ...] for every content page.
+# ── LLM call: direct API (default) with conversation fallback ──────────────
 
-    project_relative_path includes the ``wiki/`` prefix (e.g.
-    "wiki/entities/foo.md") so it can be joined to PROJECT_ROOT for I/O.
-    Excludes anchors, state files, and lint/REVIEW/media dirs.
-    """
+def _load_config_file() -> dict:
+    cfg_path = Path.home() / ".agents" / "config.json"
+    if not cfg_path.exists():
+        return {}
+    try:
+        return json.loads(cfg_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _direct_config() -> SimpleNamespace | None:
+    """Build a minimal config for call_anthropic_direct. None if no key."""
+    cfg = _load_config_file()
+    key = os.environ.get("LLM_API_KEY", "") or cfg.get("llm_api_key") or cfg.get("LLM_API_KEY", "")
+    if not key:
+        return None
+    return SimpleNamespace(
+        llm_api_key=key,
+        llm_base_url=os.environ.get("LLM_BASE_URL", "") or cfg.get("llm_base_url", ""),
+        llm_model=os.environ.get("LLM_MODEL", "") or cfg.get("llm_model", ""),
+        llm_protocol=os.environ.get("LLM_PROTOCOL", "anthropic"),
+        max_tokens=16384,
+    )
+
+
+def make_llm_call(project_root: Path):
+    """Return (callable, runtime). Direct API if key set, else conversation."""
+    cfg = _direct_config()
+    if cfg is not None:
+        def direct_call(prompt: str, label: str = "") -> str:
+            text, _stop = call_anthropic_direct(prompt, cfg, label=label or "dedup")
+            return text
+        print("[dedup] LLM path: direct API (call_anthropic_direct)")
+        return direct_call, None
+    runtime = detect_runtime_dir(project_root)
+    conv = make_conversation_llm_call(runtime, stage_prefix="dedup")
+    print("[dedup] LLM path: conversation-mode (no LLM_API_KEY)")
+    return conv, runtime
+
+
+# ── phase 2: LLM semantic dedup (existing _dedup engine) ───────────────────
+
+def collect_wiki_pages(wiki_dir: Path) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     if not wiki_dir.is_dir():
         return out
@@ -87,21 +122,7 @@ def collect_wiki_pages(wiki_dir: Path) -> list[tuple[str, str]]:
     return out
 
 
-def build_summaries(pages: list[tuple[str, str]]) -> list[_dedup.EntitySummary]:
-    """Build EntitySummary for each page that has frontmatter."""
-    summaries: list[_dedup.EntitySummary] = []
-    for path, content in pages:
-        s = _dedup.extract_entity_summary(path, content)
-        if s is not None:
-            summaries.append(s)
-    return summaries
-
-
 def load_whitelist(*paths: Path) -> list[list[str]]:
-    """Load not-duplicates pairs from one or more JSON files.
-
-    Each file: {"not_duplicates": [["a", "b"], ...]} or a bare list.
-    """
     pairs: list[list[str]] = []
     for p in paths:
         if not p or not p.exists():
@@ -120,48 +141,24 @@ def load_whitelist(*paths: Path) -> list[list[str]]:
 
 
 def _slug_from_path(project_relative: str) -> str:
-    base = project_relative.split("/")[-1]
-    return os.path.splitext(base)[0]
+    return os.path.splitext(project_relative.split("/")[-1])[0]
 
 
-def run_sweep(
-    project_root: Path,
-    llm_call: Callable[[str, str], str],
-    *,
-    apply: bool = False,
-    whitelist_pairs: list[list[str]] | None = None,
-    today=None,
-) -> dict:
-    """Core sweep. Returns the report dict. Performs I/O only when apply=True.
-
-    today: callable () -> str (ISO date) or a str; defaults to today.
-    """
+def run_phase2(project_root, llm_call, *, apply=True, whitelist_pairs=None, today=None) -> dict:
     wiki_dir = project_root / "wiki"
     runtime = detect_runtime_dir(project_root)
     pages = collect_wiki_pages(wiki_dir)
-    summaries = build_summaries(pages)
-
+    summaries = [s for s in (_dedup.extract_entity_summary(p, c) for p, c in pages) if s is not None]
     if len(summaries) < 2:
-        print(f"[dedup] Fewer than 2 summarizable pages ({len(summaries)}); nothing to scan.")
-        report = {
-            "generatedAt": datetime.now().isoformat(timespec="seconds"),
-            "apply": apply,
-            "pagesScanned": len(summaries),
-            "groups": [],
-            "applied": [],
-        }
-        _write_report(runtime / "dedup-report.json", report)
-        return report
+        print("[dedup] phase 2: fewer than 2 summarizable pages; skipping.")
+        return {"groups": 0, "applied": []}
 
     not_duplicates = list(whitelist_pairs or [])
     not_duplicates += load_whitelist(runtime / "dedup-whitelist.json")
 
-    print(f"[dedup] Scanning {len(summaries)} pages for duplicate groups ...")
-    groups = _dedup.detect_duplicate_groups(
-        summaries, llm_call, not_duplicates=not_duplicates
-    )
-
-    print(f"[dedup] Detected {len(groups)} duplicate group(s).")
+    print(f"[dedup] phase 2: scanning {len(summaries)} pages for semantic duplicates ...")
+    groups = _dedup.detect_duplicate_groups(summaries, llm_call, not_duplicates=not_duplicates)
+    print(f"[dedup] phase 2: detected {len(groups)} duplicate group(s).")
     for i, g in enumerate(groups, 1):
         print(f"  group {i}: {g['slugs']}  ({g['confidence']}) — {g['reason']}")
 
@@ -170,89 +167,49 @@ def run_sweep(
         backup_dir = runtime / f"dedup-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         backup_dir.mkdir(parents=True, exist_ok=True)
         pages_by_slug = {_slug_from_path(p): (p, c) for p, c in pages}
-
         for g in groups:
             canonical_slug = g["slugs"][0]
             group_pages = []
             for slug in g["slugs"]:
                 entry = pages_by_slug.get(slug)
                 if entry is None:
-                    print(f"[dedup] WARNING: slug '{slug}' not found on disk; skipping group.", file=sys.stderr)
                     group_pages = []
                     break
                 path, content = entry
                 group_pages.append({"slug": slug, "path": path, "content": content})
             if len(group_pages) < 2:
                 continue
-
-            other_pages = [
-                {"path": p, "content": c}
-                for p, c in pages
-                if _slug_from_path(p) not in {gp["slug"] for gp in group_pages}
-            ]
-
+            other_pages = [{"path": p, "content": c} for p, c in pages
+                           if _slug_from_path(p) not in {gp["slug"] for gp in group_pages}]
             result = _dedup.merge_duplicate_group(
-                group_pages, canonical_slug, other_pages, llm_call, today=today
-            )
+                group_pages, canonical_slug, other_pages, llm_call, today=today)
             _persist_merge(project_root, result, backup_dir)
             removed = {_slug_from_path(p) for p in result.pages_to_delete}
-            applied.append({
-                "canonical": canonical_slug,
-                "canonical_path": result.canonical_path,
-                "merged_away": sorted(removed),
-                "rewrites": [r["path"] for r in result.rewrites],
-                "backup_dir": str(backup_dir.relative_to(project_root))
-                if _is_relative_to(backup_dir, project_root) else str(backup_dir),
-            })
-            print(f"[dedup] merged → {canonical_slug} "
-                  f"(removed {sorted(removed)}, {len(result.rewrites)} cross-ref rewrite(s))")
+            applied.append({"canonical": canonical_slug, "merged_away": sorted(removed),
+                            "rewrites": [r["path"] for r in result.rewrites]})
+            print(f"[dedup] phase 2: merged → {canonical_slug} "
+                  f"(removed {sorted(removed)}, {len(result.rewrites)} rewrite(s))")
 
-    report = {
+    _write_report(runtime / "dedup-report.json", {
         "generatedAt": datetime.now().isoformat(timespec="seconds"),
-        "apply": apply,
-        "pagesScanned": len(summaries),
-        "groups": groups,
-        "applied": applied,
-    }
-    _write_report(runtime / "dedup-report.json", report)
-    mode = "APPLIED" if apply else "DRY-RUN (no writes)"
-    print(f"[dedup] {mode} — report → {runtime / 'dedup-report.json'}")
-    return report
+        "apply": apply, "phase2": {"groups": groups, "applied": applied}})
+    return {"groups": groups, "applied": applied}
 
 
-def _is_relative_to(path: Path, base: Path) -> bool:
-    try:
-        path.relative_to(base)
-        return True
-    except ValueError:
-        return False
-
-
-def _persist_merge(project_root: Path, result, backup_dir: Path) -> None:
-    """Write backup, canonical, rewrites; delete merged-away pages; prune index."""
-    # 1. Backup pre-merge state of every touched file.
+def _persist_merge(project_root, result, backup_dir) -> None:
     for b in result.backup:
         bpath = backup_dir / b["path"]
         bpath.parent.mkdir(parents=True, exist_ok=True)
         bpath.write_text(b["content"], encoding="utf-8")
-
-    # 2. Write canonical merged content.
     canon = project_root / result.canonical_path
     canon.parent.mkdir(parents=True, exist_ok=True)
     canon.write_text(result.canonical_content, encoding="utf-8")
-
-    # 3. Write cross-reference rewrites.
     for r in result.rewrites:
-        rpath = project_root / r["path"]
-        rpath.write_text(r["new_content"], encoding="utf-8")
-
-    # 4. Delete merged-away pages.
+        (project_root / r["path"]).write_text(r["new_content"], encoding="utf-8")
     for p in result.pages_to_delete:
         dpath = project_root / p
         if dpath.exists():
             dpath.unlink()
-
-    # 5. Prune index.md lines referencing removed slugs.
     removed_slugs = {_slug_from_path(p) for p in result.pages_to_delete}
     index_path = project_root / "wiki" / "index.md"
     if index_path.exists() and removed_slugs:
@@ -269,16 +226,17 @@ def _write_report(path: Path, report: dict) -> None:
     tmp.replace(path)
 
 
+# ── main ───────────────────────────────────────────────────────────────────
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Semantic duplicate-page detection + merge sweep."
-    )
+    parser = argparse.ArgumentParser(description="Two-phase dedup. Auto-applies by default.")
     parser.add_argument("--project", default=None,
                         help="Wiki project root (default: IMPROVED_WIKI_ROOT or cwd)")
-    parser.add_argument("--apply", action="store_true",
-                        help="Execute merges (default: dry-run, no writes)")
-    parser.add_argument("--whitelist", action="append", default=[],
-                        help="Extra not-duplicates JSON file (repeatable)")
+    parser.add_argument("--semantic", action="store_true", help="Also run phase 2 (LLM semantic)")
+    parser.add_argument("--deterministic-only", action="store_true",
+                        help="Only run phase 1 (skip phase 2 even if --semantic)")
+    parser.add_argument("--dry-run", action="store_true", help="Preview only — no writes")
+    parser.add_argument("--whitelist", action="append", default=[])
     args = parser.parse_args(argv)
 
     project_root = Path(args.project or os.environ.get("IMPROVED_WIKI_ROOT", os.getcwd()))
@@ -286,22 +244,31 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: wiki/ not found under {project_root}", file=sys.stderr)
         return 2
 
-    runtime = detect_runtime_dir(project_root)
-    llm_call = make_conversation_llm_call(runtime, stage_prefix="dedup")
+    apply = not args.dry_run
 
-    whitelist_pairs = load_whitelist(*[Path(p) for p in args.whitelist])
-    try:
-        run_sweep(
-            project_root, llm_call,
-            apply=args.apply,
-            whitelist_pairs=whitelist_pairs,
-            today=lambda: date.today().isoformat(),
-        )
-    except ConversationPending:
-        # Conversation handoff: the calling agent must answer the prompt under
-        # <runtime>/conversation/dedup/ and re-invoke. Exit 101 signals this
-        # (same convention as ingest.py --conversation).
-        return 101
+    print(f"[dedup] phase 1: deterministic title-collision merge ({'APPLY' if apply else 'DRY-RUN'})")
+    r1 = _dedup_merge.run(project_root, apply=apply)
+    print(f"[dedup] phase 1: {r1['groups']} groups, {r1['redundant']} redundant")
+    if apply:
+        print(f"[dedup] phase 1: deleted {r1['deleted']}, rewrote {r1['rewrites']} refs "
+              f"across {r1['files_touched']} files")
+    elif r1["groups"]:
+        for s in r1["samples"][:15]:
+            print(f"  keep {s['keep']:55s} ← {', '.join(s['merge'])}")
+
+    if args.semantic and not args.deterministic_only:
+        llm_call, _ = make_llm_call(project_root)
+        whitelist_pairs = load_whitelist(*[Path(p) for p in args.whitelist])
+        try:
+            run_phase2(project_root, llm_call, apply=apply,
+                       whitelist_pairs=whitelist_pairs,
+                       today=lambda: date.today().isoformat())
+        except ConversationPending:
+            print("[dedup] phase 2: conversation handoff — answer prompt under "
+                  "<runtime>/conversation/dedup/ and re-invoke.", file=sys.stderr)
+            return 101
+
+    print("[dedup] done.")
     return 0
 
 
