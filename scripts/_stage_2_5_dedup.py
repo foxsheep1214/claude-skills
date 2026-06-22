@@ -188,7 +188,7 @@ def stage_2_5_dedup(file_blocks, chunk_analyses, config, *, verbose: bool = Fals
 
     Runs before the source page so the index lists de-duplicated concepts.
     Single-chunk sources skip dedup. Returns a dict with the new file_blocks,
-    dedup_was_run flag, before/after concept counts, and the merge_rules list.
+    dedup_was_run flag, and before/after concept counts.
     """
     concept_count_before = sum(1 for p, _ in file_blocks if "/concepts/" in p)
     dedup_was_run = len(chunk_analyses) > 1
@@ -199,7 +199,6 @@ def stage_2_5_dedup(file_blocks, chunk_analyses, config, *, verbose: bool = Fals
             "dedup_was_run": False,
             "concept_count_before": concept_count_before,
             "concept_count_after": concept_count_before,
-            "merge_rules": [],
         }
 
     concepts = _stage_2_5_extract_concept_blocks(file_blocks)
@@ -217,5 +216,4 @@ def stage_2_5_dedup(file_blocks, chunk_analyses, config, *, verbose: bool = Fals
         "dedup_was_run": True,
         "concept_count_before": concept_count_before,
         "concept_count_after": concept_count_after,
-        "merge_rules": merge_rules,
     }

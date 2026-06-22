@@ -247,39 +247,36 @@ Phase 0 包含 3 个前置检查，必须按顺序执行：
   - 生成了 0-5 个 query FILE block 或 `---QUERIES: 0---` 标记
   - 每个 query frontmatter 含 `type: query` + `title:` + `sources:` 三必填字段
   - 每个 query body ≥200 字符（不含 frontmatter）
-- **prompt 模板**：见 `references/query-generation.md`
+- **设计说明 / prompt 结构**：见 `references/query-generation.md`（真相源为 `_stage_2_7_build_prompt`）
 
 ### Stage 2.8 · Cross-source Query Resolution ⭐ **新增 2026-06-20（高优先）**
 
-- **作用**：对 2.7 生成的 query，自动检索 wiki 已有页面是否包含答案。如果发现答案（wikilink 匹配度 >70%），自动关闭 query；如果答案不完整，转换为 comparison 而非 query。从而把零散的知识自动关联起来，减少"已问过的问题"积累。
+- **作用**：对 2.7 生成的 query，自动检索 wiki 已有页面是否已经回答。发现答案则自动关闭 query；否则保留。从而减少"已问过的问题"积累。
 - **跳过条件**：2.7 无 query 生成，或 wiki 为空时自动跳过
 - **产物**：progress checkpoint 中的 `query_resolutions`（列表：[{query_slug, status, resolution_pages}]）
-  - status: "closed" / "rewritten_as_comparison" / "kept"
+  - status: "closed" / "kept"（二选一）
   - resolution_pages: 找到的相关已有页面列表
 - **go/no-go**：
   - `query_resolutions` 已记录（可为 `[]`）
-  - 关闭或改写的 query 已从 FILE blocks 中移除或重标记
+  - 关闭的 query 已从 FILE blocks 中移除
 - **算法**：
   1. 对每个 2.7 生成的 query FILE block
-  2. 提取 query title + body 的关键概念
-  3. 在 wiki 中搜索相关页面（semantic search 或关键词匹配，>70% 匹配度）
-  4. LLM 判断：answer_found（直接关闭） / answer_incomplete（建议 comparison） / no_answer（保留 query）
-  5. 更新 FILE blocks：关闭的 query 删除，comparison 建议传给 2.9
-- **输出给 2.9**：解析后的 query/comparison 建议
+  2. 提取 query title + body 的关键词
+  3. 在 wiki concepts/entities 中按标题词 Jaccard 匹配（阈值 0.6）找相关页
+  4. LLM judge：`closed`（已答→删除） / `kept`（未答/答不全→保留），不确定一律 `kept`
+  5. 更新 FILE blocks：`closed` 的 query 删除
 
-### 2.9 · Comparison Auto-Generation ⭐ **新增 2026-06-16**（2.9A/B/C）
+### 2.9 · Comparison Auto-Generation ⭐ **新增 2026-06-16**（2.9A/B）
 
-- **作用**：生成对比分析页面，分三种场景：
+- **作用**：生成对比分析页面，分两种场景：
   - **2.9A 域内消歧义**：新 concept 名称与 wiki 已有 concept 同名但不同 domain → 创建/更新消歧义页（`type: comparison`, `domain: general`）。对齐 NashSU `domains.md` 消歧义规则。
-  - **2.9B 源内概念对比**：同一源内两个高度相关的概念天然适合对比（如 CCM vs DCM、EMI vs EMC）→ 生成对比页（对比维度 ≥4）。
-  - **2.9C 跨源对比**：新 concept 与已有 wiki concept 有可比性 → **仅标记 suggestion** 到 Stage 3.4 review，不自动生成（需人工触发，因跨源对比需读取双方完整 concept 页面，token 消耗大）。
-  - **2.9D 来自 Stage 2.8 的建议**：Stage 2.8 发现"答案不完整"的 query 转为 comparison 建议。
-- **跳过条件**：本次无 concept 产出（纯 stub source）时自动跳过。
-- **产物**：0-3 个 `wiki/comparisons/<slug>.md` 页面（消歧义 + 源内对比 + 不完整答案对比），或 `---COMPARISONS: 0---` 标记。
+  - **2.9B 源内概念对比**：同一源内两个高度相关的概念天然适合对比（如 CCM vs DCM、EMI vs EMC）→ 生成对比页（对比维度 ≥4，至多 2 页，`concept ≥ 2` 才运行）。
+- **跳过条件**：本次 concept **和** entity 都为空（纯 stub source）时整体跳过。
+- **产物**：`wiki/comparisons/<slug>.md` 页面（2.9A 消歧义 + 2.9B 源内对比），或子标记 `---COMPARISONS_DISAMBIGUATION: 0---` / `---COMPARISONS_IN_SOURCE: 0---`。
 - **go/no-go**：
-  - 生成了 0-3 个 comparison FILE block 或 `---COMPARISONS: 0---` 标记
+  - 生成了 comparison FILE block 或对应 `---COMPARISONS_*: 0---` 标记
   - 每个 comparison frontmatter 含 `type: comparison` + `title:` + `domain:` 三必填字段
-- **prompt 模板**：见 `references/comparison-generation.md`
+- **设计说明 / prompt 结构**：见 `references/comparison-generation.md`（真相源为 `_stage_2_9_build_prompt_disambiguation` / `_stage_2_9_build_prompt_in_source`）
 
 ### Stage 3.4 · Review ⭐ **永远不能跳**（3.4 review，但低于阈值时自动 skip）
 
@@ -432,7 +429,7 @@ Phase 0 包含 3 个前置检查，必须按顺序执行：
 - [ ] **2.6**：源页面已生成并包含 concept 列表
 - [ ] **2.7：query 页面已生成或 `---QUERIES: 0---` 已记录**（datasheet/standard 自动跳过）
 - [ ] **Stage 2.8：query_resolutions 已记录**；已关闭或改写的 query 已处理
-- [ ] **2.9：comparison 页面已生成或 `---COMPARISONS: 0---` 已记录**（无 concept 时自动跳过）
+- [ ] **2.9：comparison 页面已生成或 `---COMPARISONS_DISAMBIGUATION: 0---` / `---COMPARISONS_IN_SOURCE: 0---` 已记录**（无 concept/entity 时自动跳过）
 - [ ] Stage 3.1：所有 FILE 块写盘成功
 - [ ] **Stage 3.2：source 页含 `## Embedded Images` 段**
 - [ ] **Stage 3.3：跨域 slug 碰撞已检查**（碰撞数已统计，消歧义建议已生成）

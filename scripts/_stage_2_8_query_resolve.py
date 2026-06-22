@@ -1,7 +1,7 @@
 """Stage 2.8: Cross-source Query Resolution
 
 For each generated query, search existing wiki pages and use an LLM judge to
-decide: closed (answer exists), incomplete (-> comparison), or kept (open).
+decide: closed (answer already exists) or kept (still open).
 Defaults to "kept" on any uncertainty or LLM failure — never auto-deletes
 a query without explicit LLM confirmation.
 
@@ -71,12 +71,11 @@ Existing wiki pages that may relate:
 
 Decide:
 - "closed": the existing pages fully answer this question -> the query can be removed.
-- "incomplete": the existing pages partially address it -> better expressed as a comparison page.
-- "kept": the existing pages do NOT answer it -> keep as an open query.
+- "kept": the existing pages do NOT (or only partially) answer it -> keep as an open query.
 
 When unsure, choose "kept" — never close a question without clear evidence.
 
-Reply with exactly one line: STATUS: <closed|incomplete|kept> | REASON: <one sentence>
+Reply with exactly one line: STATUS: <closed|kept> | REASON: <one sentence>
 """.format(title=query["title"], body=query["body"], pages=pages)
 
 
@@ -89,7 +88,7 @@ def _stage_2_8_judge_query_resolution(query, related, config):
     except Exception as e:
         print("  [stage 2.8] LLM judge failed for '{}': {} — defaulting to kept".format(query["slug"], e))
         return "kept", "llm-unavailable"
-    m = re.search(r"STATUS:\s*(closed|incomplete|kept)", response, re.IGNORECASE)
+    m = re.search(r"STATUS:\s*(closed|kept)", response, re.IGNORECASE)
     if not m:
         print("  [stage 2.8] Could not parse judge response for '{}' — defaulting to kept".format(query["slug"]))
         return "kept", "unparseable"
