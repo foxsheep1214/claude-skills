@@ -205,8 +205,35 @@ _SOURCE_BUDGET_MIN = 8_000
 _SOURCE_BUDGET_MAX = 300_000
 _SOURCE_BUDGET_FRAC = 0.6
 _TARGET_CHARS_MIN = 12_000
-_TARGET_CHARS_MAX = 60_000
 _TARGET_CHARS_FRAC = 0.55
+# ── Token-first chunk budgeting (replaces the fixed 60K char cap) ──
+# The per-chunk budget is expressed in TOKENS; the char window is derived
+# per-text from the measured chars/token ratio at split time (see
+# _stage_2_analyze._stage_2_1_chunk_text). target_chars is now only a hard char
+# *ceiling*, sized so even token-sparse Latin text can reach the token budget.
+_TARGET_TOKENS_MIN = 12_000
+_TARGET_TOKENS_FRAC = 0.45          # share of the per-source budget spent per chunk
+_TARGET_TOKENS_CEIL_FRAC = 0.33     # (A) quality ceiling scales with the context window...
+_TARGET_TOKENS_HARD_CEIL = 64_000   # ...but never exceeds this — keeps one analysis round-trip sharp
+_MAX_CHARS_PER_TOKEN = 4            # char ceiling = target_tokens × this (Latin ≈ 4 chars/token)
+_TARGET_CHARS_HARD_CEIL = 320_000
+
+
+def _compute_chunk_targets(source_budget: int, context_size: int) -> tuple[int, int]:
+    """Return ``(target_tokens, target_chars_ceiling)``.
+
+    ``target_tokens`` — soft per-chunk budget in TOKENS. Scales with the
+    per-source budget, capped by a quality ceiling that itself scales with the
+    model context window (A) but never exceeds ``_TARGET_TOKENS_HARD_CEIL`` (B).
+    ``target_chars`` — hard per-chunk char ceiling, large enough that even
+    token-sparse text can spend its full token budget.
+    """
+    tokens_ceil = min(_TARGET_TOKENS_HARD_CEIL,
+                      max(_TARGET_TOKENS_MIN, int(context_size * _TARGET_TOKENS_CEIL_FRAC)))
+    target_tokens = max(_TARGET_TOKENS_MIN,
+                        min(int(source_budget * _TARGET_TOKENS_FRAC), tokens_ceil))
+    target_chars = min(_TARGET_CHARS_HARD_CEIL, target_tokens * _MAX_CHARS_PER_TOKEN)
+    return target_tokens, target_chars
 
 
 @dataclass
@@ -229,6 +256,7 @@ class Config:
     chunk_overlap: int
     source_budget: int
     target_chars: int
+    target_tokens: int
     max_tokens: int
     context_size: int | None = None
     conversation_prefix: str = ""
@@ -255,17 +283,15 @@ class Config:
             upper = min(_SOURCE_BUDGET_MAX, max(_SOURCE_BUDGET_MIN, int(cs * _SOURCE_BUDGET_FRAC)))
             source_budget = max(_SOURCE_BUDGET_MIN, min(available, upper))
 
-            # targetChars = sourceBudget * 0.55, clamped [12K, 60K]
-            target_chars = max(_TARGET_CHARS_MIN,
-                              min(int(source_budget * _TARGET_CHARS_FRAC), _TARGET_CHARS_MAX))
+            target_tokens, target_chars = _compute_chunk_targets(source_budget, context_size)
 
             print(f"[config] LLM_CONTEXT_SIZE={context_size:,} → "
-                  f"source_budget={source_budget:,} target_chars={target_chars:,} "
-                  f"(NashSU-aligned)")
+                  f"source_budget={source_budget:,} target_tokens={target_tokens:,} "
+                  f"target_chars≤{target_chars:,} (token-first)")
         else:
-            # Backward-compatible hardcoded defaults (no LLM_CONTEXT_SIZE set)
+            # Backward-compatible defaults (no LLM_CONTEXT_SIZE set)
             source_budget = 200_000
-            target_chars = 100_000
+            target_tokens, target_chars = _compute_chunk_targets(source_budget, _CONTEXT_SIZE_DEFAULT)
 
         return cls(
             wiki_root=wiki_root,
@@ -286,6 +312,7 @@ class Config:
             chunk_overlap=3_000,
             source_budget=source_budget,
             target_chars=target_chars,
+            target_tokens=target_tokens,
             max_tokens=16384,
             context_size=context_size,
         )
@@ -300,10 +327,17 @@ class Config:
         upper = min(_SOURCE_BUDGET_MAX, max(_SOURCE_BUDGET_MIN, int(cs * _SOURCE_BUDGET_FRAC)))
         return max(_SOURCE_BUDGET_MIN, min(available, upper))
 
-    def compute_target_chars(self, stable_length: int = 50_000) -> int:
-        """NashSU-aligned: per-source chunk target from source budget."""
+    def compute_target_tokens(self, stable_length: int = 50_000) -> int:
+        """Per-source chunk token budget (token-first; scales with context)."""
         sb = self.compute_source_budget(stable_length)
-        return max(_TARGET_CHARS_MIN, min(int(sb * _TARGET_CHARS_FRAC), _TARGET_CHARS_MAX))
+        cs = self.context_size or _CONTEXT_SIZE_DEFAULT
+        return _compute_chunk_targets(sb, cs)[0]
+
+    def compute_target_chars(self, stable_length: int = 50_000) -> int:
+        """Per-source hard char ceiling derived from the token budget."""
+        sb = self.compute_source_budget(stable_length)
+        cs = self.context_size or _CONTEXT_SIZE_DEFAULT
+        return _compute_chunk_targets(sb, cs)[1]
 
     def compute_max_tokens(self, base_tokens: int = 16384) -> int:
         env_override = os.environ.get("LLM_MAX_TOKENS")

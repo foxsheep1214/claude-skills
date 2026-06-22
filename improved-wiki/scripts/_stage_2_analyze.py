@@ -1,64 +1,181 @@
 
 from _stage_2_base import *
 
-def _stage_2_1_chunk_text(text: str, target_chars: int, overlap_chars: int) -> list[str]:
-    """Split text into overlapping chunks.
+# ── Token estimation (tiktoken if installed, else CJK-aware heuristic) ──
+# tiktoken is optional: the pipeline must not hard-depend on it. The heuristic
+# counts CJK/kana/hangul as ~1 token each and Latin/other as ~1 token / 4 chars,
+# which tracks real tokenizer output within ~15% for mixed technical text — good
+# enough to keep a chunk under a token budget regardless of language.
+try:
+    import tiktoken as _tiktoken
+    _ENCODER = _tiktoken.get_encoding("cl100k_base")
+except Exception:
+    _ENCODER = None
+
+
+def _estimate_tokens(text: str) -> int:
+    if not text:
+        return 0
+    if _ENCODER is not None:
+        return len(_ENCODER.encode_ordinary(text))
+    cjk = sum(
+        1 for ch in text
+        if "一" <= ch <= "鿿"   # CJK unified ideographs
+        or "぀" <= ch <= "ヿ"   # hiragana + katakana
+        or "가" <= ch <= "힯"   # hangul
+    )
+    other = len(text) - cjk
+    return cjk + other // 4 + 1
+
+
+_HEADING_RE = re.compile(r"^#{1,6}\s+.+$", re.MULTILINE)
+_FENCE_RE = re.compile(r"^[ \t]*(```+|~~~+)", re.MULTILINE)
+
+# Fraction of the window scanned backwards for a clean boundary.
+_SEARCH_FRAC = 0.15
+# A trailing chunk smaller than this fraction of the token budget is merged back
+# into its predecessor instead of wasting a full analyze+generate round-trip.
+_MIN_TAIL_FRAC = 0.25
+
+
+def _stage_2_1_find_protected_ranges(text: str) -> list[tuple[int, int]]:
+    """Char ranges that must never be split: fenced code blocks and markdown
+    tables. Returns sorted, non-overlapping ``(start, end)`` spans."""
+    ranges: list[tuple[int, int]] = []
+
+    # Fenced code blocks: pair consecutive fence markers (```/~~~).
+    fences = [m.start() for m in _FENCE_RE.finditer(text)]
+    for i in range(0, len(fences) - 1, 2):
+        open_pos = fences[i]
+        close_line_end = text.find("\n", fences[i + 1])
+        end = len(text) if close_line_end == -1 else close_line_end + 1
+        ranges.append((open_pos, end))
+
+    def _in_fence(pos: int) -> bool:
+        return any(s <= pos < e for s, e in ranges)
+
+    # Markdown tables: runs of >=2 consecutive lines containing a pipe, outside
+    # any code fence.
+    run_start: int | None = None
+    run_end = 0
+    pos = 0
+    for line in text.splitlines(keepends=True):
+        line_end = pos + len(line)
+        is_table_line = "|" in line and not _in_fence(pos)
+        if is_table_line:
+            if run_start is None:
+                run_start = pos
+            run_end = line_end
+        else:
+            if run_start is not None and text.count("\n", run_start, run_end) >= 1:
+                ranges.append((run_start, run_end))
+            run_start = None
+        pos = line_end
+    if run_start is not None and text.count("\n", run_start, run_end) >= 1:
+        ranges.append((run_start, run_end))
+
+    return sorted(ranges)
+
+
+def _stage_2_1_range_at(pos: int, ranges: list[tuple[int, int]]) -> tuple[int, int] | None:
+    for s, e in ranges:
+        if s < pos < e:
+            return (s, e)
+        if s >= pos:
+            break
+    return None
+
+
+def _stage_2_1_pick_boundary(text, lo, hi, heading_positions, protected) -> int:
+    """Best cut index in [lo, hi): heading > paragraph > newline > CJK/EN
+    sentence end. Skips boundaries that fall inside a protected range. Returns
+    the exclusive cut index, or -1 if none found."""
+    for hp in reversed(heading_positions):
+        if lo <= hp < hi and _stage_2_1_range_at(hp, protected) is None:
+            return hp  # cut before the heading so it leads the next chunk
+    for sep, off in (("\n\n", 2), ("\n", 1), ("。", 1), (". ", 2)):
+        idx = text.rfind(sep, lo, hi)
+        while idx != -1 and _stage_2_1_range_at(idx, protected) is not None:
+            idx = text.rfind(sep, lo, idx)
+        if idx != -1:
+            return idx + off
+    return -1
+
+
+def _stage_2_1_snap_out(start: int, end: int, protected) -> int:
+    """If ``end`` lands inside a protected block, move it to a safe edge: before
+    the block (block leads the next chunk) when possible, else after it."""
+    r = _stage_2_1_range_at(end, protected)
+    if r is None:
+        return end
+    return r[0] if r[0] > start else r[1]
+
+
+def _stage_2_1_chunk_text(text: str, target_chars: int, overlap_chars: int,
+                          *, target_tokens: int | None = None) -> list[str]:
+    """Split text into overlapping, token-bounded chunks.
 
     NashSU parity (ingest.ts L2107-2205): prefers markdown heading boundaries
-    (H1-H6), then paragraph breaks, then sentence ends near target_chars.
+    (H1-H6), then paragraph breaks, then sentence ends. Beyond parity:
+
+    - **Token sizing**: the window is sized to ``target_tokens`` tokens,
+      converted to chars via this text's measured chars/token ratio and capped
+      at the hard char ceiling ``target_chars``. Keeps CJK and Latin chunks at a
+      comparable *token* size instead of char size.
+    - **Protected blocks**: never cuts inside a fenced code block or markdown
+      table.
+    - **Tail merge**: a tiny trailing chunk is folded into its predecessor.
     """
-    if len(text) <= target_chars:
+    if target_tokens is None:
+        target_tokens = target_chars  # config target_chars is token-scale (derived from context window)
+
+    if _estimate_tokens(text) <= target_tokens and len(text) <= target_chars:
         return [text]
 
-    print(f"[chunk] Splitting {len(text)} chars into ~{target_chars}-char chunks...", flush=True)
+    # Size the char window to ~target_tokens tokens for THIS text's language mix,
+    # bounded by the hard char ceiling (target_chars).
+    chars_per_token = len(text) / max(1, _estimate_tokens(text))
+    window = min(int(target_tokens * chars_per_token), target_chars)
+    window = max(window, 2000)  # never absurdly small
 
-    # Pre-scan: find all heading boundaries for heading-aware splitting
-    _HEADING_RE = re.compile(r'^#{1,6}\s+.+$', re.MULTILINE)
+    print(f"[chunk] Splitting {len(text)} chars (~{_estimate_tokens(text)} tok) into "
+          f"~{target_tokens}-tok chunks (~{window} chars/chunk)...", flush=True)
+
     heading_positions = [m.start() for m in _HEADING_RE.finditer(text)]
+    protected = _stage_2_1_find_protected_ranges(text)
 
-    chunks = []
+    spans: list[tuple[int, int]] = []
     start = 0
-    while start < len(text):
-        end = min(start + target_chars, len(text))
-        if end >= len(text):
-            chunks.append(text[start:].strip())
+    n = len(text)
+    while start < n:
+        end = min(start + window, n)
+        if end >= n:
+            spans.append((start, n))
             break
 
-        search_start = max(start, end - int(target_chars * 0.15))
-
-        # Priority 1: markdown heading boundary (NashSU heading-aware)
-        boundary = -1
-        for hp in reversed(heading_positions):
-            if search_start <= hp < end:
-                boundary = hp
-                break
-
-        # Priority 2: paragraph break
-        if boundary == -1:
-            boundary = text.rfind("\n\n", search_start, end)
-
-        # Priority 3: single newline
-        if boundary == -1:
-            boundary = text.rfind("\n", search_start, end)
-
-        # Priority 4: CJK sentence end
-        if boundary == -1:
-            boundary = text.rfind("。", search_start, end)
-
-        # Priority 5: English sentence end
-        if boundary == -1:
-            boundary = text.rfind(". ", search_start, end)
-
+        search_start = max(start, end - int(window * _SEARCH_FRAC))
+        boundary = _stage_2_1_pick_boundary(text, search_start, end, heading_positions, protected)
         if boundary > start:
-            end = boundary + 1
+            end = boundary
+        end = _stage_2_1_snap_out(start, end, protected)
+        if end <= start:  # protected block fills the whole window — let it overflow
+            r = _stage_2_1_range_at(start + 1, protected)
+            end = r[1] if r else min(start + window, n)
 
-        chunks.append(text[start:end].strip())
+        spans.append((start, end))
         new_start = end - overlap_chars
-        if new_start <= start:
-            break
-        start = new_start
+        start = new_start if new_start > start else end
 
-    print(f"[chunk] Done — {len(chunks)} chunks", flush=True)
+    # Tail merge: fold an undersized final chunk into its predecessor.
+    if len(spans) >= 2:
+        s, e = spans[-1]
+        if _estimate_tokens(text[s:e]) < target_tokens * _MIN_TAIL_FRAC:
+            spans[-2] = (spans[-2][0], e)
+            spans.pop()
+
+    chunks = [c for c in (text[s:e].strip() for s, e in spans) if c]
+    print(f"[chunk] Done — {len(chunks)} chunks "
+          f"(tokenizer: {'tiktoken' if _ENCODER else 'heuristic'})", flush=True)
     return chunks
 
 

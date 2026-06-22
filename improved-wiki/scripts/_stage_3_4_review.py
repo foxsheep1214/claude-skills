@@ -107,7 +107,7 @@ def stage_3_4_review_suggestions(file_blocks: list[tuple[str, str]], raw_file: P
     try:
         response, stop_reason = call_with_retry(
             lambda: call_anthropic_protocol(prompt, config, max_tokens=8192),
-            max_retries=3, label="stage-2.10",
+            max_retries=3, label="stage-3.4",
         )
     except Exception as e:
         print(f"[stage 3.4] LLM call failed after retries: {e}")

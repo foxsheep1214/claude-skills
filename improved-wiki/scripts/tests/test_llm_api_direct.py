@@ -47,6 +47,7 @@ def _make_config(*, api_key: str = "sk-test", protocol: str = "openai") -> Confi
         chunk_overlap=3000,
         source_budget=100000,
         target_chars=60000,
+        target_tokens=30000,
         max_tokens=8192,
         conversation_prefix="ab12cd34",
     )

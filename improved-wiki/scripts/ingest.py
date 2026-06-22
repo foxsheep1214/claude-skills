@@ -807,7 +807,8 @@ def _run_chunk_pipeline(
         incremental_associations = progress.get("incremental_associations", {})
         return chunk_analyses, analysis, raw_response, file_blocks, incremental_associations
 
-    chunks = _stage_2_1_chunk_text(extracted_text, config.target_chars, config.chunk_overlap)
+    chunks = _stage_2_1_chunk_text(extracted_text, config.target_chars, config.chunk_overlap,
+                                   target_tokens=config.target_tokens)
     chunk_total = len(chunks)
 
     est_sec = chunk_total * 75
@@ -1100,7 +1101,7 @@ def _do_prepare(
         _verify_stage_2_4_file_blocks(file_blocks, raw_file, incremental_associations)
 
         # ── Stage 2.7: Query generation ──
-        query_blocks, query_response = stage_2_7_query_generation(
+        query_blocks, _ = stage_2_7_query_generation(
             global_digest, chunk_analyses, file_blocks, raw_file, config,
             template=template_content, verbose=verbose
         )
@@ -1118,7 +1119,7 @@ def _do_prepare(
             print(f"  [stage 2.8] Removed {before_q - len(file_blocks)} closed query block(s)")
 
         # ── Stage 2.9: Comparison generation ──
-        comp_blocks, comp_response = stage_2_9_comparison_generation(
+        comp_blocks, _ = stage_2_9_comparison_generation(
             global_digest, chunk_analyses, file_blocks, raw_file, config,
             template=template_content, verbose=verbose
         )
