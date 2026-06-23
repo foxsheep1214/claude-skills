@@ -1429,39 +1429,6 @@ def _stage_1_2_harvest_images(results: dict, page_offset: int, raw_file: Path,
     return saved
 
 
-def _stage_1_2_collect_images(img_dir: Path, page_offset: int) -> list[dict]:
-    """Collect extracted images from minerU output.
-
-    Drops true noise (sub-20px artifacts) but keeps tiny formula strips, which
-    MiniMax-M3 can transcribe to LaTeX/Unicode. Size check is outside the
-    try/except so filter bugs surface instead of silently collecting all images.
-    """
-    if not img_dir.exists():
-        return []
-    try:
-        from PIL import Image
-    except ImportError:
-        return []  # can't verify sizes, skip
-    imgs = []
-    for img_file in sorted(img_dir.iterdir()):
-        if img_file.suffix.lower() not in (".jpg", ".jpeg", ".png"):
-            continue
-        try:
-            im = Image.open(img_file)
-            w, h = im.size
-            im.close()
-        except Exception:
-            continue  # can't read this file — skip it
-        if not _is_image_too_small(w, h):
-            imgs.append({
-                "filename": img_file.name,
-                "source_path": str(img_file),
-                "width": w, "height": h,
-                "page_hint": page_offset,
-            })
-    return imgs
-
-
 def _stage_1_1_save_mineru_chunk_text(md_text: str, start: int, end: int, out_dir: Path,
                              stats: dict, images: list[dict]) -> None:
     """Save minerU chunk output as per-page text files.
@@ -1507,22 +1474,6 @@ def _stage_1_1_save_mineru_chunk_text(md_text: str, start: int, end: int, out_di
         for img in images:
             pn = img.get("page_hint", start)
             stats["images"].setdefault(str(pn), []).append(img["filename"])
-
-
-def _stage_1_2_copy_images(images: list[dict], config: Config, raw_file: Path) -> None:
-    """Copy minerU extracted images to wiki/media/<raw-subpath>/<slug>/ for Stage 3.2."""
-    if not images:
-        return
-    import shutil
-    slug = _stage_1_2_media_slug(raw_file, config)
-    media_dir = config.wiki_dir / "media" / slug
-    media_dir.mkdir(parents=True, exist_ok=True)
-    for img in images:
-        src = Path(img["source_path"])
-        if src.exists():
-            dst = media_dir / img["filename"]
-            if not dst.exists():
-                shutil.copy2(src, dst)
 
 
 def _stage_1_1_assemble_ocr_text(out_dir: Path, page_nums: list[int]) -> str:
@@ -1716,14 +1667,15 @@ def _stage_1_2_extract_from_mineru(out_dir: Path, config: Config, raw_file: Path
 
 
 def stage_1_2_extract_images(raw_file: Path, config: Config, min_size: int = 100) -> dict:
-    """Extract embedded images from PDF / PPTX / DOCX.
+    """Extract embedded images from PPTX / DOCX via their internal zipfile media/ directory
+    (NashSU parity: extractAndSaveSourceImages).
 
-    PDF: PyMuPDF get_images().  PPTX/DOCX: zipfile internal media/ directory
-    (NashSU parity: extractAndSaveSourceImages covers all three formats).
+    PDF images are extracted separately by _stage_1_2_extract_from_mineru(), since all PDF
+    text extraction routes through minerU (pipeline or VLM), which extracts images as part
+    of the same pass.
 
     Returns: {"count": int, "media_dir": str, "manifest": str, "images": list}
     """
-    suffix = raw_file.suffix.lower()
     slug = _stage_1_2_media_slug(raw_file, config)
     media_dir = config.wiki_dir / "media" / slug
 
@@ -1739,94 +1691,7 @@ def stage_1_2_extract_images(raw_file: Path, config: Config, min_size: int = 100
             pass  # corrupt manifest, re-extract
 
     media_dir.mkdir(parents=True, exist_ok=True)
-
-    # ── PPTX / DOCX extraction (NashSU parity) ──
-    if suffix in (".pptx", ".docx"):
-        return _stage_1_2_extract_images_office(raw_file, media_dir, manifest_path, min_size)
-
-    # ── PDF extraction ──
-    try:
-        import fitz
-    except ImportError:
-        print("[stage 1.2] PyMuPDF not installed — skipping image extraction")
-        return {"count": 0, "skipped": True, "reason": "pymupdf-not-installed"}
-
-    print(f"[stage 1.2] Extracting embedded images from PDF...")
-
-    doc = fitz.open(raw_file)
-    all_images: list[dict] = []
-    page_images: list[list[dict]] = []
-
-    try:
-        for page_num in range(len(doc)):
-            page = doc[page_num]
-            img_list = page.get_images(full=True)
-            imgs = []
-            for img in img_list:
-                xref = img[0]
-                bi = doc.extract_image(xref)
-                if bi["width"] >= min_size and bi["height"] >= min_size:
-                    # Use Pixmap to get correctly-oriented image (respects PDF transform matrix).
-                    # doc.extract_image() gives raw bytes which may be rotated/flipped.
-                    try:
-                        pix = fitz.Pixmap(doc, xref)
-                        if pix.n - pix.alpha > 3:  # CMYK or other colorspace → convert to RGB
-                            pix = fitz.Pixmap(fitz.csRGB, pix)
-                        img_bytes = pix.tobytes("png")
-                        imgs.append({"xref": xref, "ext": "png", "bytes": img_bytes,
-                                     "width": pix.width, "height": pix.height})
-                    except Exception:
-                        # Fallback to raw bytes if Pixmap fails (e.g., JBIG2, JPEG2000)
-                        imgs.append({"xref": xref, "ext": bi["ext"], "bytes": bi["image"],
-                                     "width": bi["width"], "height": bi["height"]})
-            page_images.append(imgs)
-            if imgs:
-                all_images.extend(imgs)
-                print(f"  page {page_num}: {len(imgs)} image(s)")
-    finally:
-        doc.close()
-
-    if not all_images:
-        print(f"[stage 1.2] No embedded images found (or all < {min_size}px)")
-        _stage_1_2_write_manifest(manifest_path, str(raw_file), raw_file, [])
-        return {"count": 0, "media_dir": str(media_dir), "manifest": str(manifest_path), "images": []}
-
-    # Deduplicate by sha256
-    seen: dict[str, dict] = {}
-    for img in all_images:
-        sha = hashlib.sha256(img["bytes"]).hexdigest()
-        if sha not in seen:
-            img["sha256"] = sha
-            seen[sha] = img
-
-    deduped = list(seen.values())
-    print(f"[stage 1.2] Raw: {len(all_images)}, after dedup: {len(deduped)}")
-
-    # Save files and build metadata
-    xref_to_page: dict[int, int] = {}
-    for pn, imgs in enumerate(page_images):
-        for img in imgs:
-            xref_to_page[img["xref"]] = pn
-
-    saved: list[dict] = []
-    img_idx_per_page: dict[int, int] = {}
-    for img in deduped:
-        pn = xref_to_page.get(img["xref"], 0)
-        fig_idx = img_idx_per_page.get(pn, 0) + 1
-        img_idx_per_page[pn] = fig_idx
-        filename = f"p{pn}-fig{fig_idx}.{img['ext']}"
-        out_path = media_dir / filename
-        out_path.write_bytes(img["bytes"])
-        rel_path = str(out_path.relative_to(config.wiki_root))
-        saved.append({
-            "page": pn, "img_idx_in_page": fig_idx, "filename": filename,
-            "path": rel_path, "width": img["width"], "height": img["height"],
-            "sha256": img["sha256"], "xref": img["xref"],
-        })
-
-    _stage_1_2_write_manifest(manifest_path, str(raw_file), raw_file, saved)
-    print(f"[stage 1.2] Done — {len(saved)} images saved to {media_dir}")
-    return {"count": len(saved), "media_dir": str(media_dir), "manifest": str(manifest_path), "images": saved}
+    return _stage_1_2_extract_images_office(raw_file, media_dir, manifest_path, min_size)
 
 
 def _stage_1_2_raw_type_subdir(raw_file: Path, config: Config) -> str:
