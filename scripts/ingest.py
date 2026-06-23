@@ -244,7 +244,13 @@ def ingest_one(
     if pending_tasks:
         print(f"[conversation] {len(pending_tasks)} pending task(s) — resuming pipeline")
 
-    prepared = _do_prepare(raw_file, config, template_override, verbose, pilot_confirmed)
+    # When there are pending conversation tasks (mid-ingest resume), bypass the
+    # skip-check: the source page may already exist with all linked pages found,
+    # but post-review stages (3.5-4.1) haven't run yet.  Without this bypass the
+    # skip-check short-circuits before the conversation router can consume the
+    # pending answer, dropping embeddings/validation/aggregate-repair.
+    prepared = _do_prepare(raw_file, config, template_override, verbose, pilot_confirmed,
+                           skip_dedup=bool(pending_tasks))
     if prepared is None:
         return {"status": "skipped", "reason": "source-page-exists"}
 
@@ -408,13 +414,16 @@ def _generate_all_chunks(
     chunk_meta: list, chunk_analyses: list, existing_refs: dict,
     raw_file: Path, config: Config, template_content: str,
     chunk_total: int, t_start: float, verbose: bool,
+    related_pages: list[dict] | None = None,
 ) -> tuple[list, list, list]:
     """Stage 2.4: sequential generation across all chunks.
 
     ``existing_refs`` (Stage 2.3 output: {concept_name: [wiki_slugs]}) is fed
     into each chunk's generation prompt so the LLM wikilinks to existing pages
-    instead of regenerating them. ``generated_slugs`` accumulates across chunks
-    (sequential, both paths).
+    instead of regenerating them. ``related_pages`` (Stage 2.3's
+    stage_2_3_resolve_proposed_connections output) is fed in so the LLM
+    wikilinks to genuinely *related* (not duplicate) existing pages.
+    ``generated_slugs`` accumulates across chunks (sequential, both paths).
     """
     all_file_blocks: list = []
     all_responses: list[str] = []
@@ -426,7 +435,8 @@ def _generate_all_chunks(
             continue
         blocks = stage_2_4_generate_chunk(
             ca, i, generated_slugs, raw_file, config, template_content,
-            verbose=verbose, chunk_text=chunk, existing_refs=existing_refs)
+            verbose=verbose, chunk_text=chunk, existing_refs=existing_refs,
+            related_pages=related_pages)
         all_file_blocks.extend(blocks)
         all_responses.extend([b[1] for b in blocks])
         for path, _ in blocks:
@@ -496,7 +506,10 @@ def _run_chunk_pipeline(
         template_content, chunk_total, t_start, verbose)
 
     # \u2500\u2500 Stage 2.3: incremental association detection (existing-wiki overlap) \u2500\u2500
-    from _stage_2_3_incremental import stage_2_3_detect_incremental_associations
+    from _stage_2_3_incremental import (
+        stage_2_3_detect_incremental_associations,
+        stage_2_3_resolve_proposed_connections,
+    )
     incremental_associations = stage_2_3_detect_incremental_associations(
         config.wiki_dir, chunk_analyses)
     if incremental_associations:
@@ -505,11 +518,17 @@ def _run_chunk_pipeline(
     else:
         print(f"  [stage 2.3] No existing-wiki associations (first source or no overlap)")
 
+    related_pages = stage_2_3_resolve_proposed_connections(config.wiki_dir, chunk_analyses)
+    if related_pages:
+        print(f"  [stage 2.3] {len(related_pages)} proposed connection(s) to "
+              f"existing wiki resolved \u2192 fed into generation prompt")
+
     # \u2500\u2500 Stage 2.4: generate all chunks (associations fed into prompt) \u2500\u2500
     _stage_begin("Stage 2.4: Chunk Generation")
     all_file_blocks, all_responses, generated_slugs = _generate_all_chunks(
         chunk_meta, chunk_analyses, incremental_associations, raw_file, config,
-        template_content, chunk_total, t_start, verbose)
+        template_content, chunk_total, t_start, verbose,
+        related_pages=related_pages)
 
     # Build combined analysis
     unique_concepts, _ = _stage_2_4_extract_names(chunk_analyses)
@@ -620,17 +639,23 @@ def _do_prepare(
     template_override: str | None = None,
     verbose: bool = False,
     pilot_confirmed: bool = False,
+    skip_dedup: bool = False,
 ) -> dict | None:
     """Stage 0-2 for one book.  Read-only: no shared state writes, no lock needed.
 
     Returns a dict with all data needed for Stage 3+, or None on skip/failure.
     Suitable for parallel execution across multiple books.
+
+    When ``skip_dedup`` is True the source-page dedup check is bypassed — used
+    during a conversation-mode resume that has pending LLM tasks to consume, so
+    that post-review stages (3.5-4.1) are not dropped by an over-eager skip.
     """
     _set_current_file(raw_file.name)
     print(f"\n=== [prepare] {raw_file.name} ===")
     try:
-        # Dedup check — skip if source page exists and is reasonably complete
-        if _stage_0_2_should_skip(raw_file, config):
+        # Dedup check — skip if source page exists and is reasonably complete.
+        # Bypassed when resuming a conversation-mode ingest with pending tasks.
+        if not skip_dedup and _stage_0_2_should_skip(raw_file, config):
             return None
 
         h = file_sha256(raw_file)

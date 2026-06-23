@@ -10,6 +10,7 @@ def _stage_2_4_build_prompt(
     template: str = "",
     generated_slugs: list[str] | None = None,
     existing_refs: dict | None = None,
+    related_pages: list[dict] | None = None,
 ) -> str:
     """Build prompt to generate concept/entity pages from ONE chunk's analysis.
 
@@ -77,6 +78,10 @@ def _stage_2_4_build_prompt(
             linkable.add(f"entities/{s}")
     for s in existing_slugs[:200]:
         linkable.add(s)
+    for rp in (related_pages or []):
+        slug = rp.get("slug") if isinstance(rp, dict) else None
+        if slug:
+            linkable.add(slug)
     linkable_list = sorted(linkable)
     if len(linkable_list) > 300:
         linkable_list = linkable_list[:300]
@@ -101,6 +106,19 @@ def _stage_2_4_build_prompt(
     else:
         existing_refs_str = "(none — this source has no overlap with existing wiki)"
 
+    # Stage 2.2's self-reported connections_to_existing_wiki, resolved against
+    # real pages by Stage 2.3 (stage_2_3_resolve_proposed_connections). These
+    # are RELATED pages, not duplicates of the new concepts — still generate
+    # full new pages, just wikilink to these where relevant in the body.
+    if related_pages:
+        rel_lines = [
+            "  - [[{}]] (relationship: {})".format(rp["slug"], rp.get("relationship", "related"))
+            for rp in related_pages
+        ]
+        related_pages_str = "\n".join(rel_lines)
+    else:
+        related_pages_str = "(none)"
+
     return f"""# Role
 You are generating wiki pages for ONE chunk of a book. Previous chunks have
 already been processed — their pages are listed below. Do NOT regenerate them.
@@ -115,6 +133,9 @@ Chunk: {chunk_index + 1}
 
 # Existing wiki pages that overlap (Stage 2.3 — DO NOT regenerate; wikilink to them):
 {existing_refs_str}
+
+# Related (not duplicate) existing pages — wikilink to these where relevant, but still generate full new pages for the concepts/entities below:
+{related_pages_str}
 
 # Concepts found in this chunk (generate a page for each — skip ALREADY COVERED):
 {concept_str}
@@ -503,12 +524,16 @@ def stage_2_4_generate_chunk(
     verbose: bool = False,
     chunk_text: str = "",
     existing_refs: dict | None = None,
+    related_pages: list[dict] | None = None,
 ) -> list[tuple[str, str]]:
     """Generate FILE blocks for a single chunk (extracted from stage_2_per_chunk_generation).
 
     Used by the analyze→generate pipeline in _do_prepare. ``existing_refs``
     (Stage 2.3 output: {concept_name: [wiki_slugs]}) is forwarded to the prompt
     so the LLM wikilinks to existing pages instead of regenerating them.
+    ``related_pages`` (Stage 2.3's stage_2_3_resolve_proposed_connections
+    output: [{"slug": ..., "relationship": ...}]) is forwarded so the LLM
+    wikilinks new pages to genuinely *related* (not duplicate) existing pages.
 
     Returns list of (path, content) tuples.  Caller should append slugs to
     generated_slugs from the returned paths.
@@ -522,6 +547,7 @@ def stage_2_4_generate_chunk(
     prompt = _stage_2_4_build_prompt(
         analysis, chunk_text, chunk_idx, file_path, config, template,
         generated_slugs=generated_slugs, existing_refs=existing_refs,
+        related_pages=related_pages,
     )
     gen_tokens = config.compute_max_tokens(16384)
 
