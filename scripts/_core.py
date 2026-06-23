@@ -495,6 +495,48 @@ def clear_progress(config: Config, source_hash: str) -> None:
         pp.unlink()
 
 
+# ── Stage-completion markers (Option A: stage-aware resume) ──
+# Separate from the extraction progress cache above: these markers persist
+# across the whole ingest and record which pipeline stages have completed,
+# so a conversation-mode resume can skip already-done non-idempotent stages
+# (notably the Stage 3.1 write loop, whose page-merge would otherwise fire
+# spuriously on every resume because post-write steps mutate page bodies).
+
+def stages_path(config: Config, source_hash: str) -> Path:
+    config.progress_dir.mkdir(parents=True, exist_ok=True)
+    return config.progress_dir / f"{source_hash[:16]}.stages.json"
+
+
+def load_stages(config: Config, source_hash: str) -> dict:
+    sp = stages_path(config, source_hash)
+    if sp.exists():
+        try:
+            return json.loads(sp.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def mark_stage_done(config: Config, source_hash: str, stage: str,
+                    payload: dict | None = None) -> None:
+    stages = load_stages(config, source_hash)
+    stages[stage] = int(time.time() * 1000)
+    if payload:
+        stages[f"{stage}__payload"] = payload
+    sp = stages_path(config, source_hash)
+    tmp = sp.with_suffix(".tmp")
+    tmp.write_text(json.dumps(stages, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.rename(sp)
+
+
+def get_stage_payload(config: Config, source_hash: str, stage: str) -> dict:
+    return load_stages(config, source_hash).get(f"{stage}__payload", {}) or {}
+
+
+def is_stage_done(config: Config, source_hash: str, stage: str) -> bool:
+    return bool(load_stages(config, source_hash).get(stage))
+
+
 # ── Project-level lock ──
 
 class ProjectLock:
