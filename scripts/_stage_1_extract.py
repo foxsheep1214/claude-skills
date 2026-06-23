@@ -1,7 +1,7 @@
 """Extract, caption, and validate raw source files (Phase 1).
 
 Pipeline stages:
-  Phase 1 Stage 1.1: Extract text from PDF/PPTX/DOCX (PyMuPDF or minerU)
+  Phase 1 Stage 1.1: Extract text from PDF/PPTX/DOCX (minerU pipeline for text PDFs, minerU VLM for scanned)
   Phase 1 Stage 1.2: Extract embedded images from PDF
   Phase 1 Stage 1.3: Generate image captions via VLM
   (Stage 0.3 Pilot OCR lives in _stage_0_3_pilot.py)
@@ -95,116 +95,15 @@ def _is_image_too_small(width: int, height: int) -> bool:
 
 # ---------- Text extraction ----------
 
-def _stage_1_1_find_pymupdf_python() -> Path | None:
-    """Find a Python that has PyMuPDF. Check current interpreter, then venv."""
-    try:
-        import fitz  # noqa: F401
-        return Path(sys.executable)
-    except ImportError:
-        pass
-    venv_python = Path.home() / ".venv" / "bin" / "python3"
-    if venv_python.exists():
-        import subprocess
-        r = subprocess.run(
-            [str(venv_python), "-c", "import fitz"],
-            capture_output=True, timeout=10,
-        )
-        if r.returncode == 0:
-            return venv_python
-    return None
+def _stage_1_1_mineru_find_md(out_dir: Path, stem: str) -> Path:
+    """Locate the .md file produced by minerU under out_dir.
 
-
-def _stage_1_1_ensure_pymupdf() -> Path:
-    """Verify PyMuPDF exists. Fail hard if missing (no auto-install in production)."""
-    python = _stage_1_1_find_pymupdf_python()
-    if python is not None:
-        return python
-    raise RuntimeError(
-        "PyMuPDF not found — pre-install required:\n"
-        "  pip install pymupdf  (current env) or\n"
-        "  ~/.venv/bin/pip install pymupdf  (venv)"
-    )
-
-
-def _stage_1_1_pymupdf_page_count(file_path: Path) -> int:
-    """Get page count via PyMuPDF. Returns 0 on failure."""
-    try:
-        python = _stage_1_1_find_pymupdf_python()
-        if python is None:
-            return 0
-        if python == Path(sys.executable):
-            import fitz
-            doc = fitz.open(file_path)
-            try:
-                return len(doc)
-            finally:
-                doc.close()
-        else:
-            import subprocess
-            r = subprocess.run(
-                [str(python), "-c",
-                 f"import fitz; doc=fitz.open({file_path!r}); print(len(doc)); doc.close()"],
-                capture_output=True, text=True, timeout=30,
-            )
-            return int(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip().isdigit() else 0
-    except Exception:
-        return 0
-
-
-def _stage_1_1_extract_text_pymupdf(file_path: Path) -> str:
-    python = _stage_1_1_ensure_pymupdf()
-    if python == Path(sys.executable):
-        import fitz
-        doc = fitz.open(file_path)
-        try:
-            text_parts = [page.get_text() for page in doc]
-            return "\n\n".join(text_parts)
-        finally:
-            doc.close()
-    else:
-        import subprocess
-        script = f"""
-import fitz, sys
-doc = fitz.open(sys.argv[1])
-for page in doc:
-    print(page.get_text())
-    print('\\n\\n')
-doc.close()
-"""
-        r = subprocess.run(
-            [str(python), "-c", script, str(file_path)],
-            capture_output=True, text=True, timeout=120,
-        )
-        if r.returncode != 0:
-            raise RuntimeError(f"PyMuPDF subprocess failed: {r.stderr[:200]}")
-        return r.stdout.strip()
-
-
-def _stage_1_1_extract_text_mineru(file_path: Path, config: Config) -> str:
-    import subprocess
-    env = os.environ.copy()
-    mineru_bin = Path.home() / ".venv" / "bin" / "mineru"
-    if not mineru_bin.exists():
-        raise RuntimeError(f"mineru CLI not found at {mineru_bin}")
-
-    out_dir = config.extract_tmp_dir / "ocr"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    stem = file_path.stem
-
-    # minerU v3 backend: defaults to hybrid-engine; override via MINERU_BACKEND env
-    backend = os.environ.get("MINERU_BACKEND", "vlm-engine")
-    cmd = [
-        str(mineru_bin), "-p", str(file_path), "-o", str(out_dir),
-        "-b", backend, "-l", "ch",
-    ]
-    print(f"[ocr] Running minerU: {' '.join(cmd)}")
-    result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=7200)
-    if result.returncode != 0:
-        raise RuntimeError(f"minerU failed: {result.stderr[-500:]}")
-
-    # minerU output path varies by version — search for the actual .md output
+    minerU's output path varies by version and backend (vlm/auto/txt subdirs,
+    stem-prefixed filenames). Preference order: vlm > auto > latest modified.
+    Raises RuntimeError with a directory listing if no .md is found, so the
+    caller can see what minerU actually produced for debugging.
+    """
     candidates = sorted(out_dir.rglob(f"{stem}*.md"))
-    # Prefer VLM output, then auto, then any
     md_out = None
     for c in candidates:
         if "vlm" in str(c):
@@ -218,15 +117,66 @@ def _stage_1_1_extract_text_mineru(file_path: Path, config: Config) -> str:
     if md_out is None and candidates:
         md_out = candidates[-1]  # last resort: latest modified
     if md_out is None or not md_out.exists():
-        # Show what minerU actually produced for debugging
         all_output = sorted(out_dir.rglob("*"))
         found = [str(p.relative_to(out_dir)) for p in all_output if p.is_file()]
         raise RuntimeError(
             f"minerU finished but no .md output found for stem '{stem}'. "
             f"Actual output under {out_dir}: {found[:20]}"
         )
-    print(f"[ocr] Found output: {md_out.relative_to(out_dir)}")
+    print(f"[mineru] Found output: {md_out.relative_to(out_dir)}")
+    return md_out
+
+
+def _stage_1_1_extract_text_mineru_pipeline_impl(file_path: Path, config: Config) -> str:
+    """Extract text from a text-based PDF via minerU pipeline backend (no OCR).
+
+    Uses `-b pipeline -m txt`: layout-aware text extraction that preserves
+    tables (HTML <table> with rowspan/colspan), formulas (LaTeX), and figure
+    regions (image blocks with captions). Replaces the former PyMuPDF
+    get_text() path which lost all table/formula/figure structure.
+
+    Comparison (AFE439A2 datasheet, 69 pages): PyMuPDF -> 0 tables / 0 formulas
+    / 2 images; minerU pipeline -> 73 tables / 7 formulas / 157 images.
+    Trade-off: ~180s vs 0.17s per file (model loading dominates; page
+    processing is ~3-4s). See ~/Desktop/afe439a2-compare/对比报告.md.
+    """
+    mineru_bin = Path.home() / ".venv" / "bin" / "mineru"
+    if not mineru_bin.exists():
+        raise RuntimeError(f"minerU CLI not found at {mineru_bin}")
+
+    # Per-stem output dir (same convention as the scanned/VLM path) so Stage
+    # 1.2 image extraction can locate minerU's images via the shared
+    # `extract_tmp_dir/<stem>` lookup in ingest.py. minerU nests `<stem>/txt/`
+    # under out_dir automatically.
+    out_dir = config.extract_tmp_dir / file_path.stem
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = file_path.stem
+
+    cmd = [
+        str(mineru_bin), "-p", str(file_path), "-o", str(out_dir),
+        "-b", "pipeline", "-m", "txt", "-l", "ch",
+    ]
+    print(f"[pipeline] Running minerU: {' '.join(cmd)}")
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+    if result.returncode != 0:
+        raise RuntimeError(f"minerU pipeline failed: {result.stderr[-500:]}")
+
+    md_out = _stage_1_1_mineru_find_md(out_dir, stem)
     return md_out.read_text(encoding="utf-8")
+
+
+def _stage_1_1_extract_text_mineru_pipeline(file_path: Path, config: Config) -> str:
+    """Lock-wrapped entry point for minerU pipeline extraction.
+
+    minerU loads multi-GB models into memory on each invocation; concurrent
+    runs cause OOM. The file lock serializes all minerU backends (pipeline +
+    VLM share the same lock, see _stage_1_1_extract_text_scanned_locked).
+    """
+    lock_fd = _stage_1_1_acquire_mineru_lock()
+    try:
+        return _stage_1_1_extract_text_mineru_pipeline_impl(file_path, config)
+    finally:
+        _stage_1_1_release_mineru_lock(lock_fd)
 
 
 def _stage_1_1_extract_text_office(file_path: Path) -> str:
@@ -304,6 +254,17 @@ def _stage_1_1_extract_text_office(file_path: Path) -> str:
 
 
 def stage_1_1_extract_text(file_path: Path, config: Config, pilot_confirmed: bool = False) -> tuple[str, str]:
+    """Route a source file to the appropriate text extractor.
+
+    PDF routing (2026-06-23: PyMuPDF extraction removed):
+      - text    -> minerU pipeline (`-b pipeline -m txt`, layout-aware, no OCR)
+      - scanned -> minerU VLM      (`-b vlm-engine`, chunked crash-resilient OCR)
+      - mixed   -> minerU pipeline first; sparse text -> fall back to minerU VLM
+
+    PDF type detection still uses fitz (PyMuPDF) for sampling the text layer --
+    this is detection only, NOT content extraction. txt/md/pptx/docx bypass
+    minerU entirely.
+    """
     if file_path.suffix.lower() in {".txt", ".md"}:
         return file_path.read_text(encoding="utf-8"), "plain-text"
     if file_path.suffix.lower() in {".pptx", ".docx"}:
@@ -311,82 +272,60 @@ def stage_1_1_extract_text(file_path: Path, config: Config, pilot_confirmed: boo
     if file_path.suffix.lower() != ".pdf":
         raise ValueError(f"Unsupported file type: {file_path.suffix}")
 
-    # Stage 1.1: Detect PDF type
+    # Stage 1.1: Detect PDF type (fitz for detection only -- not extraction)
     pdf_type, avg_chars = _stage_1_1_detect_pdf_type(file_path)
     print(f"[extract] PDF type: {pdf_type} (avg {avg_chars:.0f} chars/page from 10-page sample)")
 
     if pdf_type == "text":
+        # Text-based PDF -> minerU pipeline (tables, formulas, figures preserved)
         try:
-            text = _stage_1_1_extract_text_pymupdf(file_path)
-            # Check 1: not empty, not sparse
-            ok1 = text.strip() and len(text) > len(text.split("\n\n")) * 5
-            # Check 2: per-page char threshold (>50 chars/page minimum for real text docs).
-            # Misclassified scanned PDFs detected as "text" will have near-zero per-page yield.
-            ok2 = True
-            if ok1:
-                pages = _stage_1_1_pymupdf_page_count(file_path)
-                if pages and len(text) < pages * 50:
-                    ok2 = False
-                    print(f"[extract] PyMuPDF returned only {len(text)} chars over {pages} pages "
-                          f"({len(text)/max(pages,1):.0f} chars/page) — likely scanned, trying minerU fallback")
-            if ok1 and ok2:
-                return text, "pymupdf"
-            if ok1 and not ok2:
-                print(f"[extract] PyMuPDF text looks sparse per-page — trying minerU fallback")
-            elif not ok1:
-                print(f"[extract] PyMuPDF returned sparse text — trying minerU fallback")
+            text = _stage_1_1_extract_text_mineru_pipeline(file_path, config)
+            return text, "mineru-pipeline"
         except Exception as e:
-            print(f"[extract] PyMuPDF failed ({e}) — trying minerU fallback")
-        try:
-            text = _stage_1_1_extract_text_mineru(file_path, config)
-            return text, "mineru"
-        except Exception:
-            raise RuntimeError(f"Both PyMuPDF and minerU failed for {file_path.name}")
+            print(f"[extract] minerU pipeline failed ({e}) -- falling back to VLM")
+            text = _stage_1_1_extract_text_scanned(file_path, config)
+            return text, "mineru-vlm-fallback"
 
     elif pdf_type == "scanned":
-        # Path B: VLM OCR required. Auto-fallback without interactive pilot gate.
-        # pilot_confirmed=True (rare, interactive only): run full OCR directly.
-        # pilot_confirmed=False (normal / batch): auto-fallback, don't block.
+        # Scanned PDF -> minerU VLM OCR (chunked, crash-resilient, auto-fallback)
         if pilot_confirmed:
-            print(f"[extract] Running local minerU OCR on scanned PDF (pilot confirmed)...")
-            text = _stage_1_1_extract_text_scanned(file_path, config)
-            return text, "mineru-local-ocr"
+            print(f"[extract] Running minerU VLM OCR on scanned PDF (pilot confirmed)...")
         else:
-            print(f"[extract] Scanned PDF: auto-fallback to minerU OCR...")
-            try:
-                text = _stage_1_1_extract_text_scanned(file_path, config)
-                if len(text) > 2000:
-                    return text, "mineru-local-ocr"
-                print(f"[extract] ⚠️  Scanned PDF OCR returned only {len(text)} chars — quality may be poor")
-                return text, "mineru-local-ocr-low-quality"
-            except Exception as e:
-                raise RuntimeError(
-                    f"Scanned PDF minerU OCR failed ({e}). "
-                    f"Re-run interactively with --pilot-confirmed to review."
-                )
-
-    elif pdf_type == "mixed":
-        # Mixed: try PyMuPDF first. If text layer is usable, take it.
-        # Otherwise auto-fallback to minerU OCR without blocking interactive pilot.
-        try:
-            text = _stage_1_1_extract_text_pymupdf(file_path)
-            if text.strip() and len(text) > 2000:
-                print(f"[extract] Mixed PDF: PyMuPDF returned {len(text):,} chars — using text layer")
-                return text, "pymupdf-mixed"
-        except Exception as e:
-            print(f"[extract] Mixed PDF: PyMuPDF failed ({e})")
-        # Sparse text — auto-fallback to minerU OCR.
-        # Previously required --pilot-confirmed which blocked batch ingest.
-        print(f"[extract] Mixed PDF: auto-fallback to minerU OCR (no interactive pilot)...")
+            print(f"[extract] Scanned PDF: auto-fallback to minerU VLM OCR...")
         try:
             text = _stage_1_1_extract_text_scanned(file_path, config)
             if len(text) > 2000:
-                return text, "mineru-local-ocr"
-            print(f"[extract] ⚠️  Mixed PDF OCR returned only {len(text)} chars — quality may be poor")
-            return text, "mineru-local-ocr-low-quality"
+                return text, "mineru-vlm"
+            print(f"[extract] ⚠️  Scanned PDF OCR returned only {len(text)} chars -- quality may be poor")
+            return text, "mineru-vlm-low-quality"
         except Exception as e:
             raise RuntimeError(
-                f"Mixed PDF minerU OCR failed ({e}). "
+                f"Scanned PDF minerU VLM failed ({e}). "
+                f"Re-run interactively with --pilot-confirmed to review."
+            )
+
+    elif pdf_type == "mixed":
+        # Mixed: try pipeline first (text layer usually usable).
+        # If pipeline returns sparse text, fall back to VLM OCR.
+        try:
+            text = _stage_1_1_extract_text_mineru_pipeline(file_path, config)
+            if text.strip() and len(text) > 2000:
+                print(f"[extract] Mixed PDF: pipeline returned {len(text):,} chars -- using text layer")
+                return text, "mineru-pipeline-mixed"
+            print(f"[extract] Mixed PDF: pipeline returned sparse text ({len(text)} chars) -- trying VLM")
+        except Exception as e:
+            print(f"[extract] Mixed PDF: pipeline failed ({e}) -- trying VLM")
+        # Sparse/failed -- auto-fallback to minerU VLM OCR (no interactive pilot).
+        print(f"[extract] Mixed PDF: auto-fallback to minerU VLM OCR...")
+        try:
+            text = _stage_1_1_extract_text_scanned(file_path, config)
+            if len(text) > 2000:
+                return text, "mineru-vlm"
+            print(f"[extract] ⚠️  Mixed PDF OCR returned only {len(text)} chars -- quality may be poor")
+            return text, "mineru-vlm-low-quality"
+        except Exception as e:
+            raise RuntimeError(
+                f"Mixed PDF minerU VLM failed ({e}). "
                 f"Re-run interactively with --pilot-confirmed to review."
             )
 

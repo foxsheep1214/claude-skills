@@ -1042,12 +1042,11 @@ def _do_prepare(
                 cp = {"stage": "stage_1_1_done", "extracted_text": extracted_text,
                       "extract_method": method, "stage_1_2": stage_1_2_result}
                 save_progress(config, h, cp)
-            elif raw_file.suffix.lower() in (".pdf", ".pptx", ".docx"):
-                # Covers "pymupdf", "pymupdf-mixed", "zipfile-pptx", "zipfile-docx".
-                # stage_1_2_extract_images() branches on file suffix internally
-                # and handles all three formats (NashSU parity) — the previous
-                # exact-match on method=="pymupdf" missed "pymupdf-mixed" PDFs
-                # and never extracted PPTX/DOCX embedded images at all.
+            elif raw_file.suffix.lower() in (".pptx", ".docx"):
+                # Covers "zipfile-pptx", "zipfile-docx". PDFs no longer reach
+                # here since 2026-06-23: all PDF extraction routes through
+                # minerU (pipeline or VLM) and is handled by the branch above.
+                # stage_1_2_extract_images() branches on file suffix internally.
                 stage_1_2_result = stage_1_2_extract_images(raw_file, config)
 
             # Stage 1.3: Caption extracted images (runs if 1.2 found images)
