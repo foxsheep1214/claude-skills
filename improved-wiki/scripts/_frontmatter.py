@@ -161,6 +161,20 @@ def merge_page_content(
     if old_body.strip() == new_body.strip():
         return array_merged
 
+    # Fast path 4: bodies identical after stripping [[wikilink]] markup.
+    # On a conversation-mode mid-flight resume, the write phase re-runs with the
+    # original (pre-enrichment) body while the existing page has been mutated by
+    # wikilink enrichment (which only adds [[...]] links).  Stripping wikilink
+    # markup from both bodies collapses this enrichment-only difference, avoiding
+    # a spurious LLM page-merge round-trip for every already-written page.
+    import re as _re
+    _wikilink_re = _re.compile(r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]")
+    def _strip_wikilinks(text: str) -> str:
+        return _wikilink_re.sub(lambda m: m.group(2) or m.group(1), text)
+    if _strip_wikilinks(old_body).strip() == _strip_wikilinks(new_body).strip():
+        # Keep the existing (enriched) body; only adopt frontmatter array unions.
+        return write_frontmatter(parse_frontmatter(array_merged)[0], old_body)
+
     # Layer 2: LLM merge (if merger provided)
     if merger_fn:
         try:

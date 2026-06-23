@@ -69,6 +69,7 @@ from _core import (
     detect_template_type, load_template,
     file_sha256, load_cache, save_cache,
     progress_path, load_progress, save_progress, clear_progress,
+    load_stages, mark_stage_done, is_stage_done, get_stage_payload,
     ProjectLock,
     BATCH_MAX_CONCURRENT,
     detect_domain as _detect_domain,
@@ -244,13 +245,11 @@ def ingest_one(
     if pending_tasks:
         print(f"[conversation] {len(pending_tasks)} pending task(s) — resuming pipeline")
 
-    # When there are pending conversation tasks (mid-ingest resume), bypass the
-    # skip-check: the source page may already exist with all linked pages found,
-    # but post-review stages (3.5-4.1) haven't run yet.  Without this bypass the
-    # skip-check short-circuits before the conversation router can consume the
-    # pending answer, dropping embeddings/validation/aggregate-repair.
-    prepared = _do_prepare(raw_file, config, template_override, verbose, pilot_confirmed,
-                           skip_dedup=bool(pending_tasks))
+    # Stage-completion markers (Option A) drive resume semantics: the skip-check
+    # only short-circuits once stage_4_1 is done, so a mid-flight resume (pages
+    # written but post-review stages pending) is never dropped.  _do_write in
+    # turn skips the non-idempotent 3.1 write loop when `write_phase` is marked.
+    prepared = _do_prepare(raw_file, config, template_override, verbose, pilot_confirmed)
     if prepared is None:
         return {"status": "skipped", "reason": "source-page-exists"}
 
@@ -292,6 +291,9 @@ def ingest_one(
     stage_3_7_embed_new_pages(config, files_written)
     stage_4_1_validate_ingest(config, raw_file)
 
+    # Mark the ingest fully complete so future re-runs skip cleanly (Option A).
+    mark_stage_done(config, h, "stage_4_1")
+
     return {"status": "ok", "files_written": files_written}
 
 
@@ -309,10 +311,32 @@ def _stage_0_2_should_skip(raw_file: Path, config: Config) -> bool:
     1. Source page file exists
     2. Frontmatter type == "source"
     3. ≥80% of wikilinks point to existing concept/entity pages
+
+    Primary gate (Option A): skip only once the ingest has fully completed
+    (stage_4_1 marker set).  This prevents a mid-flight conversation-mode
+    resume — where pages are written but post-review stages (3.5-4.1) are
+    still pending — from being short-circuited by the "source page exists"
+    heuristic below.
     """
+    h = file_sha256(raw_file)
+    if is_stage_done(config, h, "stage_4_1"):
+        if not _stage_3_1_wiki_path_for_source(raw_file, config).exists():
+            # Stale marker (source page deleted externally) — clear and re-ingest.
+            from _core import stages_path as _sp
+            _sp(config, h).unlink(missing_ok=True)
+            return False
+        print(f"  [skip] Ingest complete (stage_4_1 marker present)")
+        return True
+
     source_page = _stage_3_1_wiki_path_for_source(raw_file, config)
     if not source_page.exists():
         return False
+
+    # Source page exists but stage_4_1 not done → mid-flight resume.  Do NOT
+    # skip: post-review stages (3.5-4.1) may still be pending.  The write_phase
+    # marker inside _do_write handles skipping the non-idempotent 3.1 loop.
+    print(f"  [skip:resume] Source page exists, stage_4_1 not done — resuming")
+    return False
 
     # Verify source page is readable and has valid frontmatter
     try:
@@ -639,23 +663,18 @@ def _do_prepare(
     template_override: str | None = None,
     verbose: bool = False,
     pilot_confirmed: bool = False,
-    skip_dedup: bool = False,
 ) -> dict | None:
     """Stage 0-2 for one book.  Read-only: no shared state writes, no lock needed.
 
     Returns a dict with all data needed for Stage 3+, or None on skip/failure.
     Suitable for parallel execution across multiple books.
-
-    When ``skip_dedup`` is True the source-page dedup check is bypassed — used
-    during a conversation-mode resume that has pending LLM tasks to consume, so
-    that post-review stages (3.5-4.1) are not dropped by an over-eager skip.
     """
     _set_current_file(raw_file.name)
     print(f"\n=== [prepare] {raw_file.name} ===")
     try:
-        # Dedup check — skip if source page exists and is reasonably complete.
-        # Bypassed when resuming a conversation-mode ingest with pending tasks.
-        if not skip_dedup and _stage_0_2_should_skip(raw_file, config):
+        # Dedup check — skip only if the ingest is truly complete (stage_4_1
+        # marker set) or the source page exists and is reasonably complete.
+        if _stage_0_2_should_skip(raw_file, config):
             return None
 
         h = file_sha256(raw_file)
@@ -893,7 +912,23 @@ def _do_write(prepared: dict, verbose: bool = False) -> dict:
     existing_slugs = list_existing_slugs(config) if enrich_enabled else []
     enrich_candidates: list[tuple[str, Path]] = []
 
-    for rel_path, content in file_blocks:
+    # Option A: stage-aware resume.  If the write phase (3.1 write loop +
+    # enrichment + 3.2 inject + 3.3 collision) already completed in a prior
+    # run, skip it entirely.  Re-running the write loop would spuriously fire
+    # page-merge LLM round-trips because post-write steps (enrichment, image
+    # injection) have mutated page bodies.  Restore file list from the marker.
+    write_phase_done = is_stage_done(config, h, "write_phase")
+    if write_phase_done:
+        print("  [write] write_phase marker present — skipping 3.1/3.2/3.3")
+        _wp = get_stage_payload(config, h, "write_phase")
+        files_written_paths = _wp.get("files_written", [])
+        source_block = ("source", "")  # source page already written
+        hard_failures = []
+        stage_3_2_result = {"injected": _wp.get("images_injected", 0)}
+        stage_3_3_result = {"items": _wp.get("collision_items", 0)}
+    _write_blocks = [] if write_phase_done else file_blocks
+
+    for rel_path, content in _write_blocks:
         if ".." in rel_path or rel_path.startswith("/"):
             continue
         if not is_safe_ingest_path(rel_path):
@@ -953,7 +988,7 @@ def _do_write(prepared: dict, verbose: bool = False) -> dict:
         if enrich_enabled and not is_listing:
             enrich_candidates.append((rel_path, full_path))
 
-    if enrich_enabled and enrich_candidates:
+    if enrich_enabled and enrich_candidates and not write_phase_done:
         # Enrich the ACTUAL written content (post-merge) so links target real
         # pages. One batched call for the whole ingest — see
         # _enrich_wikilinks.enrich_wikilinks_batch. Not wrapped in try/except:
@@ -1034,14 +1069,23 @@ def _do_write(prepared: dict, verbose: bool = False) -> dict:
             hard_failures.append("source-placeholder")
 
     # Stage 3.2: Image injection
-    stage_3_2_result: dict = {"injected": 0}
-    if source_path.exists():
-        stage_3_2_result = stage_3_2_inject_images(config, raw_file, source_path, method)
+    if not write_phase_done:
+        stage_3_2_result: dict = {"injected": 0}
+        if source_path.exists():
+            stage_3_2_result = stage_3_2_inject_images(config, raw_file, source_path, method)
 
-    # Stage 3.3: Cross-domain slug collision review
-    from _stage_3_write import stage_3_3_slug_collision_review
-    stage_3_3_result = stage_3_3_slug_collision_review(
-        file_blocks, prepared.get("current_domain", "general"), config, verbose=verbose)
+        # Stage 3.3: Cross-domain slug collision review
+        from _stage_3_write import stage_3_3_slug_collision_review
+        stage_3_3_result = stage_3_3_slug_collision_review(
+            file_blocks, prepared.get("current_domain", "general"), config, verbose=verbose)
+
+        # Mark write phase complete so a post-review resume skips 3.1-3.3
+        # (prevents spurious page-merge / re-enrichment / re-injection).
+        mark_stage_done(config, h, "write_phase", payload={
+            "files_written": files_written_paths,
+            "images_injected": stage_3_2_result.get("injected", 0),
+            "collision_items": stage_3_3_result.get("items", 0),
+        })
 
     # Stage 3.4: Review (quality review of generated pages)
     stage_3_4_result = stage_3_4_review_suggestions(
