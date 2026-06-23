@@ -23,6 +23,12 @@ if str(_script_dir) not in sys.path:
     sys.path.insert(0, str(_script_dir))
 from _paths import detect_runtime_dir  # noqa: E402
 
+# Maximum concurrency for parallel LLM phases (Stage 1/1.5/2 are
+# read-only LLM calls — no shared wiki/ state mutation — so they can
+# run in parallel). Shared by ingest.py (batch_ingest, main) and
+# _watch.py (ingest_watch). 4 is safe for most provider rate limits.
+BATCH_MAX_CONCURRENT = 4
+
 
 # ── Progress / UI helpers ──
 
