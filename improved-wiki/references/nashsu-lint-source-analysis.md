@@ -76,9 +76,7 @@ This means:
 - `[[transformer]]` resolves to the same file (case-insensitive)
 - `[[TRANSFORMER]]` resolves to the same file (case-insensitive)
 
-**Improved-wiki pre-2026-06-11**: case-sensitive, basename-only (used `path.stem` as the dictionary key, ignoring subdirectory). This caused false positives on English wikis and would silently miss short-form wikilinks in CJK wikis.
-
-**Improved-wiki post-2026-06-11**: ported `buildSlugMap` 1:1. The Python `slug_map` uses lowercase keys + `setdefault` ordering to ensure relative-stem takes priority over basename on collision.
+**Improved-wiki**: ports `buildSlugMap` 1:1. The Python `slug_map` uses lowercase keys + `setdefault` ordering to ensure relative-stem takes priority over basename on collision.
 
 ### 2.2 In-link computation with case-insensitive lookup (lint.ts L101-112)
 

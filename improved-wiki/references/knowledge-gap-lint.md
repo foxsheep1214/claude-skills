@@ -139,7 +139,3 @@ wiki-lint 检查项
 ## NashSU 对齐
 
 NashSU 的 lint 系统在 UI 上通过 `missing-page` 类型提示用户"这里可以合成"。NashSU 没有 finding / thesis / methodology 的自动检测逻辑——这些是 improved-wiki 基于知识演化链的扩展。
-
-## 修订记录
-
-- **2026-06-17**：初版。从 Stage 2.3.5 拆分而来——高层知识空缺检测的语义属于 lint（wiki 整体健康）而非 per-ingest review（本次产物质量）。

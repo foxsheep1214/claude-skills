@@ -6,7 +6,7 @@
 
 ---
 
-> **例外（非文本生成的外部依赖）**：图片 caption（Stage 1.3）走 MiniMax VLM（需 `~/.agents/config.json` 的 `providers.minimax.api_key` 或 `CAPTION_API_KEY`）；Embedding（Stage 3.7）走本地 Ollama bge-m3（需 lancedb + Ollama + 模型就位）。两者**无回退**：缺 key/stack → `raise RuntimeError` 暂停 ingest（2026-06-24 策略），不走 MiniMax 文本生成。round iv（2026-06-22）起文本生成只有 conversation 一条路径，无 direct API 分支——wikilink enrichment 也走 conversation（批量：每次 ingest 汇总所有新写页面问一次）。
+> **例外（非文本生成的外部依赖）**：图片 caption（Stage 1.3）走 MiniMax VLM（需 `~/.agents/config.json` 的 `providers.minimax.api_key` 或 `CAPTION_API_KEY`）；Embedding（Stage 3.7）走本地 Ollama bge-m3（需 lancedb + Ollama + 模型就位）。两者**无回退**：缺 key/stack → `raise RuntimeError` 暂停 ingest，不走 MiniMax 文本生成。文本生成只有 conversation 一条路径，无 direct API 分支——wikilink enrichment 也走 conversation（批量：每次 ingest 汇总所有新写页面问一次）。
 
 ## Mode Comparison
 
@@ -47,7 +47,7 @@ stage_1_2_extract_images(Path('raw/Book/Book.pdf'), config)
 
 ### Stage 2.1: Global Digest
 
-**输入**：`ingest.py` 发送书的文本采样（~200K chars，2026-06-24 harvest 修复后）到 prompt。完整文本在 `.llm-wiki/extract-tmp/<book-stem>/p*.txt`。
+**输入**：`ingest.py` 发送书的文本采样（~200K chars）到 prompt。完整文本在 `.llm-wiki/extract-tmp/<book-stem>/p*.txt`。
 
 > ⚠️ 当回答 Stage 2.1 prompt 时，若采样文本不足以生成完整 outline/chunk_plan，应额外读取 `extract-tmp/` 下的页面样本补充理解。
 

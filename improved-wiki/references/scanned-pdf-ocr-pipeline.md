@@ -9,7 +9,6 @@
   - garbled 字体 PDF（文字层是乱码）→ `mineru-api-ocr`（强制 `parse_method=ocr`，避免 auto 读乱码层）
   - 提取 <2000 字符 → 上述标签加 `-low-quality` 后缀
 - 不适用：`.txt`/`.md`（直接读文件）、`.pptx`/`.docx`（zipfile/XML 解析，完全不碰 minerU）。
-- **已废弃的旧说法**："纯 text-layer PDF 直接 PyMuPDF `get_text()`，毫秒级" ——2026-06-23 起这条捷径不存在了，所有 PDF 文本提取都要起一次本地 minerU。
 
 ## 完整流程
 
@@ -103,9 +102,3 @@ API path 的 `_stage_1_2_harvest_images()` 曾不读 `content_list` 的 `image_c
 - **Stage 1.3 Caption**：对默认路径而言，caption 已经在这条 pipeline 内部跑完了（见上方"输出物"），不再是 ingest.py 里独立调度的一步。详见 `references/image-caption-strategy.md`。
 - **PPTX/DOCX**：完全不走这条 pipeline，用 stdlib zipfile/XML 解析文字 + 图片。
 - **混合型 PDF 判定**：见 `references/ingest-stages-mandatory.md` Stage 1.1 的第四信号"隐藏 OCR 层检测"。
-
-## 修订记录
-
-- **2026-06-11**：初版，源于 HardwareWiki 无源器件篇 312 页 OCR 全本实战（minimax 云端版）
-- **2026-06-17**：重写为 minerU 本地 VLM 版，反映 `ingest.py` 实际实现。移除 minimax OCR 内容（已过时），补充并发控制、chunk retry、崩溃恢复、mixed PDF 判定。
-- **2026-06-23**：重写为持久本地 API 服务器版——`mineru -b pipeline` CLI 因 502 bug 被弃用为默认路径；文本版 PDF 不再走 PyMuPDF 直抽，统一并入这条 pipeline；并发控制从进程计数轮询改为 `fcntl.flock` 文件锁；图片提取+caption 内嵌进 chunk 处理，不再是 ingest.py 独立调度的 Stage 1.2/1.3。

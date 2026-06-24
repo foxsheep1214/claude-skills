@@ -2,7 +2,7 @@
 
 ## ❌ `claude -p` cannot run 15-stage ingest pipeline
 
-**Discovered 2026-06-16**: Using `claude -p "digest this book"` for batch wiki ingestion fails (exit=1) for every book. The `-p` (print/non-interactive) mode:
+Using `claude -p "digest this book"` for batch wiki ingestion fails (exit=1) for every book. The `-p` (print/non-interactive) mode:
 - Cannot handle the multi-step `ingest.py` conversation-mode handoff (exit 101 prompt-file pattern)
 - Has no access to `--allowedTools` that match the pipeline's needs
 - Times out before OCR completes on scanned PDFs
@@ -29,7 +29,7 @@ See `/tmp/hw_batch_v4.py` for a working batch loop script.
 | Stage 2 verification | 1 | LLM didn't emit `wiki/sources/<title>.md` FILE block | Retry; check LLM model supports the prompt format |
 | minerU OCR timeout | -15 (SIGTERM) | Scanned PDF too large, OCR > 3600s | Increase timeout or skip large scanned books |
 | Stale lock | 1 (recovered) | Previous ingest crashed, `.ingest-progress/` lock file remains | `ingest.py` auto-recovers: "Stale lock from pid=XXX — taking over" |
-| minerU hybrid OCR routing | 0 (normal) | 文本层薄/图表密集的 PDF | hybrid-engine `parse_method=auto` 按页自动判 txt vs VLM OCR，所有 PDF 统一走 minerU（2026-06-23 起 PyMuPDF 不再做提取） |
+| minerU hybrid OCR routing | 0 (normal) | 文本层薄/图表密集的 PDF | hybrid-engine `parse_method=auto` 按页自动判 txt vs VLM OCR，所有 PDF 统一走 minerU |
 
 ## Source page dedup check
 

@@ -135,8 +135,3 @@ done
 ```
 
 ---
-
-## 修订记录
-
-- **2026-06-22**：彻底重写为结构化 spec，对齐代码 `stage_2_9_comparison_generation`。① 阶段编号 2.6 / 2.5A-C → **2.9 / 2.9A-B**；② 触发改为真实执行位置（2.8 之后，Phase 2 末步）；③ 修正输出标记 `COMPARISONS_INTERNAL` → 真实的 `COMPARISONS_DISAMBIGUATION` / `COMPARISONS_IN_SOURCE`；④ 消歧义页 schema 改为代码实际的英文 `(disambiguation)` + `tags:[disambiguation]`；⑤ 标注 2.9B 仅在 `concept ≥ 2` 时运行、至多 2 页；⑥ 删除未接线的 2.9C 跨源对比（连同臆想的人工触发 prompt 模板）——本阶段只做 A/B 两路。
-- **2026-06-16**：初版。分离消歧义 / 源内对比 / 跨源对比三场景，对齐 NashSU `domains.md` 与 `type: comparison` schema。

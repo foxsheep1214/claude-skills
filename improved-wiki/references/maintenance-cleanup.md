@@ -32,7 +32,7 @@ ps aux | grep ingest.py | grep -v grep
 
 | Directory | Purpose | When stale |
 |-----------|---------|------------|
-| `extract-tmp/` | minerU staging dir for PDF extraction (text/scanned/mixed all use it since 2026-06-23 — no longer PyMuPDF-specific) | After ingest completes |
+| `extract-tmp/` | minerU staging dir for PDF extraction | After ingest completes |
 | `.extract-tmp/` | Legacy back-compat marker checked by `_paths.py` when detecting old `wiki/`-based runtime layout — not an active temp dir on its own | N/A (detection-only path, not written by current code) |
 | `conversation/` | LLM prompt/response handoff files | After ingest completes |
 | `ingest-progress/` | Crash-recovery checkpoints | When no ingest is running |

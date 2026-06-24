@@ -48,9 +48,12 @@ from _core import Config  # noqa: E402
 CAPTION_MAX_WORKERS = int(os.environ.get("CAPTION_MAX_WORKERS", "12"))
 
 # How many chars of before/after body text to pass as anchoring context.
-# NashSU passes the immediate surrounding text; we cap it to keep the prompt
-# lean (the VLM only needs enough to identify what the figure plots).
-CONTEXT_CHARS = 800
+# NashSU parity (image-caption-pipeline.ts CONTEXT_CHARS): NashSU tuned this
+# DOWN from 500 → 150 because larger windows dragged in unrelated body text
+# the model had to filter out and tripled input-token cost for tiny upside;
+# 150 chars/side covers the figure-caption sweet spot (a figure label + the
+# referring sentence) while staying cheap. We match 150 exactly.
+CONTEXT_CHARS = 150
 # A per-image call is declared systemically failed after this many consecutive
 # failures — at that point the VLM main path is assumed down and we pause
 # (no silent fallback). Isolated single failures get a retryable placeholder.

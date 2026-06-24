@@ -1,13 +1,13 @@
 ---
 name: improved-wiki
-description: "Class-level umbrella for the Karpathy/NashSU LLM-Wiki ingestion pipeline (three peer commands: Ingest, Lint, Graph). 20 numbered ingest stages + 3 Phase-0 gates across 5 Phases (0-4). Three modes: auto-ingest (batch), chat-ingest (interactive), deep-research (closed-loop web→wiki, NashSU deep-research.ts parity). Use when ingesting a PDF/PPTX/DOCX, researching a topic into the wiki, validating an ingest, debugging failed tasks, or auditing wiki completeness. All text-generation LLM work runs in conversation mode, the only path (no external API key) — the calling agent answers each prompt with the current conversation's model, spawning one sub-agent per pending prompt only when multi-book batch ingest produces more than one simultaneously-pending prompt. Phase 0 OCR uses local minerU (free); image captioning (Stage 1.3) is the one exception and calls MiniMax VLM. Graph (the knowledge-graph command) is separate from lint — NashSU graph-view CLI parity, four-signal weighted graph + Louvain communities, deterministic (no LLM)."
+description: "Class-level umbrella for the Karpathy/NashSU LLM-Wiki ingestion pipeline (three peer commands: Ingest, Lint, Graph). 20 numbered ingest stages + 2 Phase-0 gates across 5 Phases (0-4). Three modes: auto-ingest (batch), chat-ingest (interactive), deep-research (closed-loop web→wiki, NashSU deep-research.ts parity). Use when ingesting a PDF/PPTX/DOCX, researching a topic into the wiki, validating an ingest, debugging failed tasks, or auditing wiki completeness. All text-generation LLM work runs in conversation mode, the only path (no external API key) — the calling agent answers each prompt with the current conversation's model, spawning one sub-agent per pending prompt only when multi-book batch ingest produces more than one simultaneously-pending prompt. Phase 0 OCR uses local minerU (free); image captioning (Stage 1.3) is the one exception and calls MiniMax VLM. Graph (the knowledge-graph command) is separate from lint — NashSU graph-view CLI parity, four-signal weighted graph + Louvain communities, deterministic (no LLM)."
 tags: [ingest, mandatory, nashsu, pipeline, scan-pdf, mineru, local-ocr, knowledge-graph, louvain]
 related_skills: [karpathy-llm-wiki, llm-wiki-local]
 ---
 
 # improved-wiki
 
-Karpathy LLM-Wiki pattern + NashSU v0.4.25 pipeline. Three peer commands: **Ingest** (20 numbered ingest Stages + 3 Phase-0 gates across 5 Phases: 0 pre-processing → 1 extraction → 2 analysis/generation → 3 write & enrich → 4 validation), **Lint** (structural + semantic), **Graph** (knowledge graph — separate from lint). Graph auto-triggers post-ingest behind `AUTO_BUILD_GRAPH=1`.
+Karpathy LLM-Wiki pattern + NashSU v0.4.25 pipeline. Three peer commands: **Ingest** (20 numbered ingest Stages + 2 Phase-0 gates across 5 Phases: 0 pre-processing → 1 extraction → 2 analysis/generation → 3 write & enrich → 4 validation), **Lint** (structural + semantic), **Graph** (knowledge graph — separate from lint). Graph auto-triggers post-ingest behind `AUTO_BUILD_GRAPH=1`.
 
 ```
 Phase 0: [0.1 raw-naming] → [0.2 source dedup]  (pre-processing gates)
@@ -21,7 +21,7 @@ Phase 3: Write & Enrich        (file write, image injection, slug collision revi
 Phase 4: Validation            (Stage 4.1: validate_ingest — auto-runs at end of every ingest)
 
 Barrier-free: 2.2∥2.4 analyze→generate per chunk (unified, all chunk counts)
-Parallel (I/O only): 1.2→1.3∥2.1 image-pipeline∥digest + 1.3 caption batch dispatch
+Parallel (I/O only): 1.2→1.3∥2.1 image-pipeline∥digest + 1.3 per-image caption dispatch
 
 Lint:  [structural] → [semantic (LLM, conversation mode)]
 Graph: [Build Graph (4-signal)] → [Louvain communities] → [cohesion + gaps + clusters]
@@ -46,7 +46,7 @@ this skill only runs from a CLI session with an agent present, so a separate pai
 text-gen API key had no real use case.
 
 Two other external-API dependencies (not text generation):
-- **Stage 1.3 image captioning** → MiniMax VLM (`anthropic/v1/messages` multi-image batch). This is the only MiniMax dependency; it needs `MINIMAX_CN_API_KEY` / `LLM_API_KEY` for the caption endpoint only. **No fallback**: if the key is missing or a caption batch fails after retries, the ingest **pauses** (raises) — it never silently degrades to OCR figure-text (policy 2026-06-24).
+- **Stage 1.3 image captioning** → MiniMax VLM (`anthropic/v1/messages`, one image per call with a context-aware prompt — NashSU `captionImage` parity). This is the only MiniMax dependency; it needs `MINIMAX_CN_API_KEY` / `LLM_API_KEY` for the caption endpoint only. **No fallback**: if the key is missing or caption calls fail consecutively after retries, the ingest **pauses** (raises) — it never silently degrades to OCR figure-text (policy 2026-06-24).
 - **Stage 3.7 embeddings** → mandatory (2026-06-21): defaults to local Ollama bge-m3 (`http://127.0.0.1:11434/v1`), no env var export required. **No fallback**: if Ollama isn't running, the model isn't pulled, or `lancedb` isn't installed, the ingest **pauses** (raises) — it never silently continues with keyword-only retrieval (policy 2026-06-24). Not routed through MiniMax.
 
 > **No-silent-fallback policy (2026-06-24)**: the ingest path allows NO silent fallback. If a main path cannot run (missing API key, missing service, LLM call failure after retries, broken config), the pipeline **warns and pauses** (raises `RuntimeError`) rather than degrading quality. Extraction/page writes are cached, so re-running after fixing the dependency resumes from the failed stage. This applies to: caption key missing, caption batch failure, embedding stack missing, LLM page-merge failure, broken `~/.agents/config.json`. (Corrupted cache/stage-progress files are the one exception: they warn loudly and reset, since re-ingesting is correct recovery, not quality degradation.)
@@ -86,7 +86,7 @@ Two other external-API dependencies (not text generation):
 
 **Operations**:
 - `references/kb-retrieval.md` — 4-step knowledge retrieval (search → read → cite → declare)
-- `references/image-caption-strategy.md` — unified Path A+B caption pipeline, parallel dispatch, preprocessing (2026-06-17)
+- `references/image-caption-strategy.md` — unified caption pipeline (minerU images, one VLM call per image with NashSU-style context-aware prompt), parallel dispatch, no-fallback (2026-06-24)
 - `references/multimodal-vlm-pitfalls.md` — VLM pitfalls (caption collapse, OCR brittleness)
 - `references/known-issues.md` — current bugs and workarounds
 - `references/initial-setup.md` — first-time project bootstrap
@@ -113,7 +113,7 @@ Two other external-API dependencies (not text generation):
 - **Batch ingest**: `python3 scripts/ingest.py f1.pdf f2.pdf ...` — parallel Stage 1.1-2 per book, serial Stage 3.1+ write
 - **Graph** (separate command, peer of Ingest/Lint): `python3 scripts/graph.py` builds the knowledge graph (NashSU graph-view CLI parity — four-signal weighted graph + Louvain communities + cohesion + gaps + cluster hubs). Deterministic, no LLM. `AUTO_BUILD_GRAPH=1` auto-rebuilds after ingest (30-min staleness guard). `--mode query --slug <s>` for read-only per-page wikilink suggestions during ingest.
 - **Unified barrier-free pipeline**: Stage 2.2 + 2.4 merged — analyze chunk → generate pages → next chunk. Works for all chunk counts (1 to N). Accumulating context + per-chunk checkpoint for crash recovery. Legacy multi-round synthesis retired.
-- **Parallel I/O**: caption ∥ digest (Stage 1.3∥2.1), caption batch dispatch (×6 workers). Pure I/O-bound parallelism only — no quality impact.
+- **Parallel I/O**: caption ∥ digest (Stage 1.3∥2.1), per-image caption dispatch (×12 workers). Pure I/O-bound parallelism only — no quality impact.
 - **Heading path tracking** (NashSU parity): each chunk analysis prompt includes full heading hierarchy (`Chapter 3 > Section 3.2 > Subsec 3.2.1`)
 - **Overlap context** (NashSU parity): paragraph/sentence-aware overlap text passed between chunks for continuity
 - **Page merge** (NashSU v0.4.25): three-layer merge on re-ingest — frontmatter array union + LLM body merge + locked fields. Sources field uses union-merge (preserves multi-source provenance).
@@ -140,7 +140,7 @@ Two other external-API dependencies (not text generation):
 | Category | Scripts |
 |----------|---------|
 | Core | `ingest.py`, `_core.py`, `_llm_api.py`, `_paths.py`, `_language.py`, `_frontmatter.py` |
-| Stage Modules (Phase 0-4) | `_stage_1_extract.py` (1.1 facade → `_stage_1_1_scanned.py` / `_stage_1_2_images.py` / `_stage_1_3_caption.py`), `_stage_2_analyze.py` (2.1-2.2), `_stage_2_3_incremental.py` (2.3), `_stage_2_4_generation.py` (2.4), `_stage_2_5_dedup.py` (2.5), `_stage_2_6_source_page.py` (2.6), `_stage_2_7_query_generation.py` (2.7), `_stage_2_8_query_resolve.py` (2.8), `_stage_2_9_comparison.py` (2.9), `_stage_3_4_review.py` (3.4), `_stage_2_base.py` (公共导入), `_stage_3_write.py` (3.1, 3.3, 3.5), `_stage_3_2_inject_images.py` (3.2), `_stage_3_6_quality.py` (3.6), `_stage_validators.py` (Stage 0 验证门 + StageValidationError) |
+| Stage Modules (Phase 0-4) | `_stage_1_extract.py` (1.1 facade → `_stage_1_1_scanned.py` / `_stage_1_2_images.py` / `_stage_1_3_caption.py`), `_stage_2_analyze.py` (2.1-2.2), `_stage_2_3_incremental.py` (2.3), `_stage_2_4_generation.py` (2.4), `_stage_2_5_dedup.py` (2.5), `_stage_2_6_source_page.py` (2.6), `_stage_2_7_query_generation.py` (2.7), `_stage_2_8_query_resolve.py` (2.8), `_stage_2_9_comparison.py` (2.9), `_stage_3_4_review.py` (3.4), `_stage_2_base.py` (公共导入), `_stage_3_write.py` (3.1, 3.3, 3.5), `_stage_3_2_inject_images.py` (3.2), `_stage_3_6_quality.py` (3.6), `_stage_3_7_embed.py` (3.7), `_stage_4_1_validate.py` (4.1), `_stage_validators.py` (Stage 0 验证门 + StageValidationError) |
 | Ingest orchestrator splits | `ingest.py` (CLI + `ingest_one`/`batch_ingest`) → `_ingest_skip.py` (Stage 0.2 去重/skip), `_ingest_chunks.py` (chunk 流水线), `_ingest_prepare.py` (综合/source page), `_ingest_write.py` (写盘 + post-ingest) |
 | Merge/Enrich | `_enrich_wikilinks.py`, `_source_lifecycle.py` |
 | Lint | `wiki-lint.sh`, `wiki-lint-semantic.py`, `validate_ingest.py`, `validate-frontmatter.sh`, `normalize_raw_names.py` |

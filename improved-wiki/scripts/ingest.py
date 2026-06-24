@@ -117,7 +117,8 @@ from _stage_3_write import (
     _stage_3_1_backup_existing_page,
 )
 from _stage_3_2_inject_images import stage_3_2_inject_images
-from _stage_3_7_embed import stage_3_7_embed_new_pages, stage_4_1_validate_ingest
+from _stage_3_7_embed import stage_3_7_embed_new_pages
+from _stage_4_1_validate import stage_4_1_validate_ingest
 from _enrich_wikilinks import enrich_wikilinks_batch
 from _watch import ingest_watch
 from _stage_validators import (verify_stage_0, StageValidationError, _verify_or_die, _verify_stage_1_1_text, _verify_stage_2_1_digest, _verify_stage_2_2_chunks, _verify_stage_2_4_file_blocks, validate_stage_outputs)
