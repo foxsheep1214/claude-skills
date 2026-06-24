@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-repair_stage_38.py — Rebuild ## Embedded Images sections in source pages.
+repair_stage_3_2.py — Rebuild ## Embedded Images sections in source pages.
 
 Reads current .caption.txt files from wiki/media/ and updates the
 caption column in source page `## Embedded Images` tables. This is
@@ -15,9 +15,9 @@ Works by:
   5. Atomic write (tmp → rename)
 
 Usage:
-  python3 scripts/repair_stage_38.py                          # all pages
-  python3 scripts/repair_stage_38.py --dry-run                # preview only
-  python3 scripts/repair_stage_38.py --slug "Some Book"       # single source
+  python3 scripts/repair_stage_3_2.py                          # all pages
+  python3 scripts/repair_stage_3_2.py --dry-run                # preview only
+  python3 scripts/repair_stage_3_2.py --slug "Some Book"       # single source
 """
 
 import argparse

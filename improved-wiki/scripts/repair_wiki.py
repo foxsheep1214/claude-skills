@@ -23,7 +23,7 @@ def main():
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
-    from repair_stage_38 import repair_source_page
+    from repair_stage_3_2 import repair_source_page
 
     root = Path(os.environ.get("IMPROVED_WIKI_ROOT", os.getcwd()))
     wiki_root = root / "wiki"
