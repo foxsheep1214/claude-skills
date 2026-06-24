@@ -103,39 +103,6 @@ def _is_image_too_small(width: int, height: int) -> bool:
 
 # ---------- Text extraction ----------
 
-def _stage_1_1_mineru_find_md(out_dir: Path, stem: str) -> Path:
-    """Locate the .md file produced by minerU under out_dir.
-
-    minerU's output path varies by version and backend (vlm/auto/txt subdirs,
-    stem-prefixed filenames). Preference order: vlm > auto > latest modified.
-    Raises RuntimeError with a directory listing if no .md is found, so the
-    caller can see what minerU actually produced for debugging.
-    """
-    candidates = sorted(out_dir.rglob(f"{stem}*.md"))
-    md_out = None
-    for c in candidates:
-        if "vlm" in str(c):
-            md_out = c
-            break
-    if md_out is None:
-        for c in candidates:
-            if "auto" in str(c):
-                md_out = c
-                break
-    if md_out is None and candidates:
-        md_out = candidates[-1]  # last resort: latest modified
-    if md_out is None or not md_out.exists():
-        all_output = sorted(out_dir.rglob("*"))
-        found = [str(p.relative_to(out_dir)) for p in all_output if p.is_file()]
-        raise RuntimeError(
-            f"minerU finished but no .md output found for stem '{stem}'. "
-            f"Actual output under {out_dir}: {found[:20]}"
-        )
-    print(f"[mineru] Found output: {md_out.relative_to(out_dir)}")
-    return md_out
-
-
-
 def _clean_mineru_latex(text: str) -> str:
     """Clean minerU's noisy LaTeX formula output (font-dependent noise).
 
@@ -189,58 +156,6 @@ def _clean_mineru_latex(text: str) -> str:
     text = re.sub(r"\$[^\$\n]+\$",
                   lambda m: "$" + _clean_formula(m.group(0)[1:-1]) + "$", text)
     return text
-
-
-def _stage_1_1_extract_text_mineru_pipeline_impl(file_path: Path, config: Config) -> str:
-    """Extract text from a text-based PDF via minerU pipeline backend (no OCR).
-
-    Uses `-b pipeline -m txt`: layout-aware text extraction that preserves
-    tables (HTML <table> with rowspan/colspan), formulas (LaTeX), and figure
-    regions (image blocks with captions). Replaces the former PyMuPDF
-    get_text() path which lost all table/formula/figure structure.
-
-    Comparison (AFE439A2 datasheet, 69 pages): PyMuPDF -> 0 tables / 0 formulas
-    / 2 images; minerU pipeline -> 73 tables / 7 formulas / 157 images.
-    Trade-off: ~180s vs 0.17s per file (model loading dominates; page
-    processing is ~3-4s). See ~/Desktop/afe439a2-compare/对比报告.md.
-    """
-    mineru_bin = Path.home() / ".venv" / "bin" / "mineru"
-    if not mineru_bin.exists():
-        raise RuntimeError(f"minerU CLI not found at {mineru_bin}")
-
-    # Per-stem output dir (same convention as the scanned/VLM path) so Stage
-    # 1.2 image extraction can locate minerU's images via the shared
-    # `extract_tmp_dir/<stem>` lookup in ingest.py. minerU nests `<stem>/txt/`
-    # under out_dir automatically.
-    out_dir = config.extract_tmp_dir / file_path.stem
-    out_dir.mkdir(parents=True, exist_ok=True)
-    stem = file_path.stem
-
-    cmd = [
-        str(mineru_bin), "-p", str(file_path), "-o", str(out_dir),
-        "-b", "pipeline", "-m", "txt", "-l", "ch",
-    ]
-    print(f"[pipeline] Running minerU: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
-    if result.returncode != 0:
-        raise RuntimeError(f"minerU pipeline failed: {result.stderr[-500:]}")
-
-    md_out = _stage_1_1_mineru_find_md(out_dir, stem)
-    return _clean_mineru_latex(md_out.read_text(encoding="utf-8"))
-
-
-def _stage_1_1_extract_text_mineru_pipeline(file_path: Path, config: Config) -> str:
-    """Lock-wrapped entry point for minerU pipeline extraction.
-
-    minerU loads multi-GB models into memory on each invocation; concurrent
-    runs cause OOM. The file lock serializes all minerU backends (pipeline +
-    VLM share the same lock, see _stage_1_1_extract_text_scanned_locked).
-    """
-    lock_fd = _stage_1_1_acquire_mineru_lock()
-    try:
-        return _stage_1_1_extract_text_mineru_pipeline_impl(file_path, config)
-    finally:
-        _stage_1_1_release_mineru_lock(lock_fd)
 
 
 def _stage_1_1_extract_text_office(file_path: Path) -> str:
@@ -344,9 +259,9 @@ def stage_1_1_extract_text(file_path: Path, config: Config) -> tuple[str, str]:
     Backend choice rationale (verified 2026-06-23 on Wu text PDF + Huang scanned
     PDF): hybrid-engine matches or beats pipeline/vlm-engine on both text and
     scanned — identical CJK text, equal block-formula capture, 2.5x more inline
-    formulas on scanned vs pipeline. The `mineru -b pipeline` CLI also still
-    hits a 502 bug in 3.4.0; set IMPROVED_WIKI_PIPELINE_CLI=1 to retry it
-    (non-garbled only — garbled must use the API path to force parse_method=ocr).
+    formulas on scanned vs pipeline. The `mineru -b pipeline` CLI hits a 502
+    bug in 3.4.0 and has been removed; the API path (hybrid-engine/auto) is the
+    sole extraction backend.
     """
     if file_path.suffix.lower() in {".txt", ".md"}:
         return file_path.read_text(encoding="utf-8"), "plain-text"
@@ -369,19 +284,8 @@ def stage_1_1_extract_text(file_path: Path, config: Config) -> tuple[str, str]:
     global _PARSE_METHOD_OVERRIDE
     _PARSE_METHOD_OVERRIDE = parse_method
     try:
-        if os.environ.get("IMPROVED_WIKI_PIPELINE_CLI") and not is_garbled:
-            # Opt-in (broken) pipeline CLI — non-garbled only; garbled needs the
-            # API path to force parse_method=ocr.
-            try:
-                text = _stage_1_1_extract_text_mineru_pipeline(file_path, config)
-                method = "mineru-pipeline"
-            except Exception as e:
-                print(f"[extract] minerU pipeline CLI failed ({e}) -- falling back to API path")
-                text = _stage_1_1_extract_text_scanned(file_path, config)
-                method = base_label
-        else:
-            text = _stage_1_1_extract_text_scanned(file_path, config)
-            method = base_label
+        text = _stage_1_1_extract_text_scanned(file_path, config)
+        method = base_label
     finally:
         _PARSE_METHOD_OVERRIDE = None
 
@@ -1923,7 +1827,7 @@ def stage_1_3_caption_images(config: Config, stage_1_2_result: dict, batch_size:
 
     media_dir = Path(stage_1_2_result["media_dir"])
     captioned = _stage_1_3_caption_images_batch(images, config, media_dir,
-                                source_label="pyMuPDF",
+                                source_label="stage-1.3",
                                 batch_size=batch_size)
     return {"captioned": captioned, "total": len(images)}
 
