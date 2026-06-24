@@ -29,8 +29,8 @@ Configuration:
   LLM_CHUNK_RETRIES       extra attempts per failed chunk (default 2 → 3 total)
   Text LLM:               config.json default provider (DeepSeek V4 Pro via OpenAI protocol)
   Image caption:          config.json caption_provider (MiniMax via Anthropic protocol)
-                            CAPTION_BATCH_SIZE=8   images per API call
-                            CAPTION_MAX_WORKERS=6  parallel batch concurrency
+                            one VLM call per image (NashSU parity)
+                            CAPTION_MAX_WORKERS=12 parallel caption concurrency
   Embeddings:             local Ollama (EMBEDDING_BASE_URL / EMBEDDING_MODEL)
 
 This script is idempotent: if the source page exists for a file, it's skipped.
@@ -85,7 +85,7 @@ from _stage_1_extract import (
     stage_1_3_caption_images,
     _stage_1_1_check_text_quality,
     _stage_1_1_detect_pdf_type,
-    CAPTION_BATCH_SIZE, CAPTION_MAX_WORKERS,
+    CAPTION_MAX_WORKERS,
 )
 from _stage_2_analyze import (
     stage_2_1_global_digest,
