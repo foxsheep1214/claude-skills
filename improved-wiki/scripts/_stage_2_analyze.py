@@ -1,3 +1,4 @@
+from __future__ import annotations
 
 from _stage_2_base import *
 
