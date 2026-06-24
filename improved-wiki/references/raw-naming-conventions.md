@@ -75,6 +75,44 @@ python3 ~/.agents/skills/improved-wiki/scripts/normalize_raw_names.py --project 
 
 # 只检查最近文件
 python3 ~/.agents/skills/improved-wiki/scripts/normalize_raw_names.py --recent 30 --fix
+
+# 查看每项处理的详情
+python3 ~/.agents/skills/improved-wiki/scripts/normalize_raw_names.py --check --verbose
+```
+
+`--check` 检查所有文件是否符合规范；`--fix` 自动修正可识别的命名问题（如补 Vendor 前缀）；`--recent N` 只检查最近 N 分钟内修改的文件；`--verbose` 输出每项处理的详情。
+
+### 检查结果分级：error vs warn
+
+检查项分两级：
+
+- **error（❌）**：硬性违规，如缺分隔段、年份格式不对、Vendor 未识别。`--fix` 仅作用于 error；error 会使脚本退出码为 1。
+- **warn（⚠️）**：启发式怀疑，不阻断。warn 不参与 `--fix`，不影响退出码。
+
+### 作者段启发式（warn）
+
+当某类型的 YAML 规则带 `author_field` + `surname_only: true` 时（如 Book/Paper/Presentation，Paper/Presentation 经 `extends: Book` 继承），脚本对作者段做保守启发式检查，告警以下高置信违规：
+
+- 含 `et al` / `等`（多作者标记，规则要求只写第一作者姓氏）
+- 含名字缩写（`Y-M`、`M.`、`J` 等独立大写字母串）
+- ≥3 词（疑似全名或多作者列表）
+
+**已知盲区（不告警）**：
+
+- **2 词作者段**：无法区分多词姓氏 `Ben Salah` 与全名 `Hong Zhangjie`，均不告警，需人工把关。
+- **纯 CJK 作者段**：Book 规则允许中文全名，且 CJK 姓氏切分需字典，跳过。
+
+NAMING.md 中启用方式（YAML rules 块）：
+
+```yaml
+  Book:
+    pattern: "书名 - 年份 - 作者"
+    min_parts: 3
+    year_field: 1
+    author_field: -1      # 末段为作者（-1 = 最后一段）
+    surname_only: true    # 启用作者段启发式
+  Paper:
+    extends: Book         # 自动继承 author_field + surname_only
 ```
 
 规则来源：各项目 `raw/NAMING.md` 中的 ` ```yaml rules ``` ` 块。

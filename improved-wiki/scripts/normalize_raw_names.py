@@ -112,7 +112,7 @@ def _stage_0_1_parse_simple_yaml(text: str) -> dict:
                 parent[key] = items
         else:
             v = val.strip("'\"")
-            if v.isdigit():
+            if re.match(r'^-?\d+$', v):
                 v = int(v)
             elif v in ('true', 'false'):
                 v = (v == 'true')
@@ -172,33 +172,81 @@ def _stage_0_1_infer_vendor(part_number: str, prefix_map: Dict[str, str]) -> Opt
 
 # ── Check & Fix ─────────────────────────────────────────────────
 
+def _stage_0_1_surname_warnings(author: str) -> List[str]:
+    """Heuristic warnings for an author field that should be surname-only.
+
+    Conservative by design — only flags high-confidence violations:
+      * explicit multi-author markers ('et al', '等')
+      * standalone given-name initials ('Y-M', 'M.', 'J')
+      * 3+ words (almost certainly a full name or an author list)
+
+    A 2-word field is NOT flagged: multi-word surnames like 'Ben Salah' are
+    valid, and 'Ben Salah' (surname) cannot be reliably told from
+    'Hong Zhangjie' (full name) by shape alone.
+
+    CJK-only fields are skipped: the Book rule permits Chinese full names,
+    and CJK surname splitting would require a surname dictionary.
+    """
+    warns: List[str] = []
+    a = author.strip()
+    if not a or not re.search(r'[A-Za-z]', a):
+        return warns
+    if re.search(r'\bet al\.?\b', a, re.IGNORECASE):
+        warns.append(f"作者段含「et al」，按规则只写第一作者姓氏：「{author}」")
+    if '等' in a:
+        warns.append(f"作者段含「等」，按规则只写第一作者姓氏：「{author}」")
+    # Standalone initials: a single capital letter (optional period), possibly
+    # hyphen-chained ('Y-M', 'M.-J'). Matches 'Wu Y-M', 'Smith J.'; does not
+    # match 'Ben' / 'Salah' / 'Smith-Jones' (lowercase follows the capital).
+    if re.search(r'(?<!\S)[A-Z]\.?(?:-[A-Z]\.?)*(?!\S)', a):
+        warns.append(f"作者段含名字缩写，应只保留姓氏：「{author}」")
+    words = a.split()
+    if len(words) >= 3:
+        warns.append(f"作者段含多词（{len(words)} 词），疑似全名或多作者，应只写第一作者姓氏：「{author}」")
+    return warns
+
+
 def _stage_0_1_check_rule(filepath: Path, rule: dict, vendors: List[str],
-                prefix_map: Dict[str, str]) -> List[str]:
-    """Check a file against its folder's naming rule."""
+                prefix_map: Dict[str, str]) -> List[Tuple[str, str]]:
+    """Check a file against its folder's naming rule.
+
+    Returns a list of (severity, message) tuples. ``severity`` is ``'error'``
+    (a hard violation) or ``'warn'`` (a heuristic suspicion, e.g. the author
+    field looks like a full name under a surname-only rule).
+    """
     stem = filepath.stem
-    issues: List[str] = []
+    issues: List[Tuple[str, str]] = []
     min_parts = rule.get('min_parts', 1)
     parts = stem.split(' - ')
 
     if len(parts) < min_parts:
         pattern = rule.get('pattern', '?')
-        issues.append(f"格式不符合（应为「{pattern}」）")
+        issues.append(("error", f"格式不符合（应为「{pattern}」）"))
         return issues
 
     vf = rule.get('vendor_field')
     if vf is not None and isinstance(vf, int) and 0 <= vf < len(parts):
         if parts[vf] not in vendors:
-            issues.append(f"未识别的 Vendor：「{parts[vf]}」")
+            issues.append(("error", f"未识别的 Vendor：「{parts[vf]}」"))
 
     yf = rule.get('year_field')
     if yf is not None and isinstance(yf, int) and 0 <= yf < len(parts):
         if not re.match(r'^\d{4}$', parts[yf]):
-            issues.append(f"年份格式不正确：「{parts[yf]}」")
+            issues.append(("error", f"年份格式不正确：「{parts[yf]}」"))
 
     df = rule.get('date_field')
     if df is not None and isinstance(df, int) and 0 <= df < len(parts):
         if not re.match(r'^\d{4}-\d{2}-\d{2}$', parts[df]):
-            issues.append(f"日期格式不正确：「{parts[df]}」")
+            issues.append(("error", f"日期格式不正确：「{parts[df]}」"))
+
+    # Author-field heuristic (warn-level): for surname-only rules, flag author
+    # segments that look like full names or multi-author lists.
+    af = rule.get('author_field')
+    if af is not None and isinstance(af, int) and rule.get('surname_only'):
+        idx = af if af >= 0 else len(parts) + af
+        if 0 <= idx < len(parts):
+            for w in _stage_0_1_surname_warnings(parts[idx]):
+                issues.append(("warn", w))
 
     return issues
 
@@ -240,7 +288,7 @@ def _stage_0_1_fix_file(filepath: Path, rule: dict, vendors: List[str],
 def stage_0_1_scan_raw(raw_root: Path, rules: dict, check: bool = True, fix: bool = False,
              verbose: bool = False, recent_minutes: Optional[int] = None) -> Dict:
     """Scan raw/ files against parsed rules from NAMING.md."""
-    results = {"ok": 0, "issues": 0, "fixed": 0, "unfixable": 0}
+    results = {"ok": 0, "issues": 0, "warns": 0, "fixed": 0, "unfixable": 0}
     cutoff = _time.time() - (recent_minutes * 60) if recent_minutes else 0
     files_skipped = 0
     vendors = rules.get('vendors', [])
@@ -274,19 +322,27 @@ def stage_0_1_scan_raw(raw_root: Path, rules: dict, check: bool = True, fix: boo
 
             rel = filepath.relative_to(raw_root)
             issues = _stage_0_1_check_rule(filepath, rule, vendors, prefix_map)
+            errors = [m for s, m in issues if s == "error"]
+            warns = [m for s, m in issues if s == "warn"]
 
-            if not issues:
+            if not errors and not warns:
                 results["ok"] += 1
                 if verbose:
                     print(f"  ✅ {rel}")
                 continue
 
-            results["issues"] += 1
-            print(f"  ❌ {rel}")
-            for issue in issues:
-                print(f"      {issue}")
+            if errors:
+                results["issues"] += 1
+                print(f"  ❌ {rel}")
+            else:
+                results["warns"] += 1
+                print(f"  ⚠️  {rel}")
+            for m in errors:
+                print(f"      {m}")
+            for m in warns:
+                print(f"      ⚠ {m}")
 
-            if fix:
+            if fix and errors:
                 outcome = _stage_0_1_fix_file(filepath, rule, vendors, prefix_map, dry_run=False)
                 if outcome:
                     new_path, reason = outcome
@@ -353,6 +409,7 @@ def main():
     print(f"\n── 结果 ──")
     print(f"  ✅ 符合规范: {results['ok']}")
     print(f"  ❌ 不符合:   {results['issues']}")
+    print(f"  ⚠️  启发式警告: {results['warns']}")
     if args.fix:
         print(f"  🔧 已修正:   {results['fixed']}")
         print(f"  ⚠️  无法自动修正: {results['unfixable']}")
