@@ -63,14 +63,14 @@ enrichment task expecting a JSON object mapping page paths to `[{term, target}]`
 lists. Outputting `{}` safely skips it with no quality loss if pages already have
 inline wikilinks from Stage 2.4 generation.
 
-### Stage 2.1 sends only sampled text (2026-06-24)
+### Stage 2.1 text sample size (2026-06-24, partially fixed)
 
-The Global Digest prompt includes only a small text sample (~4K chars from the
-middle of the book), NOT the full extracted text. The full text is in
-`.llm-wiki/extract-tmp/<book-stem>/p*.txt` (one file per page, 272 pages = 540K
-chars for a typical book). **When answering Stage 2.1, read page samples from
-the extract-tmp directory** to produce an accurate outline and chunk plan. The
-sampled text alone is insufficient for a complete digest.
+The Global Digest prompt includes only a text sample from the book, NOT the
+full extracted text. Before the `json.loads(cl)` harvest fix (commit `a2bfb3e`),
+the sample was only ~4K chars (corrupted OCR assembly from harvest fallback).
+After the fix, the sample is 200K chars — sufficient for accurate chunk
+planning (3 chunks vs 1). The full text remains in
+`.llm-wiki/extract-tmp/<book-stem>/p*.txt` if the agent needs to read more.
 
 ### OCR timeout for 200+ page books (2026-06-24)
 
@@ -80,24 +80,40 @@ exceed the 600s terminal timeout. **Re-running `ingest.py` resumes from cache**
 `--stop-after-stage 0` separates OCR from the LLM stages and avoids timeout
 pressure on the LLM steps.
 
-### Image extraction + captioning: 5 issues from 2026-06-24 re-ingest
+### Image extraction + captioning: 5 issues from 2026-06-24 re-ingest (2 fixed, 3 open)
 
 Full analysis in `references/image-caption-strategy.md` § "Known issues
 discovered 2026-06-24". Summary:
 
-1. **MinerU `image_caption` wasted on API path** — `_stage_1_2_harvest_images()`
-   doesn't write sidecars from `content_list`'s `image_caption` field; only
-   `_stage_1_2_extract_from_mineru()` (CLI path) does. 269 images with
-   pre-existing captions redundantly sent to VLM.
-2. **188 fragment images not filtered** — API `images` dict has 528 entries vs
-   340 `content_list` image/chart blocks. Extra 188 are fragments/noise.
-3. **No retry for failed captions** — single-pass `ThreadPoolExecutor`; 202/528
-   images (38%) left uncaptioned after 7 JSON truncation events.
+1. ✅ **FIXED: MinerU `image_caption` wasted on API path** — Root cause:
+   minerU API's `build_result_dict()` returns `content_list` as a JSON
+   **string** (via `get_infer_result` → `fp.read()`), not a parsed list.
+   `_stage_1_2_harvest_images()` checked `isinstance(cl, list)` which was
+   always `False` for a string → `content_list` skipped → `page_figs` empty →
+   fallback dumped ALL 528 images to chunk-start page. Fix: `json.loads(cl)`
+   before the isinstance check. Also added: harvest now writes minerU's
+   `image_caption` as sidecar `.caption.txt`, so Stage 1.3 skips them.
+   **Verified**: 141/340 images got sidecar captions (42%), VLM calls dropped
+   from 528→157 (↓70%).
+2. ✅ **FIXED: 188 fragment images not filtered** — Same root cause as #1.
+   Once `content_list` is parsed, `page_figs` only contains images/chart
+   blocks from `content_list` (340), not all `images` dict entries (528).
+   **Verified**: 528→340 images (↓36%), page numbers correctly mapped (180
+   distinct pages vs 6 before).
+3. **No retry for failed captions** — single-pass `ThreadPoolExecutor`; 4/340
+   images (1%) left uncaptioned after JSON truncation events. (Was 202/528 =
+   38% before fix #1+#2 reduced VLM load.)
 4. **`batch_size=6` hardcoded** at line 990 (minerU path) vs `CAPTION_BATCH_SIZE=8`
    env default — causes JSON truncation on 6-image batches.
 5. **~112 formula images extracted as pictures** — minerU classifies some
    formula regions as `image` blocks rather than `equation` blocks, so they
    get VLM-captioned instead of using the LaTeX text minerU already extracted.
+
+**Cascading effect of fix #1+#2**: the `json.loads(cl)` fix also fixed Stage
+2.1 input quality. Before the fix, the harvest fallback (all images on one
+page) corrupted OCR text assembly → Stage 2.1 received only 4K chars (sampled
+from a narrow text window) → 1 chunk → 36 concepts. After the fix, Stage 2.1
+receives 200K chars → 3 chunks → 55 concepts (+53%) and 48 entities (+100%).
 
 ### `--delete` for re-ingest (2026-06-24)
 
