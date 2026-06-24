@@ -1,9 +1,10 @@
 """Phase 3: Write pages to disk, slug collision review, aggregate repair.
 
-This module holds Stage 3.1 (write), 3.3 (slug collision review), and 3.4
+This module holds Stage 3.1 (write), 3.3 (slug collision review), and 3.5
 (aggregate repair + cache). Sibling modules: _stage_3_2_inject_images.py
-(image injection) and _stage_3_6_quality.py (quality scoring). Stage 3.7
-(embeddings) runs from ingest.py post-ingest.
+(image injection), _stage_3_4_review.py (content review), and
+_stage_3_6_quality.py (quality scoring). Stage 3.7 (embeddings) runs from
+ingest.py post-ingest.
 
 Extracted as separate module 2026-06-18. Refactored 2026-06-21 for explicit stage naming.
 """
@@ -238,17 +239,14 @@ def _stage_3_1_wiki_path_for_source(raw_file: Path, config: Config) -> Path:
 
 
 def _stage_3_1_sanitize_ingested_content(content: str) -> str:
-    """NashSU parity (ingest-sanitize.ts): fix common LLM formatting errors."""
-    # Fix stray opening code fences without closing
-    fence_count = content.count("\n```")
-    if fence_count % 2 != 0:
-        # Remove last unclosed fence
-        last_fence = content.rfind("\n```")
-        if last_fence != -1:
-            content = content[:last_fence] + content[last_fence:].replace("\n```", "", 1)
-    # Fix "frontmatter:" prefix (LLM sometimes echoes the instruction)
-    content = re.sub(r'^frontmatter:\s*\n', '', content, flags=re.MULTILINE)
-    return content
+    """NashSU parity (ingest-sanitize.ts): fix common LLM formatting errors.
+
+    Delegates to _ingest_sanitize for the full 4-pattern port: outer ```yaml
+    fence strip, ``frontmatter:`` prefix strip, missing opening fence repair,
+    and wikilink-list-in-frontmatter repair. See _ingest_sanitize.py.
+    """
+    from _ingest_sanitize import sanitize_ingested_file_content
+    return sanitize_ingested_file_content(content)
 
 
 def _stage_3_1_backup_existing_page(path: Path, config: Config) -> None:
@@ -718,6 +716,20 @@ def stage_3_3_slug_collision_review(file_blocks, current_domain, config, *, verb
             title = _extract_fm_field(content, "title")
             if title:
                 new_concept_names.append(title)
+    # Stage 3.1 (write) has already written the new concept pages to disk, so
+    # they now appear in existing_domains. Without excluding them, each new
+    # concept matches ITS OWN just-written page; since the ingest's single
+    # current_domain rarely equals every new page's actual frontmatter domain,
+    # every new concept gets falsely flagged as a cross-domain collision with
+    # itself (observed: 8-10 spurious "collisions" that are all self-matches,
+    # contradicting Stage 2.9A's LLM judgment of 0).
+    new_slugs = set()
+    for name in new_concept_names:
+        s = re.sub(r'[<>:"|?*\\/]+', '', name).strip()
+        s = re.sub(r'\s+', '-', s).lower()
+        new_slugs.add(s)
+    existing_domains = {slug: d for slug, d in existing_domains.items()
+                        if slug not in new_slugs}
     collisions = _stage_3_3_find_slug_collisions(
         new_concept_names, existing_domains, current_domain)
     warning = _stage_3_3_build_collision_warning(collisions, existing_domains)

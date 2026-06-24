@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
-"""lint.py — Global wiki consistency checks (Phase 2 of NashSU refactor)
+"""lint.py — Global wiki consistency checks (Phase 2 of NashSU refactor).
 
-Separate from ingest for independent, offline wiki-wide validation.
-Checks for orphan pages, broken references, structural issues.
+Thin CLI wrapper over ``_lint_suggest.run_structural_lint`` — the faithful
+port of NashSU ``lint.ts`` (orphan / broken-link / no-outlinks, each with a
+deterministic fix suggestion). The old in-house stub here only scanned
+``concepts/`` + ``entities/``, was case-sensitive, and treated ``[stem]``
+markdown links as wikilinks; it has been replaced by the real engine.
+
+For auto-fixing the findings this surfaces, see ``wiki-lint-fix.py``.
+For LLM semantic lint, see ``wiki-lint-semantic.py``.
 
 Usage:
     python3 lint.py
     python3 lint.py --wiki-root ~/Documents/知识库/HardwareWiki
 """
-
 import argparse
 import sys
 from pathlib import Path
@@ -16,87 +21,46 @@ from pathlib import Path
 _script_dir = Path(__file__).resolve().parent
 sys.path.insert(0, str(_script_dir))
 
-from _core import Config, detect_runtime_dir
+from _lint_suggest import run_structural_lint  # noqa: E402
+
+# Anchor files excluded from orphan/outlink checks (mirror _lint_suggest +
+# validate_ingest). overview.md is an aggregate page, not a content page.
+_ANCHOR_FILES = {"index.md", "log.md", "overview.md"}
 
 
-def check_orphan_pages(wiki_root: Path) -> list[str]:
-    """Find pages with no incoming links"""
-    orphans = []
-    concepts_dir = wiki_root / "concepts"
-    entities_dir = wiki_root / "entities"
-
-    if not concepts_dir.exists() and not entities_dir.exists():
-        return orphans
-
-    all_pages = list(concepts_dir.glob("*.md")) + list(entities_dir.glob("*.md"))
-
-    for page in all_pages:
-        # Check if any other page links to this one
-        found_link = False
-        for other_page in all_pages:
-            if other_page == page:
-                continue
-            try:
-                content = other_page.read_text(encoding='utf-8')
-                if f"[[{page.stem}]]" in content or f"[{page.stem}]" in content:
-                    found_link = True
-                    break
-            except Exception:
-                pass
-
-        if not found_link:
-            orphans.append(page.name)
-
-    return orphans
-
-
-def check_broken_references(wiki_root: Path) -> list[tuple[str, str]]:
-    """Find broken wiki references (links to non-existent pages)"""
-    broken = []
-    concepts_dir = wiki_root / "concepts"
-    entities_dir = wiki_root / "entities"
-
-    all_pages = set()
-    if concepts_dir.exists():
-        all_pages.update(p.stem for p in concepts_dir.glob("*.md"))
-    if entities_dir.exists():
-        all_pages.update(p.stem for p in entities_dir.glob("*.md"))
-
-    all_files = list(concepts_dir.glob("*.md")) + list(entities_dir.glob("*.md")) if concepts_dir.exists() or entities_dir.exists() else []
-
-    for page_file in all_files:
+def collect_pages(wiki_root: Path) -> list[tuple[str, str]]:
+    """Walk wiki/ and return [(short_name, content), ...] for every .md page
+    except the anchor aggregates. short_name is relative to wiki_root."""
+    pages: list[tuple[str, str]] = []
+    if not wiki_root.is_dir():
+        return pages
+    for path in sorted(wiki_root.rglob("*.md")):
+        if path.name in _ANCHOR_FILES:
+            continue
+        rel = path.relative_to(wiki_root)
         try:
-            content = page_file.read_text(encoding='utf-8')
-            import re
-            links = re.findall(r'\[\[([^\]]+)\]\]', content)
-            for link in links:
-                if link not in all_pages:
-                    broken.append((page_file.name, link))
-        except Exception:
-            pass
-
-    return broken
+            pages.append((str(rel), path.read_text(encoding="utf-8")))
+        except OSError:
+            continue
+    return pages
 
 
-def lint_wiki(wiki_root: Path) -> dict:
-    """Run all lint checks and return results"""
-    results = {
-        "orphan_pages": check_orphan_pages(wiki_root),
-        "broken_references": check_broken_references(wiki_root),
-        "passed": True
-    }
+def lint_wiki(wiki_root: Path) -> list[dict]:
+    """Run structural lint over wiki/ and return the finding list.
 
-    return results
+    Each finding: {type, severity, page, detail, broken_target?,
+    suggested_target?, suggested_source?}.
+    """
+    pages = collect_pages(wiki_root)
+    return run_structural_lint(pages, with_suggestions=True)
 
 
-def main():
-    """Main lint command"""
-    parser = argparse.ArgumentParser(description="Wiki-wide consistency checks")
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Wiki-wide structural lint")
     parser.add_argument("--wiki-root", type=Path, help="Wiki root directory")
     args = parser.parse_args()
 
-    wiki_root = args.wiki_root or Path.cwd()
-
+    wiki_root = args.wiki_root or (Path.cwd() / "wiki")
     if not wiki_root.exists():
         print(f"❌ Wiki root not found: {wiki_root}")
         return 1
@@ -105,26 +69,35 @@ def main():
     print(f"  Wiki: {wiki_root}")
     print()
 
-    results = lint_wiki(wiki_root)
+    findings = lint_wiki(wiki_root)
+    by_type: dict[str, list[dict]] = {}
+    for f in findings:
+        by_type.setdefault(f["type"], []).append(f)
 
-    # Report orphan pages
-    if results["orphan_pages"]:
-        print(f"⚠️  Found {len(results['orphan_pages'])} orphan pages (no incoming links):")
-        for page in results["orphan_pages"]:
-            print(f"    - {page}")
-        print()
-
-    # Report broken references
-    if results["broken_references"]:
-        print(f"⚠️  Found {len(results['broken_references'])} broken references:")
-        for page, link in results["broken_references"]:
-            print(f"    - {page}: links to missing [[{link}]]")
-        print()
-
-    if not results["orphan_pages"] and not results["broken_references"]:
+    if not findings:
         print("✅ All checks passed!")
         return 0
 
+    labels = {
+        "broken-link": "broken references",
+        "orphan": "orphan pages (no incoming links)",
+        "no-outlinks": "pages with no outgoing links",
+    }
+    for kind in ("broken-link", "orphan", "no-outlinks"):
+        items = by_type.get(kind, [])
+        if not items:
+            continue
+        print(f"⚠️  Found {len(items)} {labels[kind]}:")
+        for f in items:
+            suggestion = f.get("suggested_target") or f.get("suggested_source")
+            sugg = f" → suggest: {suggestion}" if suggestion else ""
+            if kind == "broken-link":
+                print(f"    - {f['page']}: [[{f.get('broken_target', '')}]]{sugg}")
+            else:
+                print(f"    - {f['page']}{sugg}")
+        print()
+
+    print(f"Total: {len(findings)} finding(s). Run `wiki-lint-fix.py` to auto-fix.")
     return 1
 
 

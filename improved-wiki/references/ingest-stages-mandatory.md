@@ -218,17 +218,17 @@ test -d wiki/media/*/<slug> && find wiki/media/<type>/<slug> \( -name '*.jpeg' -
 
 ## Graph 命令（独立，与 Ingest/Lint 并列）
 
-Graph 不在 ingest 管线内。Ingest 管线不碰图——图建在 Graph 命令，图用在 Ingest（Stage 2.3 可通过 `--mode query` 查询已有图为新页面建议 wikilinks）。触发：完成一批 ingest 后手动运行，或 `AUTO_BUILD_GRAPH=1` 自动触发。详见 `graph.py --help`。
+Graph 不在 ingest 管线内。Ingest 管线不碰图——图建在 Graph 命令，图用在 Ingest 之外（`--mode query --slug <page>` 是只读工具，为任意页面返回 top-N 建议缺失 wikilink，不自动改文件、不在 Stage 2.3 内调用）。触发：完成一批 ingest 后手动运行，或 `AUTO_BUILD_GRAPH=1` 自动触发（30 分钟新鲜度守卫）。详见 `graph.py --help`。
 
-- **四信号图构建**：解析 wikilinks + frontmatter，构建 networkx 加权无向图（direct link ×3.0 / source overlap ×4.0 / Adamic-Adar ×1.5 / type affinity ×1.0）。产物 `graph.json`。
-- **Louvain 社区检测**：社区检测 + cohesion 评分（<0.15 标记低质量）。
-- **图谱洞察**：`knowledge-gaps.md`（孤立节点/桥接节点/建议缺失链接）+ `clusters/cluster-NNN.md`（社区 hub 页）。
+- **四信号图构建**：解析 wikilinks + `related:` + frontmatter，构建 networkx 加权无向图（direct link ×3.0 / source overlap ×4.0 / Adamic-Adar ×1.5 / type affinity ×1.0）。产物 `<runtime>/graph.json`。大书（>100 页/源）source-overlap 改用 star（成员↔source 页 hub）避免 N² clique；AA 丢弃 <0.2 的 hub 噪声对。
+- **Louvain 社区检测**：社区检测 + cohesion 评分（<0.15 标记低质量）；大图 betweenness 用采样近似。
+- **图谱洞察**：`wiki/knowledge-gaps.md`（孤立节点/桥接节点/建议缺失链接）+ `wiki/clusters/cluster-NNN.md`（社区 hub 页）。
 
 ```bash
-IMPROVED_WIKI_ROOT=/path/to/wiki python3 scripts/graph.py              # 全量
-IMPROVED_WIKI_ROOT=/path/to/wiki python3 scripts/graph.py --dry-run    # 仅统计
-IMPROVED_WIKI_ROOT=/path/to/wiki python3 scripts/graph.py --mode query --slug "page"  # 查询建议
+python3 scripts/graph.py --wiki-root /path/to/wiki              # 全量
+python3 scripts/graph.py --wiki-root /path/to/wiki --dry-run    # 仅统计
+python3 scripts/graph.py --wiki-root /path/to/wiki --mode query --slug "page"  # 查询建议
 ```
-依赖：`pip install networkx python-louvain pyyaml`。
+依赖：`pip install networkx pyyaml`（networkx 3.x 内置 Louvain，无需 python-louvain）。
 
 ---

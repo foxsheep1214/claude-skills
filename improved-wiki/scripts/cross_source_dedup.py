@@ -54,6 +54,12 @@ import _dedup_merge  # noqa: E402
 from _core import ConversationPending  # noqa: E402
 from _paths import detect_runtime_dir  # noqa: E402
 from _llm_call import make_conversation_llm_call  # noqa: E402
+from _frontmatter import parse_frontmatter  # noqa: E402
+from _dedup_embedding import (  # noqa: E402
+    candidate_pairs,
+    cluster_by_pairs,
+    DuplicatePrefilterError,
+)
 
 ANCHOR_FILES = {"index.md", "log.md", "overview.md"}
 STATE_FILES = {
@@ -118,7 +124,52 @@ def _slug_from_path(project_relative: str) -> str:
     return os.path.splitext(project_relative.split("/")[-1])[0]
 
 
-def run_phase2(project_root, llm_call, *, apply=True, whitelist_pairs=None, today=None) -> dict:
+def _detect_groups(summaries, pages, llm_call, not_duplicates, embedding_prefilter):
+    """Run the LLM duplicate detector, optionally pre-clustered by embeddings.
+
+    With ``embedding_prefilter`` (GAP-3): embed every page, cluster by cosine
+    similarity, and run the LLM detector per cluster — so each LLM call sees a
+    small candidate set instead of the whole wiki in one prompt. Falls back to
+    the full single-call scan if embeddings can't cover enough pages.
+    """
+    if not embedding_prefilter:
+        return _dedup.detect_duplicate_groups(summaries, llm_call, not_duplicates=not_duplicates)
+
+    summary_by_slug = {s.slug: s for s in summaries}
+    emb_pages: list[dict] = []
+    for path, content in pages:
+        slug = _slug_from_path(path)
+        if slug not in summary_by_slug:
+            continue
+        s = summary_by_slug[slug]
+        _, body = parse_frontmatter(content)
+        emb_pages.append({"id": slug, "title": s.title, "tags": s.tags, "body": body})
+
+    try:
+        pairs = candidate_pairs(emb_pages)
+        clusters = cluster_by_pairs([pg["id"] for pg in emb_pages], pairs)
+    except DuplicatePrefilterError as ex:
+        print(f"[dedup] phase 2: embedding prefilter failed ({ex}); "
+              f"falling back to full scan.")
+        return _dedup.detect_duplicate_groups(summaries, llm_call, not_duplicates=not_duplicates)
+
+    print(f"[dedup] phase 2: embedding prefilter → {len(pairs)} candidate pair(s), "
+          f"{len(clusters)} cluster(s); running LLM detector per cluster.")
+    groups: list[dict] = []
+    for cluster in clusters:
+        cluster_summaries = [summary_by_slug[sid] for sid in cluster
+                             if sid in summary_by_slug]
+        if len(cluster_summaries) < 2:
+            continue
+        sub_groups = _dedup.detect_duplicate_groups(
+            cluster_summaries, llm_call, not_duplicates=not_duplicates)
+        groups.extend(sub_groups)
+    return groups
+
+
+def run_phase2(project_root, llm_call, *, apply=True, whitelist_pairs=None,
+               today=None, apply_low_confidence=False,
+               embedding_prefilter=False) -> dict:
     wiki_dir = project_root / "wiki"
     runtime = detect_runtime_dir(project_root)
     pages = collect_wiki_pages(wiki_dir)
@@ -131,10 +182,20 @@ def run_phase2(project_root, llm_call, *, apply=True, whitelist_pairs=None, toda
     not_duplicates += load_whitelist(runtime / "dedup-whitelist.json")
 
     print(f"[dedup] phase 2: scanning {len(summaries)} pages for semantic duplicates ...")
-    groups = _dedup.detect_duplicate_groups(summaries, llm_call, not_duplicates=not_duplicates)
+    groups = _detect_groups(summaries, pages, llm_call, not_duplicates, embedding_prefilter)
     print(f"[dedup] phase 2: detected {len(groups)} duplicate group(s).")
     for i, g in enumerate(groups, 1):
         print(f"  group {i}: {g['slugs']}  ({g['confidence']}) — {g['reason']}")
+
+    # GAP-2: low-confidence LLM groups are often false positives — auto-merging
+    # them deletes pages that may not be duplicates. Skip them by default; require
+    # an explicit --apply-low-confidence to merge. NashSU parity: the desktop UI
+    # requires per-group user confirmation before any merge.
+    if apply and not apply_low_confidence:
+        skipped = [g for g in groups if g.get("confidence") == "low"]
+        if skipped:
+            print(f"[dedup] phase 2: skipping {len(skipped)} low-confidence group(s) "
+                  f"(re-run with --apply-low-confidence to merge them).")
 
     applied: list[dict] = []
     if apply and groups:
@@ -142,6 +203,8 @@ def run_phase2(project_root, llm_call, *, apply=True, whitelist_pairs=None, toda
         backup_dir.mkdir(parents=True, exist_ok=True)
         pages_by_slug = {_slug_from_path(p): (p, c) for p, c in pages}
         for g in groups:
+            if g.get("confidence") == "low" and not apply_low_confidence:
+                continue
             canonical_slug = g["slugs"][0]
             group_pages = []
             for slug in g["slugs"]:
@@ -210,6 +273,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--deterministic-only", action="store_true",
                         help="Only run phase 1 (skip phase 2 even if --semantic)")
     parser.add_argument("--dry-run", action="store_true", help="Preview only — no writes")
+    parser.add_argument("--apply-low-confidence", action="store_true",
+                        help="Also merge low-confidence groups (skipped by default)")
+    parser.add_argument("--embedding-prefilter", action="store_true",
+                        help="Pre-cluster pages by embedding similarity before the LLM "
+                             "detector (bounds LLM call size on large wikis; needs local Ollama)")
     parser.add_argument("--whitelist", action="append", default=[])
     args = parser.parse_args(argv)
 
@@ -236,7 +304,9 @@ def main(argv: list[str] | None = None) -> int:
         try:
             run_phase2(project_root, llm_call, apply=apply,
                        whitelist_pairs=whitelist_pairs,
-                       today=lambda: date.today().isoformat())
+                       today=lambda: date.today().isoformat(),
+                       apply_low_confidence=args.apply_low_confidence,
+                       embedding_prefilter=args.embedding_prefilter)
         except ConversationPending:
             print("[dedup] phase 2: conversation handoff — answer prompt under "
                   "<runtime>/conversation/dedup/ and re-invoke.", file=sys.stderr)

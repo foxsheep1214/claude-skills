@@ -1,55 +1,58 @@
 #!/usr/bin/env python3
-"""search_wiki.py — Semantic search a wiki project via LanceDB vector index.
+"""search_wiki.py — Hybrid search a wiki project (keyword + vector + RRF).
 
-Requires embeddings built first: build_embeddings.py --project <path> embed
+Port of NashSU ``search.rs`` hybrid retrieval (GAP-search):
 
-Backend: local Ollama bge-m3 by default. Configurable via env:
-  EMBEDDING_BASE_URL  — default http://127.0.0.1:11434/v1
-  EMBEDDING_MODEL     — default bge-m3
+  - keyword path: CJK bigram + weighted scoring (``_wiki_keyword``) — always
+    runs, no dependencies, works offline.
+  - vector path: LanceDB + local Ollama bge-m3 — runs when available; on any
+    failure (Ollama down, lancedb missing, package absent) it is skipped and
+    search degrades to keyword-only instead of erroring.
+  - fusion: Reciprocal Rank Fusion (K=60) when both paths return; the richer
+    keyword snippet wins on overlap.
+
+Mode is reported: ``hybrid`` | ``keyword`` | ``vector``.
 
 Usage:
-  search_wiki.py "query" --project ~/Documents/知识库/HardwareWiki
-  search_wiki.py "LC谐振" --project ~/Documents/知识库/硬件设计知识库 --top 10
+  search_wiki.py "ADL8113" --project ~/Documents/知识库/HardwareWiki
+  search_wiki.py "LC谐振" --project ~/path --top 10
+  search_wiki.py "query" --project ~/path --keyword-only   # skip vector
 """
-import argparse, json, os, sys, urllib.request
+import argparse
+import json
+import os
+import sys
+import urllib.request
 from pathlib import Path
 
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Semantic search a wiki project via LanceDB")
-    parser.add_argument("query", help="Search query (natural language)")
-    parser.add_argument("--project", required=True, help="Path to wiki project root")
-    parser.add_argument("--top", type=int, default=5, help="Max results (default: 5)")
-    args = parser.parse_args()
+from _paths import detect_runtime_dir  # noqa: E402
+from _wiki_keyword import keyword_search, rrf_merge  # noqa: E402
 
-    project = Path(args.project).expanduser()
 
-    # Use shared runtime detection (NashSU-aligned: .llm-wiki/)
-    _script_dir = os.path.dirname(os.path.abspath(__file__))
-    if _script_dir not in sys.path:
-        sys.path.insert(0, _script_dir)
-    from _paths import detect_runtime_dir
-    runtime = detect_runtime_dir(project)
+def _vector_search(query: str, project: Path, runtime: Path, top: int):
+    """Run the vector path. Returns (results, error_or_None).
 
+    results: list of {path, title, snippet, score, vector_score}.
+    On any failure (deps missing, Ollama down, lancedb missing/empty) returns
+    ([], error) so the caller degrades to keyword-only.
+    """
     lancedb_dir = runtime / "lancedb"
     if not lancedb_dir.exists():
-        print(f"ERROR: LanceDB not found at {lancedb_dir}", file=sys.stderr)
-        print("  Run: build_embeddings.py --project <path> embed", file=sys.stderr)
-        return 1
-
+        return [], "lancedb index not found"
     try:
-        import lancedb
+        import lancedb  # noqa: F401
     except ImportError:
-        print("ERROR: lancedb not installed. Run: pip install lancedb", file=sys.stderr)
-        return 1
+        return [], "lancedb not installed (pip install lancedb)"
 
-    # Embedding backend (same env vars as build_embeddings.py)
     base_url = os.environ.get("EMBEDDING_BASE_URL", "http://127.0.0.1:11434/v1")
     model = os.environ.get("EMBEDDING_MODEL", "bge-m3")
     api_key = os.environ.get("EMBEDDING_API_KEY", "")
 
-    # Embed query
-    body = json.dumps({"model": model, "input": [args.query]}).encode("utf-8")
+    body = json.dumps({"model": model, "input": [query]}).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -60,32 +63,109 @@ def main() -> int:
             data = json.loads(resp.read())
         qvec = data["data"][0]["embedding"]
     except Exception as e:
-        print(f"ERROR: Embedding API failed: {e}", file=sys.stderr)
-        return 1
+        return [], f"embedding API failed ({e})"
 
-    # Search LanceDB
     try:
+        import lancedb
         db = lancedb.connect(str(lancedb_dir))
         tbl = db.open_table("wiki_chunks")
-        df = tbl.search(qvec).limit(args.top).to_pandas()
+        df = tbl.search(qvec).limit(top).to_pandas()
     except Exception as e:
-        print(f"ERROR: LanceDB search failed: {e}", file=sys.stderr)
-        return 1
+        return [], f"lancedb search failed ({e})"
 
-    if df.empty:
+    if df is None or df.empty:
+        return [], None  # no vector hits, but no error
+
+    results = []
+    for _, row in df.iterrows():
+        dist = float(row.get("_distance", 0))
+        sim = 1.0 / (1.0 + dist)
+        title = row.get("title", "") or row.get("heading_path", "") or ""
+        snippet = str(row.get("chunk_text", ""))[:250].replace("\n", " ")
+        results.append({
+            "path": str(row.get("path", "")),
+            "title": title,
+            "snippet": snippet,
+            "title_match": False,
+            "score": sim,
+            "vector_score": sim,
+        })
+    return results, None
+
+
+def _warn_vector_unavailable(error: str, project: Path) -> None:
+    """Emit a prominent warning with remediation steps when the vector path
+    can't be used. Goes to stderr. Per skill policy the caller then PAUSES —
+    no silent keyword-only fallback."""
+    bar = "=" * 64
+    print(bar, file=sys.stderr)
+    print("⚠️  VECTOR SEARCH UNAVAILABLE — hybrid search cannot run.", file=sys.stderr)
+    print(f"   reason: {error}", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("To enable hybrid (keyword + vector) search:", file=sys.stderr)
+    print("  1. Start local Ollama:    ollama serve", file=sys.stderr)
+    print("  2. Pull the embed model:  ollama pull bge-m3", file=sys.stderr)
+    print("  3. Build the index:       build_embeddings.py "
+          f"--project {project} embed", file=sys.stderr)
+    print("Or set EMBEDDING_BASE_URL / EMBEDDING_MODEL to an OpenAI-compatible", file=sys.stderr)
+    print("endpoint, then rebuild the index.", file=sys.stderr)
+    print(bar, file=sys.stderr)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Hybrid wiki search (keyword + vector + RRF)")
+    parser.add_argument("query", help="Search query")
+    parser.add_argument("--project", required=True, help="Path to wiki project root")
+    parser.add_argument("--top", type=int, default=20, help="Max results (default: 20)")
+    parser.add_argument("--keyword-only", action="store_true",
+                        help="Skip the vector path (pure keyword, no Ollama needed)")
+    args = parser.parse_args()
+
+    project = Path(args.project).expanduser()
+    runtime = detect_runtime_dir(project)
+    wiki_dir = project / "wiki"
+
+    # keyword path — always runs (offline, no deps)
+    kw_results = keyword_search(wiki_dir, args.query, max_results=args.top)
+
+    vec_results: list[dict] = []
+    vec_error = None
+    if not args.keyword_only:
+        vec_results, vec_error = _vector_search(args.query, project, runtime, args.top)
+        if vec_error:
+            # Global skill policy: on alert, PAUSE — do not auto-degrade. Emit
+            # the warning + remediation steps and stop. The user must either fix
+            # the vector path or explicitly re-run with --keyword-only. Keyword
+            # results are NOT returned as a silent fallback.
+            _warn_vector_unavailable(vec_error, project)
+            print("\nPaused. Fix the vector path and re-run, or use --keyword-only "
+                  "to explicitly search without vectors.", file=sys.stderr)
+            return 1
+
+    # decide mode + fuse
+    if kw_results and vec_results:
+        results = rrf_merge(kw_results, vec_results, top=args.top)
+        mode = "hybrid"
+    elif kw_results:
+        results = kw_results
+        mode = "keyword"
+    elif vec_results:
+        results = vec_results
+        mode = "vector"
+    else:
         print(f"No results for: {args.query}")
         return 1
 
-    print(f"{len(df)} results for: {args.query}\n")
-    for i, (_, row) in enumerate(df.iterrows()):
-        dist = row.get("_distance", 0)
-        sim = 1.0 / (1.0 + float(dist))
-        title = row.get("title", "") or row.get("heading_path", "") or ""
+    print(f"{len(results)} result(s) for: {args.query}  [mode={mode}]\n")
+    for i, r in enumerate(results, 1):
+        title = r.get("title", "")
         title_str = f"  ({title})" if title else ""
-        print(f"{i + 1}. [{sim:.3f}] wiki/{row['path']}{title_str}")
-        snippet = str(row.get("chunk_text", ""))[:250].replace("\n", " ")
-        print(f"   {snippet}...\n")
-
+        vscore = r.get("vector_score")
+        vscore_str = f" vec={vscore:.3f}" if vscore is not None else ""
+        print(f"{i}. [{r['score']:.3f}{vscore_str}] wiki/{r['path']}{title_str}")
+        snippet = str(r.get("snippet", ""))[:250].replace("\n", " ")
+        if snippet:
+            print(f"   {snippet}\n")
     return 0
 
 

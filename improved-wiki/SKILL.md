@@ -77,6 +77,7 @@ Two other external-API dependencies (not text generation):
 - `references/review-sweep.md` ⭐ — auto-resolve review items satisfied by new ingests (NashSU sweep-reviews.ts parity)
 - `references/conversation-mode.md` — **conversation mode** (the only mode): the current conversation does each text-gen LLM step with its own model (serial, prompt-file handoff)
 - `references/delegate-mode.md` — **agent invocation** via `ingest.py`: how a calling agent (Claude Code/Hermes) answers each LLM step. Includes operational pitfalls: venv Python requirement, OCR timeout handling, wikilink merge task batching, re-ingest `--delete` pattern.
+- `references/conversation-mode-agent-workflow.md` — concrete per-step prompt-file cheat sheet for a single-book ingest (Stage 2.1/2.2/2.4/2.6/2.7/2.9 prompt patterns, merge-loop subagent dispatch, reading extracted text). Companion to `delegate-mode.md` (concept) with the hands-on detail.
 - `references/nashsu-search-architecture.md` — NashSU 源码实证：graph-relevance.ts（纯确定性 4 信号）+ search.rs（hybrid keyword+vector+RRF，远程 embedding API，无本地模型）。澄清 "NashSU parity" 在搜索侧的实际覆盖范围
 
 **Conventions**:
@@ -91,9 +92,11 @@ Two other external-API dependencies (not text generation):
 - `references/known-issues.md` — current bugs and workarounds
 - `references/initial-setup.md` — first-time project bootstrap
 - `references/batch-digest-loop.md` — batch ingest with resume
+- `references/batch-digest-patterns.md` — batch ingest pitfalls: why `claude -p` cannot drive the 20-stage pipeline, Python-loop + `wiki/sources/<stem>.md` dedup pattern
 - `references/re-ingest-comparison.md` — re-ingest a book to compare old vs new pipeline results (backup → delete → re-ingest → compare)
 - `references/maintenance-cleanup.md` — periodic cleanup of stale files (`.digested`, temp dirs, `.DS_Store`, empty-slug `.md` bug residual)
 - `references/cron-installation.md` — cron-based automation
+- `references/mineru-version-tracking.md` — pinned minerU pip version + VLM model, upgrade notes
 - `references/nashsu-lint-source-analysis.md` — NashSU lint.json internals
 - `references/scripting-pitfalls.md` — Python + agent tool pitfalls
 
@@ -111,7 +114,7 @@ Two other external-API dependencies (not text generation):
 - **Save chat to wiki** ⭐ (NashSU v0.4.25 parity): say "保存到 wiki" after any conversation — captures insight as wiki page with `origin: chat-save` + auto-ingests. Conversations become permanent knowledge. See `references/save-chat-to-wiki.md`.
 - **Review sweep** ⭐ (NashSU v0.4.25 parity): `/improved-wiki sweep-reviews` — scans pending review items, auto-resolves those satisfied by subsequent ingests (rule-based + LLM semantic judge). Keeps review backlog actionable. See `references/review-sweep.md`.
 - **Batch ingest**: `python3 scripts/ingest.py f1.pdf f2.pdf ...` — parallel Stage 1.1-2 per book, serial Stage 3.1+ write
-- **Graph** (separate command, peer of Ingest/Lint): `python3 scripts/graph.py` builds the knowledge graph (NashSU graph-view CLI parity — four-signal weighted graph + Louvain communities + cohesion + gaps + cluster hubs). Deterministic, no LLM. `AUTO_BUILD_GRAPH=1` auto-rebuilds after ingest (30-min staleness guard). `--mode query --slug <s>` for read-only per-page wikilink suggestions during ingest.
+- **Graph** (separate command, peer of Ingest/Lint): `python3 scripts/graph.py` builds the knowledge graph (NashSU graph-view CLI parity — four-signal weighted graph + Louvain communities + cohesion + gaps + cluster hubs). Deterministic, no LLM. `AUTO_BUILD_GRAPH=1` auto-rebuilds after ingest (30-min staleness guard). `--mode query --slug <s>` for read-only per-page wikilink suggestions (manual; not wired into any ingest stage).
 - **Unified barrier-free pipeline**: Stage 2.2 + 2.4 merged — analyze chunk → generate pages → next chunk. Works for all chunk counts (1 to N). Accumulating context + per-chunk checkpoint for crash recovery. Legacy multi-round synthesis retired.
 - **Parallel I/O**: caption ∥ digest (Stage 1.3∥2.1), per-image caption dispatch (×12 workers). Pure I/O-bound parallelism only — no quality impact.
 - **Heading path tracking** (NashSU parity): each chunk analysis prompt includes full heading hierarchy (`Chapter 3 > Section 3.2 > Subsec 3.2.1`)

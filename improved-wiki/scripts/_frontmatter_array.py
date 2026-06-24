@@ -62,7 +62,10 @@ def parse_frontmatter_array(content: str, field_name: str) -> list[str]:
                 out.append(m.group(1).strip())
         return out
 
-    inline_re = re.compile(rf"^{escaped}:\s*\[([^\]]*)\]", re.MULTILINE)
+    # Match the whole inline-array line (greedy `.*` to the last `]`), then
+    # quote-aware split via _split_inline_array. A `[^\]]*` class can't span
+    # a `]` inside a quoted item, so `["[[a]]"]` would truncate to `[[a`.
+    inline_re = re.compile(rf"^{escaped}:\s*\[(.*)\]\s*$", re.MULTILINE)
     inline = inline_re.search(fm)
     if not inline:
         return []
@@ -127,7 +130,11 @@ def write_frontmatter_array(content: str, field_name: str, values: list[str]) ->
     new_line = f"{field_name}: [{serialized}]"
     rest = content[fm_match.end():]
 
-    inline_re = re.compile(rf"^{escaped}:\s*\[[^\]]*\]", re.MULTILINE)
+    # Match the whole inline-array line. `.*` (greedy to the last `]` on the
+    # line) is intentional: a `[^\]]*` class can't span a `]` that appears
+    # inside a quoted item (e.g. `related: ["[[a]]", "[[b]]"]`), which would
+    # corrupt the rewrite by consuming only up to the first inner `]`.
+    inline_re = re.compile(rf"^{escaped}:\s*\[.*\]\s*$", re.MULTILINE)
     if inline_re.search(fm_body):
         rewritten = inline_re.sub(lambda _m: new_line, fm_body, count=1)
         return f"{open_delim}{rewritten}{close_delim}{rest}"

@@ -25,24 +25,50 @@ from typing import Callable, Optional
 
 # ── Parse ────────────────────────────────────────────────────────────────────
 
+_FM_RE = re.compile(r"^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)")
+_LEADING_FENCE_RE = re.compile(r"^[ \t]*```(?:yaml|md|markdown)?[ \t]*\r?\n")
+
+
+def _strip_leading_code_fence(content: str) -> str:
+    """Read-time fallback: if the whole doc is wrapped in a leading
+    ```yaml/```md/```markdown fence, strip the opening fence (and a matching
+    trailing fence) so frontmatter can be parsed. Old, already-written corrupt
+    files get cleaned up this way; write-time sanitize prevents new ones."""
+    open_m = _LEADING_FENCE_RE.match(content)
+    if not open_m:
+        return content
+    after_open = content[open_m.end():]
+    close_m = re.search(r"\r?\n[ \t]*```[ \t]*\r?\n?\s*$", after_open)
+    if close_m:
+        return after_open[: close_m.start()]
+    return after_open
+
+
 def parse_frontmatter(content: str) -> tuple[dict, str]:
-    """Parse YAML frontmatter and body. Returns ({}, body) if no frontmatter."""
+    """Parse YAML frontmatter and body. Returns ({}, body) if no frontmatter.
+
+    Read-time fallback: strips a leading ```yaml/```md/```markdown wrapper so
+    legacy corrupt pages still parse (write-time sanitize prevents new ones).
+    Fence detection is line-anchored (NashSU frontmatter.ts parity) so a
+    mid-body ``---`` or stray ``---`` inside a line can't be mistaken for the
+    closing fence.
+    """
     if not content.startswith("---"):
+        content = _strip_leading_code_fence(content)
+    m = _FM_RE.match(content)
+    if not m:
         return {}, content
-    fm_end = content.find("---", 3)
-    if fm_end == -1:
-        return {}, content
-    fm_text = content[3:fm_end].strip()
-    body = content[fm_end + 3:].lstrip("\n")
+    fm_text = m.group(1).strip()
+    body = content[m.end():].lstrip("\n")
 
     fm = {}
     for line in fm_text.split("\n"):
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        m = re.match(r'^([\w_-]+):\s*(.*)', line)
-        if m:
-            key, val = m.group(1), m.group(2).strip()
+        m2 = re.match(r'^([\w_-]+):\s*(.*)', line)
+        if m2:
+            key, val = m2.group(1), m2.group(2).strip()
             # Array values: [a, b, c]
             if val.startswith("[") and val.endswith("]"):
                 inner = val[1:-1].strip()
@@ -60,15 +86,43 @@ def parse_frontmatter(content: str) -> tuple[dict, str]:
     return fm, body
 
 
+def _quote_value(value) -> str:
+    """Double-quote a YAML scalar/list-item with backslash + quote escaping."""
+    s = str(value)
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+# Chars that make a YAML scalar unsafe to emit bare. A leading char from the
+# first set, any char from the second set anywhere, a space, or empty → quote.
+_QUOTE_START_CHARS = set("[{}&*#!|>?-\"'%@`")
+_QUOTE_ANY_CHARS = set(":#[]{}\"'")
+
+
+def _needs_quoting(value: str) -> bool:
+    if value == "":
+        return True
+    if value[0] in _QUOTE_START_CHARS:
+        return True
+    if " " in value:
+        return True
+    return any(ch in _QUOTE_ANY_CHARS for ch in value)
+
+
 def write_frontmatter(fm: dict, body: str) -> str:
-    """Serialize frontmatter dict + body to markdown string."""
+    """Serialize frontmatter dict + body to markdown string.
+
+    YAML-safe quoting (MEDIUM-2 fix): list items are always quoted (parity
+    with _frontmatter_array._quote_inline_array_value, avoids the
+    ``related: [[[a]]]`` triple-bracket corruption); scalars are quoted when
+    they contain a YAML-special char or would otherwise parse ambiguously.
+    """
     lines = ["---"]
     for key, value in fm.items():
         if isinstance(value, list):
-            items = ", ".join(f'"{v}"' if " " in str(v) else str(v) for v in value)
+            items = ", ".join(_quote_value(v) for v in value)
             lines.append(f"{key}: [{items}]")
-        elif isinstance(value, str) and (" " in value or ":" in value):
-            lines.append(f'{key}: "{value}"')
+        elif isinstance(value, str) and _needs_quoting(value):
+            lines.append(f"{key}: {_quote_value(value)}")
         else:
             lines.append(f"{key}: {value}")
     lines.append("---")
@@ -110,11 +164,16 @@ def union_arrays(new_fm: dict, existing_fm: dict) -> dict:
 
 
 def merge_array_fields_into_content(new_content: str, existing_content: str) -> str:
-    """Union frontmatter array fields from both contents. Returns merged content."""
-    new_fm, new_body = parse_frontmatter(new_content)
-    existing_fm, _ = parse_frontmatter(existing_content)
-    merged_fm = union_arrays(new_fm, existing_fm)
-    return write_frontmatter(merged_fm, new_body)
+    """Union frontmatter array fields (sources/tags/related) from both contents.
+
+    Delegates to _frontmatter_array (NashSU sources-merge.ts port) which
+    handles BOTH inline ``[a, b]`` and block-style ``  - a`` arrays. The old
+    in-house parser only understood inline form, so a block-style
+    ``related:`` from an existing page was silently dropped during re-ingest
+    merge. Returns new_content unchanged when existing has no frontmatter.
+    """
+    from _frontmatter_array import merge_array_fields_into_content as _robust
+    return _robust(new_content, existing_content, list(UNION_FIELDS))
 
 
 def lock_fields(content: str, reference_fm: dict) -> str:

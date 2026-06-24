@@ -26,7 +26,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import date
 
-from _frontmatter import parse_frontmatter
+from _frontmatter import parse_frontmatter, BODY_SHRINK_THRESHOLD
 from _frontmatter_array import (
     merge_array_fields_into_content,
     parse_frontmatter_array,
@@ -290,6 +290,35 @@ Rules:
 FIELDS_TO_UNION = ["sources", "tags", "related"]
 
 
+def _validate_merge_output(llm_output: str, group: list[dict]) -> None:
+    """Reject an LLM merge that would corrupt the canonical page.
+
+    Two checks (mirror ``_frontmatter.merge_page_content`` sanity gates):
+      1. Output must parse as a frontmatter-bearing wiki page — a body-only
+         or "I can't merge that" response would leave the canonical page
+         with no type/title/sources.
+      2. Merged body must be >= BODY_SHRINK_THRESHOLD (0.7) of the longest
+         input body — catches lazy summaries / truncation that drop claims
+         from the pages about to be deleted.
+    Raises ValueError on failure; never falls back silently.
+    """
+    fm, body = parse_frontmatter(llm_output)
+    if not fm:
+        raise ValueError(
+            "LLM merge output has no frontmatter — rejecting (no fallback). "
+            "Fix the LLM provider and re-run; the canonical page was NOT overwritten."
+        )
+    input_bodies = [len(parse_frontmatter(p["content"])[1]) for p in group]
+    max_input = max(input_bodies) if input_bodies else 0
+    threshold = max_input * BODY_SHRINK_THRESHOLD
+    if len(body.strip()) < threshold:
+        raise ValueError(
+            f"LLM merge body {len(body)} chars < {threshold:.0f} threshold "
+            f"(max input body {max_input}) — rejecting (likely truncation / "
+            f"lazy summary). No fallback; canonical page NOT overwritten."
+        )
+
+
 def merge_duplicate_group(
     group: list[dict],
     canonical_slug: str,
@@ -317,6 +346,14 @@ def merge_duplicate_group(
     # 1. LLM body merge.
     user_message = _build_merger_user_message(group)
     llm_output = llm_call(MERGER_SYSTEM_PROMPT, user_message)
+
+    # 1b. Sanity-check the LLM output before it becomes the canonical page.
+    #    No-fallback policy (matches _frontmatter.merge_page_content): a
+    #    garbage merge — no frontmatter, or a body that shed most of the
+    #    input — must NOT be written, or the canonical page is corrupted and
+    #    the merged-away pages are already deleted. Raise so the caller can
+    #    fix the LLM and re-run instead of silently losing data.
+    _validate_merge_output(llm_output, group)
 
     # 2. Frontmatter union (deterministic post-processing of LLM output).
     merged = llm_output
