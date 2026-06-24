@@ -34,7 +34,6 @@ from _paths import media_slug  # noqa: E402
 from _stage_1_3_caption import (  # noqa: E402
     _stage_1_3_caption_images_batch,
     _caption_no_key_pause,
-    CAPTION_BATCH_SIZE,
 )
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -619,8 +618,7 @@ def _stage_1_1_scanned_assemble_manifest(
         pending = _stage_1_2_find_uncaptioned_images(media_dir)
         if pending and config.caption_api_key:
             _stage_1_3_caption_images_batch(
-                pending, config, media_dir, source_label="mineru-extracted",
-                batch_size=CAPTION_BATCH_SIZE)
+                pending, config, media_dir, source_label="mineru-extracted")
         elif pending and not config.caption_api_key:
             # No caption API key — VLM main path cannot run. Pause (no fallback).
             already = len(extracted_figures) - len(pending)
@@ -732,9 +730,14 @@ def _stage_1_1_save_mineru_chunk_text(md_text: str, start: int, end: int, out_di
     minerU outputs continuous markdown. We heuristically split by markdown headers
     and assign pages proportionally across the chunk range.
     """
-    # Simplify: save the entire chunk as a single text block for page range
-    # Strip image references from text (they're in separate files)
-    clean = re.sub(r'!\[.*?\]\(images/.*?\)', '', md_text)
+    # Simplify: save the entire chunk as a single text block for page range.
+    # NOTE (2026-06-24): image refs ![](images/<sha256>.jpg) are NO LONGER
+    # stripped. They are kept in the per-page text so that, after Stage 1.3
+    # writes caption sidecars, _stage_1_3_inline_captions() can rewrite them
+    # to ![<caption>](images/...) — feeding figure semantics to the Stage 2.2/
+    # 2.4 generation LLM (NashSU ingest.ts Step 0.6 parity). Stripping them
+    # made every figure invisible to digestion.
+    clean = md_text
     clean = re.sub(r'<details>.*?</details>', '', clean, flags=re.DOTALL)
     clean = re.sub(r'\n{3,}', '\n\n', clean)
 

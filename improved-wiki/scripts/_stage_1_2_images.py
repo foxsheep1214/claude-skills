@@ -222,13 +222,13 @@ def _stage_1_2_harvest_images(results: dict, page_offset: int, raw_file: Path,
                 "source": "mineru-extracted",
             })
 
-            # Write minerU's own image_caption as sidecar so Stage 1.3
-            # skips re-captioning figures minerU already described.
-            mc = mineru_captions.get(img_name)
-            if mc:
-                cap_path = media_dir / (filename + ".caption.txt")
-                if not cap_path.exists():
-                    cap_path.write_text(mc, encoding="utf-8")
+            # NOTE (2026-06-24): minerU's image_caption is NO LONGER written as
+            # a .caption.txt sidecar. It is usually just the book's printed
+            # figure label (e.g. "Figure 2.14 A backward-tilted antenna
+            # geometry.") — using it as the final caption and skipping the VLM
+            # produced lazy label-only captions (bug 2026-06-24). Stage 1.3
+            # now VLM-captions EVERY image, with minerU's caption + surrounding
+            # text passed as anchoring context (see _stage_1_3_caption.py).
 
     if saved:
         # Persist to chunk_out so the per-chunk stats can reference them
@@ -380,7 +380,6 @@ def _stage_1_2_extract_from_mineru(out_dir: Path, config: Config, raw_file: Path
             break  # use first content_list that yields images
 
     images = []
-    mineru_captioned = 0
     if img_source_dir:
         for img_path in sorted(img_source_dir.glob("*")):
             if not img_path.is_file():
@@ -388,17 +387,11 @@ def _stage_1_2_extract_from_mineru(out_dir: Path, config: Config, raw_file: Path
             dest = media_dir / img_path.name
             shutil.copy2(img_path, dest)
             meta = caption_map.get(img_path.name, {})
-            # Write minerU caption as sidecar so Stage 1.3 skips re-captioning.
-            # Combine image_caption (figure label) + content (Mermaid for flowcharts).
-            cap_parts = []
-            if meta.get("caption"):
-                cap_parts.append(meta["caption"])
-            if meta.get("content"):
-                cap_parts.append(meta["content"])
-            if cap_parts:
-                sidecar = media_dir / (img_path.name + ".caption.txt")
-                sidecar.write_text("\n".join(cap_parts), encoding="utf-8")
-                mineru_captioned += 1
+            # NOTE (2026-06-24): no .caption.txt sidecar is written here.
+            # minerU's image_caption is a figure label, not a description —
+            # using it as the final caption caused lazy label-only captions
+            # (bug 2026-06-24). Stage 1.3 VLM-captions every image, using
+            # minerU's caption as context (see _stage_1_3_caption.py).
             images.append({
                 "filename": img_path.name,
                 "path": str(dest.relative_to(config.wiki_root)),
@@ -413,7 +406,7 @@ def _stage_1_2_extract_from_mineru(out_dir: Path, config: Config, raw_file: Path
         # not persisted (img_source_dir is None), so the original code wrote an
         # EMPTY manifest, wiping all figures. But OCR already saved figures to
         # media_dir as p*-mineru_*.* during chunk processing — recover them so
-        # the manifest reflects reality and Stage 1.3 can caption the rest.
+        # the manifest reflects reality and Stage 1.3 can caption them.
         for img_path in sorted(media_dir.glob("p*-mineru_*.*")):
             if not img_path.is_file() or img_path.name.endswith(".caption.txt"):
                 continue
@@ -423,8 +416,6 @@ def _stage_1_2_extract_from_mineru(out_dir: Path, config: Config, raw_file: Path
             except (ValueError, IndexError):
                 page = 0
             meta = caption_map.get(bn, {})
-            if (media_dir / (bn + ".caption.txt")).exists():
-                mineru_captioned += 1
             images.append({
                 "filename": bn,
                 "path": str(img_path.relative_to(config.wiki_root)),
@@ -438,8 +429,7 @@ def _stage_1_2_extract_from_mineru(out_dir: Path, config: Config, raw_file: Path
     manifest_path = media_dir / "_manifest.json"
     _stage_1_2_write_manifest(manifest_path, "mineru-ocr", raw_file, images)
     print(f"[stage 1.2] minerU: {len(images)} images from {img_source_dir} "
-          f"({mineru_captioned} pre-captioned by minerU"
-          f"{', Stage 1.3 will skip pre-captioned' if mineru_captioned == len(images) and images else ''})")
+          f"(Stage 1.3 will VLM-caption all)")
     return {
         "count": len(images),
         "media_dir": str(media_dir),

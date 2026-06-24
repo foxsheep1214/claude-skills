@@ -24,6 +24,7 @@ from _stage_1_extract import (
     stage_1_3_caption_images,
     _stage_1_1_check_text_quality,
 )
+from _stage_1_3_caption import _stage_1_3_inline_captions
 from _stage_2_analyze import stage_2_1_global_digest
 from _stage_2_6_source_page import stage_2_6_source_page
 from _stage_2_7_query_generation import stage_2_7_query_generation
@@ -200,6 +201,25 @@ def _do_prepare(
         else:
             print(f"  [stage 2.1] (cached) Global Digest — {len(global_digest)} keys")
             _verify_stage_2_1_digest(global_digest, raw_file)
+
+        # Stage 1.3 → 2 inline (NashSU ingest.ts Step 0.6 parity): rewrite
+        # ![](images/...) refs to carry their VLM caption as alt text, so the
+        # Stage 2.2/2.4 generation LLM sees figure semantics instead of
+        # empty-alt refs it would silently paraphrase away. Runs AFTER Stage
+        # 1.3 (captions exist) and BEFORE the chunk pipeline. Stage 2.1 ran in
+        # parallel without this — acceptable, 2.1 is structural not figure-level.
+        _media_dir = stage_1_2_result.get("media_dir")
+        if _media_dir and stage_1_2_result.get("count", 0) > 0:
+            _inlined = _stage_1_3_inline_captions(extracted_text, config, Path(_media_dir))
+            if _inlined != extracted_text:
+                extracted_text = _inlined
+                save_progress(config, h, {
+                    "stage": "stage_1_1_done", "extracted_text": extracted_text,
+                    "extract_method": method, "stage_1_2": stage_1_2_result,
+                    "stage_1_3": stage_1_3_result,
+                })
+                print(f"  [caption] Inlined VLM captions as alt text into "
+                      f"extracted_text ({len(extracted_text):,} chars)")
 
         # Stage 2.2 + 2.4: Chunk Analysis → Generation (barrier-free pipeline)
         chunk_analyses, analysis, raw_response, file_blocks, incremental_associations = _run_chunk_pipeline(

@@ -1,9 +1,25 @@
 """Stage 1.3 unified image captioning (MiniMax VLM via Anthropic protocol).
 
-Extracted from _stage_1_extract.py on 2026-06-24. Owns the parallel batch
-caption dispatch, JSON truncation recovery, VLM-failure detection, image
-preprocessing, and the no-API-key hard-stop (no silent fallback per the
-2026-06-24 policy). Path A (PyMuPDF) and Path B (minerU) images are merged.
+Extracted from _stage_1_extract.py on 2026-06-24. Owns the per-image caption
+dispatch, VLM-failure detection, image preprocessing, the no-API-key hard-stop
+(no silent fallback per the 2026-06-24 policy), and the NashSU-style
+context-aware prompt (one image per call, 2026-06-24 port).
+
+Design (NashSU parity, 2026-06-24):
+  - One image per LLM call (was: 8-image batches). Each figure gets the full
+    prompt budget and a plain-text reply, so a single figure can't be
+    dropped by JSON truncation and a single VLM lapse can't corrupt a batch.
+  - Context-aware: each minerU figure is captioned with its surrounding
+    document text (text blocks immediately before/after it in the content
+    list) plus minerU's own image_caption, passed as ANCHORING CONTEXT —
+    never as the final caption. This is the direct port of NashSU's
+    buildCaptionPromptWithContext(before, after). It is what stops the VLM
+    from collapsing to the printed figure label on bare geometric figures
+    (bug 2026-06-24: Figure 2.14 / 3.6 captions were minerU's own
+    image_caption written as a sidecar and then skipped — see
+    _stage_1_2_images.py, which no longer writes that sidecar).
+  - temperature 0 for deterministic, cache-friendly captions.
+  - Parallel across images (ThreadPoolExecutor), I/O-bound only.
 """
 from __future__ import annotations
 
@@ -25,22 +41,46 @@ from _core import Config  # noqa: E402
 # Constants
 # ══════════════════════════════════════════════════════════════════════════════
 
-CAPTION_BATCH_SIZE = int(os.environ.get("CAPTION_BATCH_SIZE", "8"))
-CAPTION_MAX_WORKERS = int(os.environ.get("CAPTION_MAX_WORKERS", "6"))
+# Default 12 parallel VLM calls — captioning is pure I/O-bound (one HTTP call
+# per image), so threads give real speedup and 12 fits comfortably under the
+# MiniMax caption API rate limit for typical book figure counts. Override per
+# run with the CAPTION_MAX_WORKERS env var.
+CAPTION_MAX_WORKERS = int(os.environ.get("CAPTION_MAX_WORKERS", "12"))
+
+# How many chars of before/after body text to pass as anchoring context.
+# NashSU passes the immediate surrounding text; we cap it to keep the prompt
+# lean (the VLM only needs enough to identify what the figure plots).
+CONTEXT_CHARS = 800
+# A per-image call is declared systemically failed after this many consecutive
+# failures — at that point the VLM main path is assumed down and we pause
+# (no silent fallback). Isolated single failures get a retryable placeholder.
+CONSECUTIVE_FAIL_PAUSE = 3
 
 
 CAPTION_SYSTEM_PROMPT = (
-    "你是硬件知识库的图像解读专家。每次给你若干张图，按图顺序逐张描述："
-    "1-3 句中文，不超过 100 字。聚焦：图类型（电路/波形/框图/PCB/曲线/参数表/公式/实物/示意等）"
-    "+ 关键内容 + 关键参数/标注。"
-    "\n\n特殊规则——公式图：如果图是数学公式、表达式或方程，不要只笼统说「公式图」，"
-    "应尽量逐符号转录公式内容，统一用 LaTeX 语法表达（如 $x_{k+1}=Ax_k+Bu_k$、"
-    "$\\sum_{i=0}^{2n} W_c^{(i)}[Y^i-\\hat{y}]$、$\\dot{T}=\\frac{1}{mc_p}\\dot{Q}$），"
-    "不要用 Unicode 上下标或希腊字母（写 x_1、\\eta、\\alpha、\\Sigma 而非 x₁、η、α、Σ）。"
-    "转录时字数上限放宽至 150 字，避免长公式被截断。转录不确定的符号用 ? 占位。"
-    "\n\n输出格式：严格按以下 JSON 数组：\n```json\n[\n  {\"idx\": 1, \"caption\": \"...\"},\n"
-    "  {\"idx\": 2, \"caption\": \"...\"},\n  ...\n]\n```\n\n"
-    "每个对象都要有，idx 与图顺序一致。即使图不清楚也尽量给个最合理的简短描述。"
+    "You are an image-interpretation expert for a knowledge base (any domain: "
+    "hardware / radar / natural sciences / etc.). Be factual and do not speculate: "
+    "describe only what is actually visible in the image and what the provided "
+    "context explicitly states; do not invent details not present in the image."
+    "\n\nLanguage (NashSU parity — language-NEUTRAL): describe the image in the "
+    "SAME language as the surrounding source text (an English source → English "
+    "caption; a Chinese source → Chinese caption). Capture any text printed "
+    "inside the image VERBATIM in its original language — do NOT translate it. "
+    "Keep technical terms, axis labels, and unit symbols in their original form."
+    "\n\nFocus on: 1) image type (circuit / waveform / block-diagram / PCB / plot / "
+    "parameter-table / formula / photo / schematic / geometry, etc.); 2) key "
+    "content and structure (geometric relations, connection paths, module "
+    "composition, axes, labeled symbols, data trends, etc.); 3) key parameters "
+    "and annotations (capture visible text, axis values, and labels verbatim)."
+    "\n\n⚠️ Figure-label handling (CRITICAL): the provided context/figure-caption "
+    "may contain the source's figure number and label (e.g. \"Figure 2.14 A "
+    "backward-tilted antenna geometry.\"). Use these ONLY to understand what the "
+    "figure depicts — do NOT output the label verbatim as the caption, and do not "
+    "include figure numbers (\"Figure N\" / \"图N\" / \"Fig.\") in the caption. "
+    "Describe what is drawn in your own words."
+    "\n\nFormulas: transcribe as LaTeX ($inline$ / $$display$$), not Unicode "
+    "subscripts or Greek letters (write x_1, \\eta, \\alpha — not x₁, η, α)."
+    "\n\nOutput format: plain text, 2-4 sentences, no markdown, no preamble, no numbering."
 )
 
 
@@ -92,10 +132,9 @@ Stage 1.3 (MiniMax VLM captioning) was **entirely skipped** because
 `CAPTION_API_KEY` nor `LLM_API_KEY` is set in the environment.
 
 **Impact:** {total_images} image(s) were NOT captioned by the VLM.
-{already_captioned} already had a caption (minerU OCR figure-text or prior
-run); **{pending} have no VLM description** — they fall back to minerU's OCR
-figure-caption text (if any) or remain uncaptioned. Image search/retrieval
-quality is degraded.
+{already_captioned} already had a caption (prior run); **{pending} have no
+VLM description** and remain uncaptioned. Image search/retrieval quality is
+degraded.
 
 **Fix:** configure the MiniMax caption provider — create `~/.agents/config.json`
 with a `providers.minimax` entry (`api_key` + `base_url`), or
@@ -118,9 +157,8 @@ def _caption_no_key_pause(config, source_label: str, media_dir: Path,
     Policy (2026-06-24): the ingest process allows NO silent fallback. A
     missing required external dependency is a hard stop — the main path (VLM
     captioning) cannot run, so the pipeline pauses rather than silently
-    producing degraded output (OCR figure-text in place of VLM descriptions).
-    Extraction work is cached, so re-running after configuring the key resumes
-    from Stage 1.3 with no re-extraction.
+    producing degraded output. Extraction work is cached, so re-running after
+    configuring the key resumes from Stage 1.3 with no re-extraction.
     """
     pending = max(0, total_images - already_captioned)
     print(f"\n⚠️  [caption] VLM SKIPPED — no API key for caption provider. "
@@ -139,7 +177,7 @@ def _caption_no_key_pause(config, source_label: str, media_dir: Path,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Image preprocessing + per-batch VLM call
+# Image preprocessing
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _stage_1_3_preprocess_image(img_path: Path, max_dim: int = 1568) -> str:
@@ -153,12 +191,9 @@ def _stage_1_3_preprocess_image(img_path: Path, max_dim: int = 1568) -> str:
     im = Image.open(img_path)
     w, h = im.size
 
-    # Normalize to RGB (harmless: caption model handles grayscale fine; this
-    # just ensures consistent encoding across PDF extraction variants)
     if im.mode in ('L', 'LA', 'P', 'PA'):
         im = im.convert('RGB')
 
-    # Downscale oversized images (VLM context window limits)
     if w > max_dim or h > max_dim:
         im.thumbnail((max_dim, max_dim), Image.LANCZOS)
 
@@ -169,57 +204,343 @@ def _stage_1_3_preprocess_image(img_path: Path, max_dim: int = 1568) -> str:
     return base64.standard_b64encode(buf.getvalue()).decode()
 
 
-def _stage_1_3_caption_one_batch(batch: list[dict], batch_idx: int, total_batches: int,
-                       config: Config, media_dir: Path) -> tuple[str | None, str | None]:
-    """Call caption provider multi-image API for one batch. Returns (text, error).
+# ══════════════════════════════════════════════════════════════════════════════
+# Context map — NashSU-style before/after text, sourced from minerU content_list
+# ══════════════════════════════════════════════════════════════════════════════
 
-    Handles both Path A (filename + page/width/height in media_dir) and
-    Path B (absolute path in img['path']) images transparently."""
-    import urllib.request, urllib.error, base64
+# Module-level cache so the two call sites (per-chunk OCR dispatch + final
+# Stage 1.3) don't rescan the content_list files. Keyed by the mineru-api-out
+# root path. Invalidated only by process restart (a single ingest run does not
+# change the content_list files mid-run).
+_CONTEXT_MAP_CACHE: dict[str, dict[str, dict]] = {}
 
-    # Build descriptive preamble
-    first = batch[0]
-    if first.get("page") is not None:
-        last_page = batch[-1].get("page", first["page"])
-        preamble = (f"这是第 {batch_idx+1}/{total_batches} 批（页 {first['page']}-{last_page}），"
-                    f"请按顺序描述每张图：\n\n")
-    else:
-        preamble = (f"这是第 {batch_idx+1}/{total_batches} 批扫描版文档中提取的技术图表，"
-                    f"请按顺序描述每张图：\n\n")
+# Block types that carry describable body text for context anchoring.
+_TEXT_BLOCK_TYPES = ("text", "header", "ref_text", "page_number")
 
-    content: list[dict] = [{"type": "text", "text": preamble}]
-    for i, img in enumerate(batch):
-        # Resolve image path — Path B uses absolute path, Path A uses media_dir + filename
-        if "path" in img:
-            img_path = Path(img["path"])
-        else:
-            img_path = media_dir / img["filename"]
-        if not img_path.exists():
+
+def _stage_1_3_build_context_map(config: Config) -> dict[str, dict]:
+    """Scan persisted minerU content_list files and build {md5_8: context}.
+
+    For each image/chart block, captures:
+      - mineru_caption: minerU's own image_caption (the book's figure label),
+        joined into one string. Used as ANCHORING CONTEXT only, never as the
+        final caption.
+      - context_before / context_after: text from the immediately preceding
+        and following text-bearing blocks (NashSU's before/after mechanism).
+
+    The original image bytes (at the block's img_path, relative to the
+    content_list file) are md5-hashed to match against the saved
+    `p{page}-mineru_{md5_8}.{ext}` files in wiki/media/. This matching is
+    robust because harvest saves the raw minerU bytes verbatim.
+
+    Returns {} when no mineru-api-out exists (Path A / PyMuPDF images have no
+    content_list — those images are captioned with the no-context prompt).
+    """
+    api_out = config.runtime_dir / "mineru-api-out"
+    cache_key = str(api_out)
+    if cache_key in _CONTEXT_MAP_CACHE:
+        return _CONTEXT_MAP_CACHE[cache_key]
+    if not api_out.exists():
+        _CONTEXT_MAP_CACHE[cache_key] = {}
+        return _CONTEXT_MAP_CACHE[cache_key]
+
+    import hashlib
+    ctx_map: dict[str, dict] = {}
+    for cl_path in sorted(api_out.glob("*/chunk/hybrid_auto/chunk_content_list.json")):
+        try:
+            blocks = json.loads(cl_path.read_text(encoding="utf-8"))
+        except Exception:
             continue
-        # Preprocess: normalize to RGB + downscale oversized images
-        img_data = _stage_1_3_preprocess_image(img_path)
-        ext = img_path.suffix.lstrip(".").lower()
-        media_type = f"image/{'jpeg' if ext in ('jpg', 'jpeg') else ext}"
+        if not isinstance(blocks, list):
+            continue
+        for i, b in enumerate(blocks):
+            if b.get("type") not in ("image", "chart"):
+                continue
+            img_path = b.get("img_path", "")
+            if not img_path:
+                continue
+            img_file = cl_path.parent / img_path
+            if not img_file.exists():
+                continue
+            try:
+                md5_8 = hashlib.md5(img_file.read_bytes()).hexdigest()[:8]
+            except Exception:
+                continue
 
-        # Annotation: page and size if available (Path A), or index only (Path B)
-        if img.get("page") is not None:
-            content.append({"type": "text",
-                "text": f"[图{i+1}] p{img['page']}, {img.get('width','?')}x{img.get('height','?')}\n"})
-        else:
-            content.append({"type": "text", "text": f"[图{i+1}]\n"})
-        content.append({"type": "image", "source": {"type": "base64", "media_type": media_type, "data": img_data}})
-        if img.get("page") is not None:
-            content.append({"type": "text", "text": f"[/图{i+1}]\n"})
+            caps = b.get("image_caption", [])
+            mineru_caption = " ".join(c.strip() for c in caps if c and c.strip())
 
+            before = _collect_block_text(blocks, i, -1, CONTEXT_CHARS)
+            after = _collect_block_text(blocks, i, +1, CONTEXT_CHARS)
+            ctx_map[md5_8] = {
+                "mineru_caption": mineru_caption,
+                "context_before": before,
+                "context_after": after,
+            }
+    _CONTEXT_MAP_CACHE[cache_key] = ctx_map
+    return ctx_map
+
+
+def _collect_block_text(blocks: list, start: int, step: int, max_chars: int) -> str:
+    """Walk from `start` in direction `step` (+1/-1) collecting text from
+    text-bearing blocks until `max_chars` is reached or a non-text block
+    (image/chart/table/equation) interrupts. Returns the joined text."""
+    chunks: list[str] = []
+    total = 0
+    i = start + step
+    while 0 <= i < len(blocks):
+        b = blocks[i]
+        if b.get("type") not in _TEXT_BLOCK_TYPES:
+            break
+        txt = (b.get("text") or "").strip()
+        if txt:
+            chunks.append(txt)
+            total += len(txt)
+            if total >= max_chars:
+                break
+        i += step
+    text = " ".join(chunks).strip()
+    if len(text) > max_chars:
+        text = text[:max_chars] + "…"
+    return text
+
+
+def _stage_1_3_md5_8(img_path: Path) -> str:
+    """md5[:8] of an image file's bytes — the key into the context map."""
+    import hashlib
+    return hashlib.md5(img_path.read_bytes()).hexdigest()[:8]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Caption inlining — feed captions to the generation LLM as alt text
+# (NashSU parity: ingest.ts Step 0.6 rewrites ![](url) → ![caption](url) so
+# the summarizer sees figure semantics instead of empty-alt image refs that
+# get silently paraphrased away).
+# ══════════════════════════════════════════════════════════════════════════════
+
+# minerU embeds figures in the chunk markdown as ![](images/<sha256>.jpg).
+# The saved + captioned file is wiki/media/<slug>/p<page>-mineru_<md5_8>.jpg
+# with a sibling .caption.txt. This regex matches the minerU image ref.
+_MINERU_IMG_REF_RE = re.compile(r'!\[[^\]]*\]\(images/([^)]+)\)')
+
+# Module cache: {media_dir_key: {mineru_basename: caption}}.
+_CAPTION_BY_BASENAME_CACHE: dict[str, dict[str, str]] = {}
+
+
+def _stage_1_3_build_caption_by_basename_map(config: Config, media_dir: Path) -> dict[str, str]:
+    """Map minerU image basename (e.g. ``<sha256>.jpg``) → VLM caption text.
+
+    Scans persisted minerU content_list files; for each image/chart block,
+    reads the original image bytes (at the block's img_path), md5-hashes them
+    to find the saved ``p<page>-mineru_<md5_8>.jpg`` in ``media_dir``, and
+    reads its ``.caption.txt`` sidecar. The minerU basename is the key because
+    that is what appears in the chunk markdown's ``![](images/<basename>)``.
+
+    Returns ``{}`` when there is no mineru-api-out (Path A / PyMuPDF images —
+    no chunk markdown image refs to inline).
+    """
+    cache_key = str(media_dir)
+    if cache_key in _CAPTION_BY_BASENAME_CACHE:
+        return _CAPTION_BY_BASENAME_CACHE[cache_key]
+
+    import hashlib
+    api_out = config.runtime_dir / "mineru-api-out"
+    out: dict[str, str] = {}
+    if not api_out.exists():
+        _CAPTION_BY_BASENAME_CACHE[cache_key] = out
+        return out
+
+    # Pre-index saved files by md5_8 → caption sidecar text (one glob pass).
+    saved_by_md5: dict[str, str] = {}
+    pat = re.compile(r"mineru_([0-9a-f]{8})\.")
+    for f in media_dir.glob("p*-mineru_*.*"):
+        if f.name.endswith(".caption.txt"):
+            continue
+        m = pat.search(f.name)
+        if not m:
+            continue
+        cap_path = media_dir / (f.name + ".caption.txt")
+        if cap_path.exists() and cap_path.stat().st_size >= 20:
+            try:
+                cap = cap_path.read_text(encoding="utf-8").strip()
+            except Exception:
+                cap = ""
+            if cap and not _stage_1_3_is_caption_failed(cap):
+                saved_by_md5[m.group(1)] = cap
+
+    for cl_path in sorted(api_out.glob("*/chunk/hybrid_auto/chunk_content_list.json")):
+        try:
+            blocks = json.loads(cl_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(blocks, list):
+            continue
+        for b in blocks:
+            if b.get("type") not in ("image", "chart"):
+                continue
+            ip = b.get("img_path", "")
+            if not ip:
+                continue
+            img_file = cl_path.parent / ip
+            if not img_file.exists():
+                continue
+            basename = os.path.basename(ip)
+            if basename in out:
+                continue
+            try:
+                md5_8 = hashlib.md5(img_file.read_bytes()).hexdigest()[:8]
+            except Exception:
+                continue
+            cap = saved_by_md5.get(md5_8)
+            if cap:
+                out[basename] = cap
+
+    _CAPTION_BY_BASENAME_CACHE[cache_key] = out
+    return out
+
+
+def _stage_1_3_sanitize_alt(caption: str) -> str:
+    """Sanitize a caption for safe inclusion as markdown alt text.
+
+    Alt text is delimited by `[...]`; a literal `]` or a newline would
+    terminate the image ref early and corrupt the surrounding markdown.
+    NashSU applies the same sanitization (vision-caption.ts / ingest.ts)."""
+    alt = caption.replace("\r", " ").replace("\n", " ")
+    alt = alt.replace("]", "")  # would close the alt block early
+    alt = re.sub(r"\s+", " ", alt).strip()
+    return alt
+
+
+def _stage_1_3_inline_captions(text: str, config: Config, media_dir: Path) -> str:
+    """Rewrite minerU image refs in ``text`` to carry their VLM caption as alt
+    text: ``![](images/x.jpg)`` → ``![<caption>](images/x.jpg)``.
+
+    NashSU parity (ingest.ts Step 0.6): captioned alt text gives the
+    generation LLM enough semantic load to preserve figure references inline
+    at the right paragraph, instead of silently paraphrasing empty-alt images
+    away. Call this AFTER Stage 1.3 (captions exist) and BEFORE Stage 2.2/2.4
+    (chunk analysis / page generation).
+
+    Idempotent: refs whose alt text is already non-empty are left untouched,
+    so re-running on already-inlined text is a no-op. Unmatched refs (no
+    caption sidecar) are left as-is (empty alt) rather than dropped.
+    """
+    cap_map = _stage_1_3_build_caption_by_basename_map(config, media_dir)
+    if not cap_map:
+        return text
+
+    def _repl(m: re.Match) -> str:
+        basename = m.group(1)
+        # Skip if alt text already populated (idempotency).
+        full = m.group(0)
+        alt_match = re.match(r'!\[([^\]]*)\]\(', full)
+        if alt_match and alt_match.group(1).strip():
+            return full
+        cap = cap_map.get(basename)
+        if not cap:
+            return full
+        return f'![{_stage_1_3_sanitize_alt(cap)}](images/{basename})'
+
+    return _MINERU_IMG_REF_RE.sub(_repl, text)
+
+
+def _stage_1_3_build_user_prompt(img: dict, ctx: dict | None) -> str:
+    """Build the per-image user prompt. Context-aware when surrounding text or
+    a minerU figure caption is available; otherwise the no-context fallback.
+
+    Mirrors NashSU's buildCaptionPromptWithContext framing: the surrounding
+    text MAY identify the figure (and should be anchored to) or MAY be
+    unrelated body text (in which case the model describes what it sees)."""
+    page = img.get("page")
+    page_hint = f" (source page {page})" if page is not None else ""
+
+    has_ctx = bool(ctx and (ctx.get("context_before") or ctx.get("context_after")
+                            or ctx.get("mineru_caption")))
+    if not has_ctx:
+        return (
+            f"Describe this image factually{page_hint} for a knowledge-base index. "
+            "Include: any visible text verbatim (in its original language — do not "
+            "translate), chart axes and values, diagram structure (boxes/arrows/labels), "
+            "key visual elements. Describe in the language of the surrounding source "
+            "text. Do not speculate. 2 to 4 sentences, plain text, no markdown."
+        )
+
+    before = (ctx or {}).get("context_before", "")
+    after = (ctx or {}).get("context_after", "")
+    mineru_cap = (ctx or {}).get("mineru_caption", "")
+    parts = [
+        f"This image{page_hint} is embedded in a technical document. Below is the "
+        "text that appears IMMEDIATELY BEFORE and AFTER it in the source. This "
+        "surrounding text MAY identify/label the image (e.g. a figure caption, or "
+        "body text explaining what the figure shows) — if so, anchor your caption "
+        "to it. It MAY ALSO be unrelated body text that merely happens to flank the "
+        "image — if so, ignore it and describe what you see.",
+    ]
+    if mineru_cap:
+        parts.append(f"[Figure caption (reference only — do NOT copy)] {mineru_cap}")
+    parts.append(f"[Text before image]\n{before or '(none)'}")
+    parts.append(f"[Text after image]\n{after or '(none)'}")
+    parts.append(
+        "Now describe this image factually for a knowledge-base index. Include: any "
+        "visible text verbatim (original language, do not translate), chart axes and "
+        "values, diagram/geometric structure (boxes/arrows/connections/labels), key "
+        "visual elements. If the surrounding text/caption explains what the figure "
+        "shows, use it to convey the figure's meaning — but do NOT output the figure "
+        "label or figure number as the caption. Do not invent details not visible in "
+        "the image. Describe in the language of the surrounding source text. "
+        "2 to 4 sentences, plain text, no markdown."
+    )
+    return "\n\n".join(parts)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Per-image VLM call (one image, one call, plain-text reply)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _stage_1_3_caption_one_image(img: dict, config: Config, media_dir: Path,
+                                 ctx_map: dict[str, dict]) -> tuple[str | None, str | None]:
+    """Caption a single image with one VLM call. Returns (caption, error).
+
+    On a transient API failure, retries up to 3 times. A final failure is
+    surfaced as an error string so the caller can decide (placeholder vs
+    systemic pause); it does NOT silently write a degraded caption.
+    """
+    import urllib.request, urllib.error
+    if "path" in img and img["path"]:
+        img_path = Path(img["path"])
+        if not img_path.is_absolute():
+            img_path = media_dir / img["filename"]
+    else:
+        img_path = media_dir / img["filename"]
+    if not img_path.exists():
+        return None, f"missing image file: {img.get('filename')}"
+
+    img_data = _stage_1_3_preprocess_image(img_path)
+    ext = img_path.suffix.lstrip(".").lower()
+    media_type = f"image/{'jpeg' if ext in ('jpg', 'jpeg') else ext}"
+
+    # Look up anchoring context by md5_8 of the saved bytes.
+    ctx = None
+    try:
+        ctx = ctx_map.get(_stage_1_3_md5_8(img_path))
+    except Exception:
+        ctx = None
+    prompt_text = _stage_1_3_build_user_prompt(img, ctx)
+
+    content = [
+        {"type": "text", "text": prompt_text},
+        {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": img_data}},
+    ]
     url = f"{config.caption_base_url.rstrip('/')}/anthropic/v1/messages"
     body = json.dumps({
         "model": config.caption_model,
-        "max_tokens": 8192,
+        "max_tokens": 1024,
         "system": CAPTION_SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": content}],
-        "temperature": 0.3,
+        "temperature": 0,
     }).encode("utf-8")
 
+    last_err = None
     for attempt in range(3):
         try:
             req = urllib.request.Request(url, data=body, method="POST", headers={
@@ -227,162 +548,125 @@ def _stage_1_3_caption_one_batch(batch: list[dict], batch_idx: int, total_batche
                 "x-api-key": config.caption_api_key,
                 "anthropic-version": "2023-06-01",
             })
-            with urllib.request.urlopen(req, timeout=300) as resp:
+            with urllib.request.urlopen(req, timeout=180) as resp:
                 data = json.loads(resp.read())
-            text = "".join(c["text"] for c in data.get("content", []) if c.get("type") == "text")
-            return text.strip(), None
+            text = "".join(c["text"] for c in data.get("content", [])
+                           if c.get("type") == "text").strip()
+            if text:
+                return text, None
+            last_err = "empty VLM response"
         except Exception as e:
-            if attempt < 2:
-                time.sleep(2 ** attempt)
-                continue
-            # No fallback: a caption-batch failure after retries means the VLM
-            # main path is not working — pause rather than write placeholder
-            # captions that silently degrade quality (policy 2026-06-24).
-            print(f"\n⚠️  [caption] VLM batch failed after {attempt+1} attempts "
-                  f"({type(e).__name__}: {e}) — PAUSING, no fallback.")
-            raise RuntimeError(
-                f"Caption VLM batch failed after {attempt+1} attempts "
-                f"({type(e).__name__}: {e}). No fallback — the main captioning "
-                f"path is not working. Fix the provider and re-run (cached, "
-                f"resumes from Stage 1.3)."
-            ) from e
-    return None, "max-retries"
-
+            last_err = f"{type(e).__name__}: {e}"
+        if attempt < 2:
+            time.sleep(2 ** attempt)
+    return None, last_err
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Batch dispatch
+# Parallel per-image dispatch
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _stage_1_3_pending_images(images: list[dict], media_dir: Path) -> list[dict]:
+    """Return images that still need a VLM caption.
+
+    An image is pending if it has no .caption.txt, or the existing sidecar is
+    a VLM-failure placeholder / undersized (so transient failures get retried
+    on the next run)."""
+    pending = []
+    for img in images:
+        cap_path = media_dir / (img["filename"] + ".caption.txt")
+        if not cap_path.exists() or cap_path.stat().st_size < 20:
+            pending.append(img)
+            continue
+        try:
+            existing = cap_path.read_text(encoding="utf-8").strip()
+        except Exception:
+            pending.append(img)
+            continue
+        if _stage_1_3_is_caption_failed(existing):
+            pending.append(img)
+    return pending
+
 
 def _stage_1_3_caption_images_batch(images: list[dict], config: Config, media_dir: Path,
                     source_label: str = "",
-                    batch_size: int = CAPTION_BATCH_SIZE,
                     max_workers: int = CAPTION_MAX_WORKERS) -> int:
-    """Unified image captioning for both Path A (PyMuPDF) and Path B (minerU).
+    """Caption every pending image, one VLM call per image, in parallel.
 
-    Images dict can come from either path:
-      - Path A: {"filename": "...", "page": N, "width": W, "height": H}
-        Image files are at media_dir / filename.
-      - Path B: {"filename": "...", "path": "/abs/path/to/img.jpg"}
-        Image files are at the absolute path.
+    NashSU parity (2026-06-24): one image per call with a context-aware
+    prompt. `max_workers` caps the parallel calls.
 
-    Batches are processed in PARALLEL via ThreadPoolExecutor to minimize
-    total wall-clock time. Each batch sends multi-image API request to
-    the caption provider (via Anthropic protocol).
-
-    Saves one .caption.txt per image."""
-    # Late import: log_event lives in the scanned module (_stage_1_1_scanned)
-    # which imports this module at top level. Late import avoids a load-time
-    # circular dependency. log_event no-ops when _log_file is None (Stage 1.3
-    # entry via stage_1_3_caption_images outside the OCR path).
+    No-silent-fallback policy: a missing API key pauses the ingest. Isolated
+    per-image failures after retries get a loud `[待重试]` placeholder (which
+    is itself pending, so the next run retries it). CONSECUTIVE_FAIL_PAUSE
+    failures in a row means the VLM main path is down → pause (raise), so we
+    never silently produce a wave of placeholders.
+    """
     from _stage_1_1_scanned import log_event
 
     if not images:
         return 0
     if not config.caption_api_key:
-        # VLM main path cannot run — pause (no fallback, no silent degradation).
         already = sum(1 for img in images
                       if (media_dir / (img["filename"] + ".caption.txt")).exists())
         _caption_no_key_pause(config, source_label, media_dir, len(images), already)
         return 0  # unreachable — _caption_no_key_pause always raises
 
-    # Filter to pending (uncaptioned or VLM-failed) images
-    pending = []
-    for img in images:
-        cap_path = media_dir / (img["filename"] + ".caption.txt")
-        if not cap_path.exists():
-            pending.append(img)
-        elif cap_path.stat().st_size < 20:
-            pending.append(img)
-        else:
-            # Re-check: existing caption might be a VLM failure from previous run
-            try:
-                existing = cap_path.read_text(encoding="utf-8").strip()
-                if _stage_1_3_is_caption_failed(existing):
-                    pending.append(img)
-            except Exception:
-                pending.append(img)
+    pending = _stage_1_3_pending_images(images, media_dir)
     if not pending:
         label = f" [{source_label}]" if source_label else ""
         print(f"[caption]{label} (cached) All {len(images)} images already captioned")
         return 0
 
-    batches = [pending[i:i + batch_size] for i in range(0, len(pending), batch_size)]
+    ctx_map = _stage_1_3_build_context_map(config)
     label = f" [{source_label}]" if source_label else ""
     print(f"[caption]{label} {len(pending)}/{len(images)} pending images "
-          f"→ {len(batches)} batches (parallel, max {max_workers} workers)")
-
-    # Parallel dispatch: all batches submitted at once, results collected as they complete
-    from concurrent.futures import as_completed
+          f"→ one VLM call each (parallel, max {max_workers} workers, "
+          f"{len(ctx_map)} figures with context)")
 
     captioned = 0
-    with ThreadPoolExecutor(max_workers=min(max_workers, len(batches))) as executor:
-        future_to_batch = {
-            executor.submit(_stage_1_3_caption_one_batch, b, i, len(batches), config, media_dir): i
-            for i, b in enumerate(batches)
+    consecutive_fail = 0
+    workers = min(max_workers, len(pending)) or 1
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_img = {
+            executor.submit(_stage_1_3_caption_one_image, img, config, media_dir, ctx_map): img
+            for img in pending
         }
-        for future in as_completed(future_to_batch):
-            bi = future_to_batch[future]
-            batch = batches[bi]
+        done = 0
+        for future in as_completed(future_to_img):
+            img = future_to_img[future]
+            done += 1
             try:
-                text, err = future.result()
+                caption, err = future.result()
             except Exception as e:
-                print(f"  batch {bi+1}: unhandled {type(e).__name__}: {e}")
-                continue
-            if err:
-                print(f"  batch {bi+1}: {err}")
-                continue
-            # Parse JSON array from LLM response (with truncation recovery)
-            if text.startswith("```"):
-                text = text.split("```", 2)[1]
-                if text.startswith("json"):
-                    text = text[4:]
-                if text.endswith("```"):
-                    text = text[:-3]
-            text = text.strip()
-            text_len = len(text)
-            try:
-                captions = json.loads(text)
-            except json.JSONDecodeError:
-                import re
-                # Recovery 1: salvage complete {"idx": N, "caption": "..."} objects
-                salvaged = re.findall(
-                    r'\{\s*"idx"\s*:\s*(\d+)\s*,\s*"caption"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}',
-                    text
-                )
-                if salvaged:
-                    captions = [{"idx": int(idx), "caption": cap} for idx, cap in salvaged]
-                    print(f"  batch {bi+1}: JSON truncated ({text_len} chars) — salvaged {len(captions)}/{len(batch)} captions")
-                    log_event("json_truncation", batch=bi+1, response_len=text_len,
-                             recovered=len(captions), total=len(batch))
-                else:
-                    # Recovery 2: single caption truncated mid-string (no closing quote)
-                    m = re.search(r'"caption"\s*:\s*"((?:[^"\\]|\\.)*)$', text)
-                    if m and text.count('"idx"') == 1:
-                        cap_text = m.group(1).rstrip('，、, \t')
-                        if len(cap_text) >= 15:
-                            captions = [{"idx": 1, "caption": cap_text}]
-                            print(f"  batch {bi+1}: JSON truncated mid-caption ({text_len} chars) — salvaged 1/{len(batch)} caption")
-                        else:
-                            print(f"  batch {bi+1}: JSON parse failed ({text_len} chars), unable to recover")
-                            continue
-                    else:
-                        print(f"  batch {bi+1}: JSON parse failed ({text_len} chars), text[:100]: {text[:100]}")
-                        continue
-            for cap in captions:
-                idx = cap.get("idx", 0) - 1
-                if 0 <= idx < len(batch):
-                    caption_text = cap.get("caption", "").strip()
-                    # VLM failure detection: if the LLM returns "解析失败" or similar,
-                    # write a retry-able fallback instead of a useless permanent caption
-                    if _stage_1_3_is_caption_failed(caption_text):
-                        caption_text = f"[待重试] 图片 {batch[idx]['filename']}，尺寸 {batch[idx].get('width','?')}×{batch[idx].get('height','?')}"
-                    cap_path = media_dir / (batch[idx]["filename"] + ".caption.txt")
-                    cap_path.write_text(caption_text, encoding="utf-8")
-                    captioned += 1
-            print(f"  [{bi+1}/{len(batches)}] {len(captions)}/{len(batch)} captions ✓")
+                caption, err = None, f"unhandled {type(e).__name__}: {e}"
+            if caption:
+                consecutive_fail = 0
+                cap_text = caption.strip()
+                if _stage_1_3_is_caption_failed(cap_text):
+                    cap_text = (f"[待重试] 图片 {img['filename']}，"
+                                f"尺寸 {img.get('width','?')}×{img.get('height','?')}")
+                (media_dir / (img["filename"] + ".caption.txt")).write_text(
+                    cap_text, encoding="utf-8")
+                captioned += 1
+                print(f"  [{done}/{len(pending)}] {img['filename']} ✓")
+            else:
+                consecutive_fail += 1
+                placeholder = (f"[待重试] 图片 {img['filename']}，"
+                               f"尺寸 {img.get('width','?')}×{img.get('height','?')} "
+                               f"— {err}")
+                (media_dir / (img["filename"] + ".caption.txt")).write_text(
+                    placeholder, encoding="utf-8")
+                print(f"  [{done}/{len(pending)}] {img['filename']} ✗ {err}")
+                if consecutive_fail >= CONSECUTIVE_FAIL_PAUSE:
+                    raise RuntimeError(
+                        f"Caption VLM failed {consecutive_fail} images in a row "
+                        f"(last: {err}). No fallback — the main captioning path "
+                        f"is not working. Fix the provider and re-run (cached, "
+                        f"resumes from Stage 1.3)."
+                    )
 
-    print(f"[caption] Done — {captioned} captions written")
+    print(f"[caption] Done — {captioned}/{len(pending)} captions written")
     return captioned
 
 
@@ -390,19 +674,16 @@ def _stage_1_3_caption_images_batch(images: list[dict], config: Config, media_di
 # Stage 1.3 entry point
 # ══════════════════════════════════════════════════════════════════════════════
 
-def stage_1_3_caption_images(config: Config, stage_1_2_result: dict, batch_size: int = CAPTION_BATCH_SIZE) -> dict:
-    """Caption extracted images using unified caption pipeline (Path A + Path B merged).
+def stage_1_3_caption_images(config: Config, stage_1_2_result: dict) -> dict:
+    """Caption extracted images, one VLM call per image (NashSU parity).
 
-    Thin wrapper around _stage_1_3_caption_images_batch() for backward compatibility with the
-    Stage 1.3 pipeline checkpoint. Internal implementation delegates to the
-    unified function which supports both PyMuPDF-extracted images (Path A)
-    and minerU-extracted images (Path B), with parallel batch dispatch."""
+    Thin wrapper around _stage_1_3_caption_images_batch() for the Stage 1.3
+    pipeline checkpoint."""
     images = stage_1_2_result.get("images", [])
     if not images:
         print("[stage 1.3] No images to caption — skipping")
         return {"captioned": 0, "total": 0}
     if not config.caption_api_key:
-        # VLM main path cannot run — pause (no fallback, no silent degradation).
         media_dir = Path(stage_1_2_result.get("media_dir", "."))
         already = sum(1 for img in images
                       if (media_dir / (img["filename"] + ".caption.txt")).exists())
@@ -411,6 +692,5 @@ def stage_1_3_caption_images(config: Config, stage_1_2_result: dict, batch_size:
 
     media_dir = Path(stage_1_2_result["media_dir"])
     captioned = _stage_1_3_caption_images_batch(images, config, media_dir,
-                                source_label="stage-1.3",
-                                batch_size=batch_size)
+                                source_label="stage-1.3")
     return {"captioned": captioned, "total": len(images)}

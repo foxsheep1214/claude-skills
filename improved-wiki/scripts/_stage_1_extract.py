@@ -85,7 +85,6 @@ from _stage_1_2_images import (  # noqa: F401
 )
 from _stage_1_3_caption import (  # noqa: F401
     stage_1_3_caption_images,
-    CAPTION_BATCH_SIZE,
     CAPTION_MAX_WORKERS,
 )
 # Back-compat aliases: media_slug / raw_type_subdir now live in _paths.py.
