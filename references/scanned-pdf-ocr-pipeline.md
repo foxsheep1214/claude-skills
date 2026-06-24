@@ -69,9 +69,8 @@ def _stage_1_1_release_mineru_lock(fd: int) -> None:
 
 - 启动时起一次 `mineru.cli.fast_api` 服务器（整本书复用，模型只加载一次）
 - 每个 chunk 用 HTTP POST `/file_parse` 提交，不再起新进程
-- **原因**：minerU 3.4.0 的 `mineru -b pipeline` CLI 有已知 502 Bad Gateway bug——它自己启动的内部 API 服务器会立刻关闭。持久本地服务器 + 直接调 `/file_parse` 绕开了这个 bug（见 commit `a79cd7d`）。
+- **原因**：minerU 3.4.0 的 `mineru -b pipeline` CLI 有已知 502 Bad Gateway bug——它自己启动的内部 API 服务器会立刻关闭。持久本地服务器 + 直接调 `/file_parse` 绕开了这个 bug（见 commit `a79cd7d`）。pipeline CLI 路径已于 2026-06-24 移除，API path 是唯一提取后端。
 - 进程隔离仍然有：服务器是独立子进程，请求失败时 `_stage_1_1_scanned_restart_server()` 重启它，不影响 ingest.py 主进程。
-- 设 `IMPROVED_WIKI_PIPELINE_CLI=1` 可以强行走回（已知坏的）pipeline CLI 路径——只在 minerU 修掉这个 bug 后才该切回去。
 
 ## 输出物（已与 Stage 1.2/1.3 融合，不是独立两步）
 
@@ -95,23 +94,9 @@ def _stage_1_1_release_mineru_lock(fd: int) -> None:
 
 `_mineru_stats.json` 记录每个 chunk 的状态（completed_chunks/failed_chunks/images）。中断后重新运行 `ingest.py` 会自动跳过已完成的 chunk，只重跑未完成的——这部分行为不变。
 
-### Image harvesting gap: API path doesn't use content_list image_caption (2026-06-24)
+### Image harvesting gap (2026-06-24, FIXED)
 
-`_stage_1_2_harvest_images()` (API path, line ~1341) saves all images from
-the API `images` dict but does NOT read `content_list`'s `image_caption`
-field to write sidecar `.caption.txt` files. The separate function
-`_stage_1_2_extract_from_mineru()` (CLI path, line ~1608) DOES write
-sidecars from `content_list`, but it's only called when
-`IMPROVED_WIKI_PIPELINE_CLI=1`.
-
-Result: on the default API path, 269/300 images with minerU-provided
-captions are sent to MiniMax VLM for redundant re-captioning. Additionally,
-the `images` dict contains ~188 entries not present in `content_list`
-image/chart blocks (fragments, formula crops, noise), all of which get
-extracted and captioned unnecessarily.
-
-See `references/image-caption-strategy.md` § "Known issues discovered
-2026-06-24" for the full analysis and fix proposals.
+API path 的 `_stage_1_2_harvest_images()` 曾不读 `content_list` 的 `image_caption`（`content_list` 是 JSON 字符串，`isinstance(cl, list)` 永远 False）→ 全量图倾倒 + minerU caption 被浪费。**已修**（`json.loads(cl)` + 写 sidecar）：528→340 图，VLM 调用 ↓70%，caption 覆盖 62%→98%。详见 `known-issues.md`。
 
 ## 相关的其他 pipeline
 
