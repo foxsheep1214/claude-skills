@@ -348,6 +348,28 @@ class TestMergeDuplicateGroup(unittest.TestCase):
         ref_backup = next(b for b in result.backup if b["path"] == "wiki/concepts/ref.md")
         self.assertEqual(ref_backup["content"], refOrig)
 
+    def test_rejects_llm_output_without_frontmatter(self):
+        pageA = PAGE("type: entity\ntitle: A", "body a content here")
+        pageB = PAGE("type: entity\ntitle: B", "body b content here")
+        with self.assertRaisesRegex(ValueError, r"no frontmatter"):
+            d.merge_duplicate_group(
+                [{"slug": "a", "path": "wiki/entities/a.md", "content": pageA},
+                 {"slug": "b", "path": "wiki/entities/b.md", "content": pageB}],
+                "a", [], lambda s, u: "Sorry, I can't merge these pages.",
+                today=FIXED_TODAY,
+            )
+
+    def test_rejects_llm_output_with_shrunk_body(self):
+        pageA = PAGE("type: entity\ntitle: A", "A" * 200)
+        pageB = PAGE("type: entity\ntitle: B", "B" * 200)
+        shrunken = PAGE("type: entity\ntitle: A", "short summary")
+        with self.assertRaisesRegex(ValueError, r"threshold|truncation"):
+            d.merge_duplicate_group(
+                [{"slug": "a", "path": "wiki/entities/a.md", "content": pageA},
+                 {"slug": "b", "path": "wiki/entities/b.md", "content": pageB}],
+                "a", [], lambda s, u: shrunken, today=FIXED_TODAY,
+            )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

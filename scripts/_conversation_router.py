@@ -91,6 +91,15 @@ def _conversation_llm_call(prompt: str, config: Config, max_tokens=None) -> tupl
         lambda m: (m.group(1) + "<redacted>\n") if m.group(1)
                    else "Existing wiki pages: <redacted>",
         prompt)
+    # Redact volatile image alt-text captions. The image filename (a content
+    # hash) is stable across runs, but the VLM/minerU alt-text caption may be
+    # present or absent depending on the Stage 1.3 caption-cache state. Without
+    # this, Stage 2.1's extracted_text block changes hash whenever captions are
+    # added/removed, thrashing the 2.1 digest slug and re-prompting Stage 2.1
+    # on every resume (observed: 497f2b16 -> e20e22a4 for the same paper).
+    # Only the cache KEY is stabilized; the full prompt is still written to the
+    # .md for the LLM.
+    stable_prompt = re.sub(r'!\[[^\]]*\]\(', '![](', stable_prompt)
     content_hash = hashlib.sha256(stable_prompt.encode("utf-8")).hexdigest()[:8]
     slug = f"{stage}-{content_hash}"
     prefix = config.conversation_prefix or "00000000"

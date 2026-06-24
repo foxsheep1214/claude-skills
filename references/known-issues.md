@@ -3,7 +3,7 @@
 ## Open issues
 
 ### Several files exceed the 800-line guideline
-`_core.py`（~1013 行）。暂无明显自然切分点，未拆。
+`_core.py`（~1032 行）。暂无明显自然切分点，未拆。
 `ingest.py`（~462 行）协同 `_ingest_skip.py` / `_ingest_chunks.py` / `_ingest_prepare.py` / `_ingest_write.py` 四个编排子模块。
 `_stage_1_extract.py` 是 facade，re-export 兄弟模块 `_stage_1_1_scanned.py` / `_stage_1_2_images.py` / `_stage_1_3_caption.py` 的公开名，外部导入者无需改动。
 `_stage_2_4_generation.py`（~658 行）已低于阈值。

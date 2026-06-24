@@ -691,6 +691,11 @@ def list_existing_slugs(config: Config) -> list[str]:
         if stem.startswith("_") or stem in anchors:
             continue
         slugs.append(stem)
+    # Sort so downstream `[:N]` truncation is deterministic. Without sorting,
+    # rglob filesystem order varies across runs (especially after lint merges
+    # rewrite pages), which changes the Stage 2.4 linkable-pages set and
+    # thrashes the 2.4 conversation-handoff slug forever (cache never hits).
+    slugs.sort()
     return slugs
 
 
@@ -998,7 +1003,14 @@ def slugify(text: str) -> str:
     silently drops the page for).
     """
     slug = text.lower().replace(" ", "-").replace("/", "-")
-    return _ILLEGAL_CHARS_RE.sub("", slug)
+    slug = _ILLEGAL_CHARS_RE.sub("", slug)
+    # Strip leading/trailing non-alphanumerics that survive the illegal-char
+    # strip. A trailing period (e.g. "Tron Future Tech Inc." -> "tron-future-
+    # tech-inc.") otherwise yields a filename the FILE-block writer silently
+    # drops, causing "29/30 blocks written" with a broken wikilink target.
+    slug = re.sub(r"^[^a-z0-9]+", "", slug)
+    slug = re.sub(r"[^a-z0-9]+$", "", slug)
+    return slug
 
 
 def atomic_write(path, content: str, encoding: str = "utf-8") -> None:

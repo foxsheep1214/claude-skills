@@ -22,6 +22,8 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from _frontmatter_array import parse_frontmatter_array, write_frontmatter_array
+
 _FM_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n(.*)$", re.DOTALL)
 _TITLE_RE = re.compile(r'^title:\s*["\']?(.+?)["\']?\s*$', re.MULTILINE)
 _TAGS_RE = re.compile(r'^tags:\s*\[(.*)\]\s*$', re.MULTILINE)
@@ -30,22 +32,12 @@ _SOURCES_RE = re.compile(r'^sources:\s*\[(.*)\]\s*$', re.MULTILINE)
 _CREATED_RE = re.compile(r'^created:\s*(\S+)\s*$', re.MULTILINE)
 _UPDATED_RE = re.compile(r'^updated:\s*(\S+)\s*$', re.MULTILINE)
 _WIKILINK_RE = re.compile(r"\[\[([^\]|]+?)(?:\|([^\]]+?))?\]\]")
-_QSTR_RE = re.compile(r'"([^"]*)"')
 
 LANG_SUFFIX_RE = re.compile(r"-(zh|en|ja|ko|fr|de|es|ru|ar)$")
 DOMAIN_SUFFIXES = {
     "emc", "pcb", "rf", "emi", "mcu", "fpga", "asic", "soc", "dsp",
     "adc", "dac", "pll", "ddr", "pcie", "usb", "analog", "power",
 }
-
-
-def _parse_list(raw: str) -> list[str]:
-    if not raw or raw.strip() == "[]":
-        return []
-    items = _QSTR_RE.findall(raw)
-    if items:
-        return items
-    return [x.strip().strip("'\"") for x in raw.split(",") if x.strip()]
 
 
 def _dump_list(items: list[str]) -> str:
@@ -109,8 +101,10 @@ def load_page(path: Path, folder: str) -> Page | None:
     return Page(
         path=path, folder=folder, slug=slug, title=title,
         raw_fm=fm, body=body, size=len(text),
-        tags=_parse_list(g(_TAGS_RE)), related=_parse_list(g(_RELATED_RE)),
-        sources=_parse_list(g(_SOURCES_RE)), created=g(_CREATED_RE),
+        tags=parse_frontmatter_array(text, "tags"),
+        related=parse_frontmatter_array(text, "related"),
+        sources=parse_frontmatter_array(text, "sources"),
+        created=g(_CREATED_RE),
         updated=g(_UPDATED_RE),
     )
 
@@ -252,17 +246,22 @@ def rewrite_links_in_text(text: str, index: dict[str, str]) -> tuple[str, int]:
         return m.group(0)
     text = _WIKILINK_RE.sub(repl, text)
 
-    def rel_repl(m: re.Match) -> str:
-        items = _parse_list(m.group(1))
+    # 2. `related` field — re-parse (handles BOTH inline `[a, b]` and block
+    #    `  - a` forms via _frontmatter_array) and rewrite redirects. The old
+    #    inline-only regex left block-style `related` entries pointing at
+    #    merged-away slugs → broken refs after phase-1 merge (GAP-4).
+    existing = parse_frontmatter_array(text, "related")
+    if existing:
         out = []
-        for it in items:
+        changed = False
+        for it in existing:
             key = _norm_link(it)
             if key in index:
-                out.append(index[key]); n[0] += 1
+                out.append(index[key]); n[0] += 1; changed = True
             else:
                 out.append(it)
-        return f"related: {_dump_list(out)}"
-    text = _RELATED_RE.sub(rel_repl, text)
+        if changed:
+            text = write_frontmatter_array(text, "related", _dedup(out))
     return text, n[0]
 
 
