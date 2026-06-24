@@ -132,8 +132,3 @@ done
 ```
 
 ---
-
-## 修订记录
-
-- **2026-06-22**：彻底重写为结构化 spec，对齐代码。① 阶段编号 2.5 → **2.7**（与 `stage_2_7_query_generation` / SKILL.md / mandatory 表一致）；② 触发改为真实执行位置（2.6 源页之后、2.8 之前）；③ 补全第二个跳过条件「无 concept 生成」；④ 移除与代码漂移的中文 prose prompt 模板，改为描述 `_stage_2_7_build_prompt()` 的真实 section 结构并指向代码作为唯一真相源。
-- **2026-06-16**：初版。从 HardwareWiki 已有 query 页面反推模板，对齐 NashSU `type: query` schema。

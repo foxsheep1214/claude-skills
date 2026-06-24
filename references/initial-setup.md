@@ -155,7 +155,7 @@ For a typical 300-page book with full text layer:
 | Stage | Expected time |
 |---|---|
 | Hash check | <1s |
-| minerU text extract (API path, text-layer PDF) | minutes, not seconds — dominated by local minerU server startup/model load, not page count (2026-06-23: PyMuPDF direct extraction removed, all PDFs route through minerU) |
+| minerU text extract (API path, text-layer PDF) | minutes, not seconds — dominated by local minerU server startup/model load, not page count |
 | LLM Analysis call (conversation mode) | 30-90s (current model, per-chunk) |
 | LLM Generation call (conversation mode) | 60-180s (this is the big one) |
 | File writes | <1s |

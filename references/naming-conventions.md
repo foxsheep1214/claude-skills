@@ -228,7 +228,7 @@ wiki/media/<raw_subpath>/<source_stem>/
 - `raw/Book/Foo.pdf` → `wiki/media/Book/Foo/`
 - `raw/Datasheet/05_AMP/ADL8113.pdf` → `wiki/media/Datasheet/05_AMP/ADL8113/`
 
-`media_slug()`（在 `scripts/_paths.py`，2026-06-24 从 `_stage_1_2_images.py` 下沉；旧名 `_stage_1_2_media_slug` 仍由 `_stage_1_extract` facade 别名 re-export）返回 raw 文件相对于 `raw/` 的父目录 + stem。
+`media_slug()`（在 `scripts/_paths.py`）返回 raw 文件相对于 `raw/` 的父目录 + stem。
 
 ### 5.2 图片文件
 
@@ -266,7 +266,7 @@ wiki/media/<slug>/_manifest.json
 
 ## 6. Runtime 状态文件
 
-> **与 NashSU 对齐，统一使用 `.llm-wiki/`**。`.iwiki-runtime/` 已于 2026-06-16 废弃——`_paths.detect_runtime_dir()` 会在首次访问时自动迁移旧目录内容。
+> **与 NashSU 对齐，统一使用 `.llm-wiki/`**。
 
 ```
 .llm-wiki/
@@ -376,7 +376,7 @@ N 为单调递增计数器（`review-store.ts:10`）。
 | `<runtime>/review.json` | `run_review_suggestions.py` Stage 3.4 产物 |
 | `wiki/REVIEW/_summaries/_audit_<scope>.md` | LLM 审计汇总报告（meta，非 review item） |
 
-**`_summaries/` 约定**（2026-06-24 增）：
+**`_summaries/` 约定**：
 - 装**跨类审计汇总报告**（如 `_audit_report.md` 总报告、`_audit_<category>.md` 分类明细），是审计 agent 对一批 lint findings 的 verdict/action 统计表，**不是 per-finding review item**。
 - `_` 前缀目录 = meta 产物，review-sweep / lint 不当 finding 扫描。
 - **不要**写进 `wiki/REVIEW/audit/`——后者是 pipeline 自动生成的 per-book 质量评分卡（`type: audit`，`overall_score < 0.65` 时落盘），混入会污染扫描。
@@ -422,7 +422,7 @@ N 为单调递增计数器（`review-store.ts:10`）。
 
 ## 12. improved-wiki 与 NashSU 的已知差异
 
-以下为 2026-06-14 全面审计后的残余差异。标注"已对齐"的项不再列出。
+以下为残余差异。标注"已对齐"的项不再列出。
 
 | 项目 | NashSU 原生 | improved-wiki | 说明 |
 |------|------------|---------------|------|
@@ -431,13 +431,13 @@ N 为单调递增计数器（`review-store.ts:10`）。
 | Manifest 命名 | 无独立文件 | `_manifest.json` | improved-wiki Stage 1.2 独有产物 |
 | Lint 页面 | app UI 直接展示（内存） | `.llm-wiki/lint/<type>-<page>.md` | CLI 场景需要文件化输出；属 runtime 状态，不放入 wiki/ |
 | Review 页面 | `review.json`（app UI） | `wiki/REVIEW/<type>/<date>-<stem>-<NNN>.md` + `review.json` | 人类可浏览 + 机器可读双输出 |
-| 页面合并 | 3-layer LLM merge | 同 NashSU（2026-06-14 实现） | — |
-| 路径安全 | 8 项 `isSafeIngestPath` | 同 NashSU（2026-06-14 实现） | — |
-| 栅栏感知解析 | CommonMark fence tracking | 同 NashSU（2026-06-14 实现） | — |
-| CRLF 规范化 | `\r\n` → `\n` | 同 NashSU（2026-06-14 实现） | — |
+| 页面合并 | 3-layer LLM merge | 同 NashSU | — |
+| 路径安全 | 8 项 `isSafeIngestPath` | 同 NashSU | — |
+| 栅栏感知解析 | CommonMark fence tracking | 同 NashSU | — |
+| CRLF 规范化 | `\r\n` → `\n` | 同 NashSU | — |
 | 内容清理 | `ingest-sanitize.ts` | `sanitize_ingested_content()` | — |
-| 页面历史备份 | `.llm-wiki/page-history/` | 同 NashSU（2026-06-14 实现） | — |
+| 页面历史备份 | `.llm-wiki/page-history/` | 同 NashSU | — |
 | 动态 token 预算 | 4 层缩放 | `compute_max_tokens()` | — |
 | 内联 embedding | Stage 6 auto-run | `_auto_embed_new_pages()` | — |
-| Lint orphan 检测 | 无条件 | 同 NashSU（2026-06-14 对齐） | — |
-| Slug 优先级 | last-write-wins | 同 NashSU（2026-06-14 对齐） | — |
+| Lint orphan 检测 | 无条件 | 同 NashSU | — |
+| Slug 优先级 | last-write-wins | 同 NashSU | — |

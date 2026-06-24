@@ -1,4 +1,4 @@
-# Conversation Mode — Agent Driving Pattern (2026-06-24)
+# Conversation Mode — Agent Driving Pattern
 
 When an agent (Hermes, Claude Code) drives the improved-wiki pipeline, it must
 answer each LLM step that `ingest.py` delegates via prompt files. This file

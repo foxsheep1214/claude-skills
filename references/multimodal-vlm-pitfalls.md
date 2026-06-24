@@ -1,8 +1,8 @@
 # Multimodal VLM pitfalls — MiniMax M3 + mmx CLI 实测踩坑
 
-2026-06-11 第一次 HardwareWiki 电源篇图 captioning 时摸出来的具体非平凡经验。每个 pitfall 都有验证记录。
+HardwareWiki 电源篇图 captioning 摸出来的具体非平凡经验。每个 pitfall 都有验证记录。
 
-> **round ii 澄清 (2026-06-20，2026-06-23 更新)**：本技能的视觉任务分工是——**图片 caption（Stage 1.3）走 MiniMax VLM**（`anthropic/v1/messages` 多图批量，需 `MINIMAX_CN_API_KEY`）；**OCR / 文档 VLM 解析（Phase 0）走本地 minerU**（免费，API server 默认 **hybrid-engine** 后端——`/file_parse` 默认 backend=hybrid-engine、parse_method=auto，文字版自动 txt、扫描版自动 VLM OCR；不再用 `-b vlm-engine` CLI）。本文件历史上有几处把 MiniMax 的多图批量叫做"OCR"——那是早期对"figure 图片描述"的口语叫法，实际都是 **caption**。真正的文本 OCR 自始至终是本地 minerU。读下方 endpoint 矩阵 / 决策树时，把"OCR/caption"里的 OCR 部分理解为 caption 即可。
+> **视觉任务分工**：**图片 caption（Stage 1.3）走 MiniMax VLM**（`anthropic/v1/messages` 一图一调用，需 `MINIMAX_CN_API_KEY`）；**OCR / 文档 VLM 解析（Phase 0）走本地 minerU**（免费，API server 默认 **hybrid-engine** 后端——`/file_parse` 默认 backend=hybrid-engine、parse_method=auto，文字版自动 txt、扫描版自动 VLM OCR）。下方 endpoint 矩阵 / 决策树里"OCR/caption"的 OCR 部分均指 caption。
 
 ---
 
@@ -109,7 +109,7 @@ while True:
 
 ## Pitfall 4: MiniMax embo-01 embedding 端点需要 `type=db` 或 `type=query` 字段
 
-> **已废弃 (2026-06-19，2026-06-20 确认代码已清除)**：Embedding 不再走 MiniMax（见 SKILL.md「LLM execution model」）。`build_embeddings.py` 现在只有一个 OpenAI 兼容的 `/v1/embeddings` 路径（默认本地 Ollama `bge-m3`，可用 `EMBEDDING_*` 环境变量指向任何自选端点），MiniMax `embo-01` 路径已不存在。本节保留作历史记录。
+> Embedding 不走 MiniMax（见 SKILL.md「LLM execution model」）。`build_embeddings.py` 只有一个 OpenAI 兼容的 `/v1/embeddings` 路径（默认本地 Ollama `bge-m3`，可用 `EMBEDDING_*` 环境变量指向任何自选端点）；本 Pitfall 描述的 MiniMax `embo-01` 端点已不存在。
 
 **症状 (verified 2026-06-11, HardwareWiki Stage 6 build_embeddings)**：调 MiniMax embedding 端点 `https://api.minimaxi.com/v1/embeddings` 用 OpenAI 兼容格式（`{"model": "embo-01", "input": "test"}`）返回：
 ```json
@@ -206,7 +206,7 @@ mmx CLI 在 OCR 任务上的细节见 `references/session-lessons.md` §16。
 **多模态脚本模板**：
 1. MiniMax 批量用 Pitfall 2 的 8 图/请求 + JSON 输出 prompt（ingest.py `_caption_images()` 内置并行）
 2. Batches API 用 Pitfall 3 的模板
-3. Embedding 不再走 MiniMax（可选，独立配置；Pitfall 4 已废弃）
+3. Embedding 不走 MiniMax（独立配置，见 Pitfall 4）
 
 **mmx CLI 使用**（用户明确指定 mmx 时的 canonical 写法，参考 §16）：
 ```bash
@@ -221,7 +221,7 @@ mmx vision describe \
 
 ---
 
-## Pitfall 6: 历史 caption "解析失败" 大部分可通过重试修复（2026-06-17）
+## Pitfall 6: 历史 caption "解析失败" 大部分可通过重试修复
 
 **症状**：1,515/18,709 (8.1%) caption 内容为 `（图N，解析失败）`。怀疑是灰度图 VLM 兼容性问题，但 A/B 对照测试（同图灰度 vs RGB）证明 MiniMax M3 对两种模式都能正常返回。
 
@@ -253,11 +253,3 @@ mmx vision describe \
 **lesson**：旧 ingest 的 caption 失败不一定有 bug——VLM 本身在进化，直接重试往往就通过了。
 
 ---
-
-## 修订记录
-
-- **2026-06-11**：初版，基于 738 张电源篇实测
-- **2026-06-11**：删除 Pitfall 1+2（minerU 1.2B 专属）以及所有 minerU 备份内容，按用户指令"删 minerU 备份"；Pitfall 重新编号 1=缺包/2=8 张批量/3=Batches/4=embedding
-- **2026-06-11**：Pitfall 2 加前置说明（mmx CLI 不适用 batching）；决策树 mmx 段加入 50-300 / >300 张阈值；canonical mmx invocation 加 `--region cn --output text --timeout 180` 三个 flag 解释
-- **2026-06-11**：新增 Pitfall 5 minimax 国内端 endpoint 矩阵（`anthropic/v1/messages` 多图 vs `v1/coding_plan/vlm` 单图）——无源器件篇 OCR 实战沉淀，避免下次在两条 endpoint 之间再试错
-- **2026-06-17**：新增 Pitfall 6（历史 caption 解析失败可通过重试修复）；全量 pitfall 审计：P4/emob-01 格式仍旧有效；P5/x-api-key 现已支持（过时声明修正）；P5/vlm 数组拒绝仍旧有效；P6 灰度声明修正（A/B 测试证明灰度可正常处理）
