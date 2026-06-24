@@ -8,6 +8,8 @@
 4. 调用 ingest.py
 5. 记录结果
 """
+from __future__ import annotations
+
 import json
 import shutil
 import subprocess
