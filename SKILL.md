@@ -146,7 +146,7 @@ Two other external-API dependencies (not text generation):
 | Graph | `graph.py` (NashSU graph-view CLI parity; four-signal + Louvain; deterministic, no LLM) |
 | Queue | `wiki-monitor.sh`, `run-queue.sh` |
 | Embeddings | `build_embeddings.py`, `search_wiki.py` |
-| Repair | `repair_wiki.py`, `repair_stage_38.py`, `reingest_batch.py`, `sweep_reviews.py` |
+| Repair | `repair_wiki.py`, `repair_stage_3_2.py`, `reingest_batch.py`, `sweep_reviews.py` |
 
 ## Trigger this skill
 
