@@ -747,6 +747,8 @@ def list_existing_slugs(config: Config) -> list[str]:
     for f in config.wiki_dir.rglob("*.md"):
         if "REVIEW" in f.parts:
             continue
+        if "lint" in f.parts:
+            continue
         stem = f.stem
         if stem.startswith("_") or stem in anchors:
             continue
