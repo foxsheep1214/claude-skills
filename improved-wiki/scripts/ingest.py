@@ -52,7 +52,7 @@ from typing import Any
 
 # ── Imports from split stage modules (refactored 2026-06-18) ──
 from _core import (
-    Config, ConversationPending,
+    Config, ConversationPending, PrepareStopAfter,
     set_current_file as _set_current_file,
     get_current_file as _get_current_file,
     file_tag as _file_tag,
@@ -170,7 +170,17 @@ def ingest_one(
     # only short-circuits once stage_4_1 is done, so a mid-flight resume (pages
     # written but post-review stages pending) is never dropped.  _do_write in
     # turn skips the non-idempotent 3.1 write loop when `write_phase` is marked.
-    prepared = _do_prepare(raw_file, config, template_override, verbose)
+    try:
+        prepared = _do_prepare(raw_file, config, template_override, verbose)
+    except PrepareStopAfter as stop:
+        # A Stage-0..2 boundary matched --stop-after-stage inside _do_prepare.
+        # Convert the control-flow signal to a clean ok return; the caller
+        # (main) exits 0. Extraction/digest/generation artifacts are already
+        # persisted, so re-running without the flag resumes from the completed
+        # stage.
+        print(f"\n[stop-after-stage] Stage {stop.stage} complete — "
+              f"clean exit (--stop-after-stage={stop.stage})")
+        return {"status": "ok", "stopped_after": stop.stage}
     if prepared is None:
         return {"status": "skipped", "reason": "source-page-exists"}
 

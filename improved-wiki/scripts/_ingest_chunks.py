@@ -120,8 +120,20 @@ def _run_chunk_pipeline(
         _verify_stage_2_2_chunks(chunk_analyses, extracted_text)
         analysis = progress.get("analysis", {})
         raw_response = progress.get("raw_response", "")
-        file_blocks = parse_file_blocks(raw_response) if raw_response else []
         incremental_associations = progress.get("incremental_associations", {})
+        # Restore file_blocks directly from the artifact store. Do NOT re-parse
+        # raw_response: it is "\n".join(block bodies) (see _generate_all_chunks,
+        # all_responses = [b[1] for b in blocks]) \u2014 block BODIES without the
+        # ---FILE:...--- wrappers \u2014 so parse_file_blocks(raw_response) returns
+        # [] and silently drops every concept/entity page on resume. Bug
+        # 2026-06-25: this lost all 60 Hansen concept/entity blocks; only the
+        # source page was written, and 2.7/2.9 then had no concepts to work on.
+        # Prefer persisted file_blocks (list of [path, content]); fall back to
+        # parse_file_blocks ONLY if raw_response actually contains FILE markers
+        # (older artifacts) \u2014 never trust it blindly.
+        file_blocks = progress.get("file_blocks")
+        if not file_blocks:
+            file_blocks = parse_file_blocks(raw_response) if raw_response else []
         return chunk_analyses, analysis, raw_response, file_blocks, incremental_associations
 
     chunks = _stage_2_1_chunk_text(extracted_text, config.target_chars, config.chunk_overlap,

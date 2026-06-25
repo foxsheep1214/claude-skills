@@ -184,8 +184,12 @@ def _do_write(prepared: dict, verbose: bool = False) -> dict:
         source_block = ("source", "") if _src_rel in files_written_paths else None
         # Reconstruct enrich_candidates from the persisted file list so the
         # enrich batch (below) still runs over the already-written pages.
+        # files_written_paths are stored relative to wiki_root (see
+        # full_path.relative_to(config.wiki_root) below), i.e. they include the
+        # leading "wiki/" segment. Reconstruct from wiki_root (NOT wiki_dir) to
+        # avoid doubling the "wiki/" prefix (wiki_dir is already wiki_root/wiki).
         enrich_candidates = [
-            (p, config.wiki_dir / p)
+            (p, config.wiki_root / p)
             for p in files_written_paths
             if Path(p).name not in _LISTING_PAGES
         ]

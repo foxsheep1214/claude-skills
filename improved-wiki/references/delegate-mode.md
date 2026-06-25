@@ -117,8 +117,21 @@ exceed foreground terminal timeouts. Split the run:
 ~/.venv/bin/python3 scripts/ingest.py "raw/Book/Book.pdf"
 ```
 
-If the OCR phase times out mid-chunk, re-running the same command resumes from the
-last completed chunk (minerU caches per-chunk results in `.llm-wiki/extract-tmp/`).
+`--stop-after-stage 0` halts **cleanly (exit 0, `{"status":"ok","stopped_after":"0"}`)**
+after Stage 1.1–1.3 (text + image + caption) complete and **before** Stage 2.1 —
+the 2.1 global digest is not even submitted. Re-running without the flag resumes
+from the cached extraction (stage_1_x_done markers). If the OCR phase times out
+mid-chunk, re-running the same command resumes from the last completed chunk
+(minerU caches per-chunk results in `.llm-wiki/extract-tmp/`).
+
+> **Behavior note (2026-06-25 fix):** previously `--stop-after-stage 0` was
+> effectively dead on a fresh run — the stop check sat *after* `_do_prepare`,
+> which runs all of Stage 0-2 (pausing at the 2.1/2.2/2.4 LLM handoffs) before
+> that check, so the process entered 2.1 and exited 101 instead of halting after
+> OCR. The check now raises `PrepareStopAfter` at the in-prepare boundary. The
+> same fix makes `1` (after global digest) and `2` (after generation) halt
+> cleanly. `1.5`/`2.3` (inside the chunk pipeline, no clean resume marker) remain
+> best-effort — they are not intercepted on a fresh run.
 
 ### Wikilink enrichment generates many merge tasks
 
