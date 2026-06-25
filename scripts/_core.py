@@ -1064,12 +1064,20 @@ def slugify(text: str) -> str:
     """
     slug = text.lower().replace(" ", "-").replace("/", "-")
     slug = _ILLEGAL_CHARS_RE.sub("", slug)
+    # Collapse interior brackets/parentheses (ASCII + full-width) into hyphens.
+    # The illegal-char strip above leaves them, and the trailing-edge strip
+    # below only removes the LAST one, so "Total Module Power (TMP)" became the
+    # malformed "total-module-power-(tmp" (interior "(" kept, trailing ")"
+    # stripped). Converting them up front yields a clean "total-module-power-tmp".
+    slug = re.sub(r"[()\[\]{}（）【】]+", "-", slug)
     # Strip leading/trailing non-alphanumerics that survive the illegal-char
     # strip. A trailing period (e.g. "Tron Future Tech Inc." -> "tron-future-
     # tech-inc.") otherwise yields a filename the FILE-block writer silently
     # drops, causing "29/30 blocks written" with a broken wikilink target.
     slug = re.sub(r"^[^a-z0-9]+", "", slug)
     slug = re.sub(r"[^a-z0-9]+$", "", slug)
+    # Collapse any doubled hyphens introduced by the bracket substitution.
+    slug = re.sub(r"-{2,}", "-", slug)
     return slug
 
 
