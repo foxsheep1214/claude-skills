@@ -290,5 +290,48 @@ class TestStageMarkers(unittest.TestCase):
                 {"files_written": ["concepts/a.md"]})
 
 
+class TestSlugifyBracketHygiene(unittest.TestCase):
+    """slugify must not leave interior parentheses/brackets in slugs.
+
+    Regression for the 2026-06-25 Orin re-ingest finding: a concept named
+    "Total Module Power (TMP)" produced the malformed slug
+    "total-module-power-(tmp" (interior "(" kept, trailing ")" edge-stripped),
+    polluting the wiki with parenthesis filenames and fragile wikilinks.
+    """
+
+    def test_parenthetical_abbreviation_stripped(self):
+        self.assertEqual(_core.slugify("Total Module Power (TMP)"),
+                         "total-module-power-tmp")
+        self.assertEqual(_core.slugify("Jetson AGX Orin Industrial (JAOi)"),
+                         "jetson-agx-orin-industrial-jaoi")
+        self.assertEqual(
+            _core.slugify("Software thermal management (DVFS throttling)"),
+            "software-thermal-management-dvfs-throttling")
+
+    def test_no_doubled_or_edge_hyphens(self):
+        s = _core.slugify("S-Parameters (Two-Port Analysis)")
+        self.assertEqual(s, "s-parameters-two-port-analysis")
+        self.assertNotIn("--", s)
+        self.assertFalse(s.startswith("-") or s.endswith("-"))
+
+    def test_no_residual_brackets(self):
+        for name in ["A [B] C", "Foo {bar}", "热电制冷 (Peltier-TEC)",
+                     "loop gain (voltage/current injection)"]:
+            s = _core.slugify(name)
+            for ch in "()[]{}（）【】":
+                self.assertNotIn(ch, s, f"{name!r} -> {s!r} kept {ch!r}")
+
+    def test_underscore_section_slugs_unchanged(self):
+        # Underscore-bearing section pages must keep their underscores.
+        self.assertEqual(_core.slugify("01_Numeration_Systems"),
+                         "01_numeration_systems")
+
+    def test_colon_and_trailing_period_unchanged_behavior(self):
+        self.assertEqual(_core.slugify("Volume III: Physics-Based Methods"),
+                         "volume-iii-physics-based-methods")
+        self.assertEqual(_core.slugify("Tron Future Tech Inc."),
+                         "tron-future-tech-inc")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
