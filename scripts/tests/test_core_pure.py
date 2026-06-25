@@ -290,6 +290,42 @@ class TestStageMarkers(unittest.TestCase):
                 {"files_written": ["concepts/a.md"]})
 
 
+class TestListExistingSlugsExcludesLint(unittest.TestCase):
+    """list_existing_slugs must exclude wiki/lint/** placeholder stubs.
+
+    Regression for the 2026-06-25 RadarWiki finding: 230+ lint-generated stub
+    pages (orphan-lint-*, broken-link-*, no-outlinks-lint-*) under wiki/lint/
+    were rglob'd into the Stage 2.4 "Linkable pages" context, crowding out real
+    pages and leaking lint-namespace slugs into the LLM's link context.
+    """
+
+    def test_lint_dir_excluded(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            cfg = _make_config(Path(d))
+            (cfg.wiki_dir / "concepts").mkdir(parents=True)
+            (cfg.wiki_dir / "lint").mkdir(parents=True)
+            (cfg.wiki_dir / "concepts" / "real-concept.md").write_text("# x")
+            (cfg.wiki_dir / "lint" / "orphan-lint-broken-link-foo.md").write_text("# stub")
+            (cfg.wiki_dir / "lint" / "broken-link-overview.md").write_text("# stub")
+            slugs = _core.list_existing_slugs(cfg)
+            self.assertIn("real-concept", slugs)
+            self.assertNotIn("orphan-lint-broken-link-foo", slugs)
+            self.assertNotIn("broken-link-overview", slugs)
+
+    def test_review_dir_still_excluded(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            cfg = _make_config(Path(d))
+            (cfg.wiki_dir / "REVIEW").mkdir(parents=True)
+            (cfg.wiki_dir / "concepts").mkdir(parents=True)
+            (cfg.wiki_dir / "REVIEW" / "2026-01-01-suggestion.md").write_text("# r")
+            (cfg.wiki_dir / "concepts" / "ok.md").write_text("# x")
+            slugs = _core.list_existing_slugs(cfg)
+            self.assertIn("ok", slugs)
+            self.assertNotIn("2026-01-01-suggestion", slugs)
+
+
 class TestSlugifyBracketHygiene(unittest.TestCase):
     """slugify must not leave interior parentheses/brackets in slugs.
 
