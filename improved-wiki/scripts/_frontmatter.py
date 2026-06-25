@@ -142,6 +142,32 @@ LOCKED_FIELDS = ("type", "title", "created")
 BODY_SHRINK_THRESHOLD = 0.7
 
 
+def strip_embedded_images_section(body: str) -> str:
+    """Remove the auto-injected ``## Embedded Images`` section from a page body.
+
+    Stage 3.2 appends this section (a table of potentially hundreds of image
+    links) to source pages AFTER 3.1 writes them. On re-ingest, the existing
+    source page carries this section (often 50K+ chars for a 457-image book)
+    while the new (Stage 2.6) body does not. Leaving it in the merge body:
+      - inflates ``old_body`` so the merge length threshold (~0.7 * max) jumps
+        to tens of KB, while the LLM merge prompt truncates each body to 3K —
+        so the LLM output is always "below threshold" and the no-fallback
+        policy pauses the ingest (bug 2026-06-25, Hansen source page).
+      - prevents the "bodies identical" fast path from firing on a same-book
+        re-ingest (the semantic body is unchanged; only the images section
+        differs).
+
+    Stripping it before comparison/threshold makes same-book re-ingests hit
+    the identical-body fast path (no LLM merge), and 3.2 re-injects images
+    afterward regardless. The section is an artifact, not author content.
+    """
+    marker = "## Embedded Images"
+    idx = body.find(marker)
+    if idx == -1:
+        return body
+    return body[:idx].rstrip()
+
+
 def union_arrays(new_fm: dict, existing_fm: dict) -> dict:
     """Union array fields from both frontmatters. Keeps all other fields from new_fm."""
     merged = dict(new_fm)
@@ -215,8 +241,14 @@ def merge_page_content(
     array_merged = merge_array_fields_into_content(new_content, existing_content)
 
     # Fast path 3: bodies identical (only frontmatter arrays differed)
-    old_body = parse_frontmatter(existing_content)[1]
-    new_body = parse_frontmatter(array_merged)[1]
+    # Strip the auto-injected ## Embedded Images section first: it is an
+    # artifact appended by Stage 3.2 (not author content) and re-injected
+    # after this merge. Without stripping, a same-book re-ingest never hits
+    # this fast path (the existing page has the section, the new does not)
+    # and falls through to an LLM merge whose truncated output fails the
+    # inflated length threshold (bug 2026-06-25).
+    old_body = strip_embedded_images_section(parse_frontmatter(existing_content)[1])
+    new_body = strip_embedded_images_section(parse_frontmatter(array_merged)[1])
     if old_body.strip() == new_body.strip():
         return array_merged
 

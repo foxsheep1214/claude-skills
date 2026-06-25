@@ -269,6 +269,7 @@ from _frontmatter import (
     union_arrays,
     merge_page_content as _fm_merge_page_content,
     lock_fields,
+    strip_embedded_images_section,
 )
 
 # TODO: migrate callers and remove — backward-compat aliases (internal use; not exported)
@@ -286,8 +287,13 @@ def _stage_3_1_merge_page_content(existing_text: str, new_text: str, config: Con
 
     def llm_merger(prev_content: str, merged_content: str, source_file: str) -> str:
         """LLM merge callback — called by _frontmatter when bodies differ."""
-        old_body = parse_frontmatter(prev_content)[1]
-        new_body = parse_frontmatter(merged_content)[1]
+        # Strip the auto-injected ## Embedded Images section before truncating
+        # for the prompt: it can be 50K+ chars (457 images) and is re-injected
+        # by Stage 3.2 after this merge. Sending it to the LLM both wastes the
+        # 3K-per-side prompt budget on image-table rows and inflates the body
+        # the LLM tries to reproduce (bug 2026-06-25).
+        old_body = strip_embedded_images_section(parse_frontmatter(prev_content)[1])
+        new_body = strip_embedded_images_section(parse_frontmatter(merged_content)[1])
         prompt = f"""Merge two versions of a wiki page. Preserve ALL unique information from both.
 Do NOT drop claims, entities, formulas, or references from either version.
 
