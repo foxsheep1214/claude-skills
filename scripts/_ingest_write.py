@@ -96,6 +96,43 @@ def _run_post_ingest_graph(config: Config) -> None:
     except Exception as e:
         print(f"[graph] Failed ({e}) — continuing")
 
+def _reconstruct_blocks_from_disk(
+    config: Config, files_written_paths: list[str]
+) -> list[tuple[str, str]]:
+    """Read the just-written wiki pages back as (wiki_dir-relative path, content).
+
+    Post-write stages — Stage 3.4 review, go/no-go validation, and the cache
+    stage-stats — must operate on the ACTUAL pages on disk, not on the
+    in-memory ``file_blocks`` list. On a write_phase / write_loop_done resume,
+    ``file_blocks`` is legitimately ``[]`` (the prepare short-circuit returns no
+    blocks), which previously made those stages: (3.4) re-fire a redundant
+    review over "0 new pages", (validation) report spurious "0 FILE blocks /
+    source page missing" failures, and (cache) record zeroed stage stats.
+
+    Reading from disk is stable across every resume pass (the files don't change
+    once written + enriched), so a fresh pass and a resume pass produce the
+    SAME review input — the conversation-mode hash matches and the cached
+    review answer is reused instead of triggering a second LLM call.
+
+    ``files_written_paths`` are wiki_root-relative (e.g. ``wiki/concepts/x.md``);
+    the returned paths are wiki_dir-relative (e.g. ``concepts/x.md``) to match
+    the ``file_blocks`` convention every downstream consumer expects. Listing
+    pages (index/log/overview) are not in ``files_written_paths`` at this point,
+    so they are naturally excluded.
+    """
+    blocks: list[tuple[str, str]] = []
+    for p in files_written_paths:
+        full = config.wiki_root / p
+        if not full.exists():
+            continue
+        rel = p[len("wiki/"):] if p.startswith("wiki/") else p
+        try:
+            blocks.append((rel, full.read_text(encoding="utf-8")))
+        except OSError:
+            continue
+    return blocks
+
+
 def _do_write(prepared: dict, verbose: bool = False) -> dict:
     """Stage 3+ for one book.  Writes wiki files, updates cache, runs validation.
     MUST be called serially — modifies shared wiki/ state.
@@ -360,15 +397,26 @@ def _do_write(prepared: dict, verbose: bool = False) -> dict:
             "collision_items": stage_3_3_result.get("items", 0),
         })
 
+    # Reconstruct the review set from the pages actually on disk. Done on EVERY
+    # pass (not just resumes): by Stage 3.4 the pages are written AND enriched,
+    # so disk content is identical on a fresh run and on any later resume. That
+    # determinism makes the Stage 3.4 conversation-mode prompt hash stable, so a
+    # post-write resume reuses the cached review answer instead of firing a
+    # second redundant review over "0 new pages". It also feeds validation and
+    # cache stats the real on-disk pages even when file_blocks is [] on resume
+    # (fixes false go/no-go failures and zeroed cache stage-stats). Falls back
+    # to the in-memory file_blocks only if nothing was written.
+    review_blocks = _reconstruct_blocks_from_disk(config, files_written_paths) or file_blocks
+
     # Stage 3.4: Review (quality review of generated pages)
     stage_3_4_result = stage_3_4_review_suggestions(
-        file_blocks, raw_file, config, verbose=verbose)
+        review_blocks, raw_file, config, verbose=verbose)
 
     # Go/no-go validation
     go_nogo_warnings = validate_stage_outputs(
         config, raw_file, method, extracted_text,
         stage_1_2_result, stage_1_3_result,
-        file_blocks, source_path,
+        review_blocks, source_path,
     )
 
 
@@ -380,6 +428,15 @@ def _do_write(prepared: dict, verbose: bool = False) -> dict:
         rel = str(raw_file.relative_to(config.raw_root))
     except ValueError:
         rel = str(raw_file)
+    # Stage stats: derive page counts from review_blocks (the real on-disk set)
+    # and take the max against any in-memory analysis/params, so a write_phase
+    # resume — where file_blocks/analysis/query_count are empty — records the
+    # true counts instead of overwriting the cache entry with zeros.
+    _n_concepts = sum(1 for p, _ in review_blocks if "concepts/" in p)
+    _n_entities = sum(1 for p, _ in review_blocks if "entities/" in p)
+    _n_queries = sum(1 for p, _ in review_blocks if "queries/" in p)
+    _n_comps = sum(1 for p, _ in review_blocks if "comparisons/" in p)
+    _n_blocks = max(len(file_blocks), len(review_blocks))
     cache = load_cache(config)
     cache["entries"][rel] = {
         "hash": h,
@@ -388,23 +445,24 @@ def _do_write(prepared: dict, verbose: bool = False) -> dict:
         "method": method,
         "template": template_name,
         "sourceHash": h,
-        "fileBlockCount": len(file_blocks),
+        "fileBlockCount": _n_blocks,
         "stages": {
             "global_digest_keys": len(global_digest),
             "chunks_analyzed": len(chunk_analyses),
-            "file_blocks_generated": len(file_blocks),
-            "concepts_identified": analysis.get("concepts_identified", len(file_blocks)),
+            "file_blocks_generated": _n_blocks,
+            "concepts_identified": analysis.get("concepts_identified", _n_concepts),
             "concepts_core": analysis.get("concepts_core", 0),
             "concepts_supporting": analysis.get("concepts_supporting", 0),
-            "concepts_generated": analysis.get("concepts_generated", len(file_blocks)),
+            "concepts_generated": max(analysis.get("concepts_generated", 0), _n_concepts),
+            "entities_generated": max(analysis.get("entities_generated", 0), _n_entities),
             "coverage_core": analysis.get("coverage_core", 1.0),
             "coverage_supporting": analysis.get("coverage_supporting", 1.0),
             "coverage_pct": analysis.get("coverage_pct", 1.0),
             "images_extracted": stage_1_2_result.get("count", 0),
             "images_captioned": stage_1_3_result.get("captioned", 0),
             "images_injected": stage_3_2_result.get("injected", 0),
-            "queries_generated": query_count,
-            "comparisons_generated": comp_count,
+            "queries_generated": max(query_count, _n_queries),
+            "comparisons_generated": max(comp_count, _n_comps),
             "review_items": stage_3_3_result.get("items", 0),
         },
     }
