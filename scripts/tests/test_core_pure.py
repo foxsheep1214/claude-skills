@@ -61,40 +61,6 @@ class TestConversationPendingNotSwallowed(unittest.TestCase):
         self.assertEqual(caught, [True])
 
 
-class TestIsSafeIngestPath(unittest.TestCase):
-    """NashSU isSafeIngestPath parity — path traversal / garbage-slug guard."""
-
-    def test_accepts_normal_wiki_paths(self):
-        for p in ("concepts/buck-converter.md",
-                  "entities/ti-tps54560.md",
-                  "sources/book/emc-design.md"):
-            self.assertTrue(_core.is_safe_ingest_path(p), p)
-
-    def test_rejects_parent_traversal(self):
-        self.assertFalse(_core.is_safe_ingest_path("../etc/passwd.md"))
-        self.assertFalse(_core.is_safe_ingest_path("concepts/../../x.md"))
-
-    def test_rejects_absolute_and_windows_drive(self):
-        self.assertFalse(_core.is_safe_ingest_path("/etc/passwd.md"))
-        self.assertFalse(_core.is_safe_ingest_path("C:/Windows/x.md"))
-        self.assertFalse(_core.is_safe_ingest_path("\\\\server\\share.md"))
-
-    def test_rejects_windows_reserved_and_illegal_chars(self):
-        self.assertFalse(_core.is_safe_ingest_path("concepts/con.md"))
-        self.assertFalse(_core.is_safe_ingest_path("concepts/com1.md"))
-        self.assertFalse(_core.is_safe_ingest_path('concepts/a"b.md'))
-
-    def test_rejects_garbage_llm_slugs(self):
-        # Empty / null / parenthesized-only stems from malformed LLM titles.
-        for bad in ("concepts/.md", "concepts/none.md", "concepts/null.md",
-                    "concepts/(unknown).md"):
-            self.assertFalse(_core.is_safe_ingest_path(bad), bad)
-
-    def test_rejects_segment_trailing_space_or_dot(self):
-        self.assertFalse(_core.is_safe_ingest_path("concepts /x.md"))
-        self.assertFalse(_core.is_safe_ingest_path("concepts./x.md"))
-
-
 class TestParseSimpleYaml(unittest.TestCase):
     """Fallback YAML parser (used when PyYAML missing or safe_load crashes)."""
 
@@ -125,18 +91,11 @@ class TestParseYamlBlock(unittest.TestCase):
 
 
 class TestParseFileBlocks(unittest.TestCase):
-    """NashSU ---FILE:--- parsing: prefix strip, slash/hyphen correction, fences."""
-
-    def test_nashsu_format_with_wiki_prefix(self):
-        resp = "---FILE:wiki/concepts/pwm.md---\n# PWM\nbody\n---END FILE---\n"
-        blocks = _core.parse_file_blocks(resp)
-        self.assertEqual(len(blocks), 1)
-        self.assertEqual(blocks[0][0], "concepts/pwm.md")
-        self.assertIn("# PWM", blocks[0][1])
-
-    def test_missing_wiki_prefix_still_parsed(self):
-        resp = "---FILE:concepts/pwm.md---\nbody\n---END FILE---\n"
-        self.assertEqual(_core.parse_file_blocks(resp)[0][0], "concepts/pwm.md")
+    """Skill-specific ``---FILE:---`` parsing regressions NOT covered by the
+    NashSU parity suite (test_nashsu_parity.py): hyphen→slash autocorrect,
+    CJK slashes, and the legacy ``### File 1:`` header. The common cases
+    (prefix strip, fence-aware END FILE, traversal drop) live there.
+    """
 
     def test_hyphen_for_slash_autocorrect(self):
         # LLM writes concepts-pwm.md instead of concepts/pwm.md.
@@ -150,25 +109,10 @@ class TestParseFileBlocks(unittest.TestCase):
         self.assertTrue(path.startswith("concepts/"))
         self.assertNotIn("/", path[len("concepts/"):])  # slug has no bare slash
 
-    def test_end_file_inside_code_fence_does_not_close_block(self):
-        resp = (
-            "---FILE:wiki/concepts/x.md---\n"
-            "```\n---END FILE---\n```\n"   # fenced — must NOT close the block
-            "real body\n"
-            "---END FILE---\n"
-        )
-        blocks = _core.parse_file_blocks(resp)
-        self.assertEqual(len(blocks), 1)
-        self.assertIn("real body", blocks[0][1])
-
     def test_legacy_header_format(self):
         resp = "### File 1: concepts/pwm.md\n# PWM\nbody\n"
         blocks = _core.parse_file_blocks(resp)
         self.assertEqual(blocks[0][0], "concepts/pwm.md")
-
-    def test_unsafe_path_block_dropped(self):
-        resp = "---FILE:wiki/../escape.md---\nbody\n---END FILE---\n"
-        self.assertEqual(_core.parse_file_blocks(resp), [])
 
 
 class TestDetectTemplateType(unittest.TestCase):
