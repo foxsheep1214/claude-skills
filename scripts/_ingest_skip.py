@@ -14,6 +14,19 @@ def _should_stop_after(config: Config, stage: str, result: dict) -> bool:
         return True
     return False
 
+
+def _stop_after_stage(config, stage: str) -> bool:
+    """Pure check: True iff ``config.stop_after_stage == stage`` (exact match).
+
+    Used inside ``_do_prepare`` to gate Stage-0..2 boundaries so
+    ``--stop-after-stage`` actually halts at the requested point (0=extract,
+    1=global digest, 2=generation) instead of running all of Stage 0-2 before
+    the post-prepare check. ``stop_after_stage`` is set dynamically on Config
+    (ingest.py arg parsing) and may be absent on Config instances built
+    elsewhere, so read it via getattr. Does NOT print — the raise site prints.
+    """
+    return getattr(config, "stop_after_stage", None) == stage
+
 def _stage_0_2_should_skip(raw_file: Path, config: Config) -> bool:
     """Return True if the source page already exists and is reasonably complete.
 

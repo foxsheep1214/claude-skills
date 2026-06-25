@@ -117,6 +117,28 @@ class ConversationPending(BaseException):
     """
 
 
+class PrepareStopAfter(BaseException):
+    """Raised inside ``_do_prepare`` when ``--stop-after-stage`` matches a
+    Stage-0..2 boundary that has just completed (0=extract, 1=global digest,
+    2=generation). Subclasses BaseException so the broad ``except Exception``
+    in ``_do_prepare`` (which prints FAILED + traceback and re-raises) does
+    not noisy-up a clean, intentional stop. Caught in ``ingest_one`` and
+    converted to ``{"status": "ok", "stopped_after": stage}``.
+
+    Without this, ``--stop-after-stage 0`` could not actually halt after OCR:
+    the stop check lived AFTER ``_do_prepare`` returned, but ``_do_prepare``
+    runs all of Stage 0-2 (pausing at the 2.1/2.2/2.4 LLM handoffs) before
+    that check — so the flag was effectively dead on a fresh run. Raising at
+    the in-prepare boundary makes the documented "OCR-only then re-run" split
+    work. Boundaries 1.5/2.3 (inside the chunk pipeline, no clean resume
+    marker) remain best-effort and are not intercepted here.
+    """
+
+    def __init__(self, stage: str):
+        super().__init__(stage)
+        self.stage = stage
+
+
 # ── Configuration ──
 
 def load_provider_config(name: str | None = None) -> dict:

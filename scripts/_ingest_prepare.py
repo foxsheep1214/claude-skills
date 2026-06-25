@@ -8,6 +8,7 @@ from pathlib import Path
 
 from _core import (
     Config,
+    PrepareStopAfter,
     detect_domain as _detect_domain,
     detect_template_type,
     load_template,
@@ -38,7 +39,7 @@ from _stage_validators import (
     _verify_stage_2_1_digest,
     _verify_stage_2_4_file_blocks,
 )
-from _ingest_skip import _stage_0_2_should_skip
+from _ingest_skip import _stage_0_2_should_skip, _stop_after_stage
 from _ingest_chunks import _run_chunk_pipeline
 
 def _prepare_source_page(
@@ -209,10 +210,18 @@ def _do_prepare(
         # Parallel execution: 1.2→1.3 pipeline vs 2.1 global digest
         needs_digest = not is_stage_done(config, h, "stage_2_1_done")
 
+        # --stop-after-stage 0 = "text+image extract only": do NOT enter 2.1.
+        # The digest future is gated so 2.1 never starts; the stop is raised
+        # below once 1.2/1.3 are persisted. (On a re-run without the flag,
+        # needs_digest stays True and 2.1 runs normally — stage_1_x_done
+        # markers make 1.x cached.)
+        stop_after_0 = _stop_after_stage(config, "0")
+
         with ThreadPoolExecutor(max_workers=2) as executor:
             fut_images = executor.submit(_run_image_pipeline)
-            fut_digest = executor.submit(stage_2_1_global_digest, extracted_text, raw_file, config,
-                                        template_content, verbose=verbose) if needs_digest else None
+            fut_digest = None if (stop_after_0 or not needs_digest) else executor.submit(
+                stage_2_1_global_digest, extracted_text, raw_file, config,
+                template_content, verbose=verbose)
 
             stage_1_2_result, stage_1_3_result = fut_images.result()
 
@@ -229,6 +238,11 @@ def _do_prepare(
                 })
                 mark_stage_done(config, h, "stage_1_3_done")
 
+            if stop_after_0:
+                print(f"\n[stop-after-stage] Stage 0 complete — "
+                      f"clean exit (--stop-after-stage=0)")
+                raise PrepareStopAfter("0")
+
             global_digest = fut_digest.result() if fut_digest else progress.get("global_digest", {})
 
         if needs_digest:
@@ -242,6 +256,14 @@ def _do_prepare(
         else:
             print(f"  [stage 2.1] (cached) Global Digest — {len(global_digest)} keys")
             _verify_stage_2_1_digest(global_digest, raw_file)
+
+        # --stop-after-stage 1 = "global digest only": halt before the chunk
+        # pipeline. stage_2_1_done is set so a re-run without the flag caches
+        # 2.1 and proceeds to 2.2.
+        if _stop_after_stage(config, "1"):
+            print(f"\n[stop-after-stage] Stage 1 complete — "
+                  f"clean exit (--stop-after-stage=1)")
+            raise PrepareStopAfter("1")
 
         # Stage 1.3 → 2 inline (NashSU ingest.ts Step 0.6 parity): rewrite
         # ![](images/...) refs to carry their VLM caption as alt text, so the
@@ -275,8 +297,21 @@ def _do_prepare(
                 "analysis": analysis,
                 "raw_response": raw_response,
                 "incremental_associations": incremental_associations,
+                # Persist file_blocks so a stage_2_3_done cache-resume restores
+                # them directly. raw_response alone is unparseable (block bodies
+                # without ---FILE:--- wrappers) — see _run_chunk_pipeline cache
+                # path. Without this, resume lost every concept/entity block.
+                "file_blocks": file_blocks,
             })
             mark_stage_done(config, h, "stage_2_3_done")
+
+        # --stop-after-stage 2 = "concept/entity generation only": halt before
+        # the 2.5-2.9 tail. stage_2_3_done is set so a re-run caches the chunk
+        # pipeline and resumes at 2.5. ("2.0" is the same boundary.)
+        if _stop_after_stage(config, "2") or _stop_after_stage(config, "2.0"):
+            print(f"\n[stop-after-stage] Stage 2 complete — "
+                  f"clean exit (--stop-after-stage=2)")
+            raise PrepareStopAfter("2")
 
         # ── Stage 2.5–2.9A tail: dedup → source page → queries → resolve → comparisons ──
         # Cached as ONE segment under stage_2_9_done. 2.8 (LLM judge) and 2.9A
