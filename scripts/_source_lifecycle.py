@@ -83,10 +83,18 @@ def delete_source(raw_file: Path, config) -> int:
 
 
 def _cleanup_orphan_pages(wiki_root: Path, source_stem: str) -> int:
-    """Remove concept/entity pages whose ONLY source reference is this book."""
+    """Remove derived pages whose ONLY source reference is this book.
+
+    Covers concepts, entities, queries, and comparisons. Queries and in-source
+    comparisons are source-specific derived pages (Stage 2.7 / 2.9B) and were
+    previously left behind by --delete, so a re-ingest stacked stale duplicates
+    next to the freshly generated ones. Cross-domain disambiguation comparisons
+    (Stage 2.9A) carry ``sources: []`` and so never match the single-source
+    test below — they are correctly preserved.
+    """
     removed = 0
     history_dir = wiki_root / "page-history"
-    for page_type in ("concepts", "entities"):
+    for page_type in ("concepts", "entities", "queries", "comparisons"):
         page_dir = wiki_root / "wiki" / page_type
         if not page_dir.exists():
             continue
