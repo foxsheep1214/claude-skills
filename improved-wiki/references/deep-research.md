@@ -21,11 +21,12 @@ Each cycle expands the knowledge base without needing new raw source files. The 
 |--------|---------------------------|
 | Search via Tavily/SerpAPI/SearXNG/Firecrawl | WebSearch + WebFetch (Claude Code built-in + Tavily MCP) |
 | `collectResearchSources()` — multi-query, dedup, cap 20 | Claude runs 3-5 targeted queries, deduplicates |
-| `executeResearch()` — LLM synthesis with wiki index | Claude synthesizes using wiki context + search results |
+| AnyTXT local file search + LLM query rewrite | `search_local.py` — reuses `keyword_search` on wiki/ + `mdfind`/ripgrep on raw/ |
+| `executeResearch()` — LLM synthesis with wiki index | Claude synthesizes using wiki context + local + web search results |
 | Save to `wiki/queries/<slug>.md` | Write via FILE block or direct file write |
 | `autoIngest()` on research result | `ingest.py` on the new query page |
-| `queueResearch()` — concurrency queue | N/A (conversation-based, one at a time) |
-| `onTaskFinished()` → process next queued | User decides when to trigger next research |
+| `queueResearch()` — concurrency queue (maxConcurrent=3) | Serial (conversation-based, one at a time) — no concurrency needed |
+| `onTaskFinished()` → process next queued | **Auto-chain on highest-severity review item, cap 3 rounds** (Step 7) |
 
 ## Workflow
 
@@ -65,7 +66,38 @@ Claude: "反无人机雷达"这个主题比较广。你更关心哪个方面？
 
 ### Step 2: Search for Sources
 
-Claude runs **3-5 targeted search queries** (not one broad query). Each query should approach the topic from a different angle:
+#### Step 2a: Local source search (NashSU AnyTXT parity) ⭐
+
+**Before hitting the web**, search the project's own `wiki/` + `raw/` for existing
+material. Personal knowledge bases often hold un-ingested PDFs or partially-related
+pages that should ground — not be rediscovered from the web.
+
+```bash
+python3 scripts/search_local.py "<topic>" --project <project-path> --top 10
+```
+
+`search_local.py` reuses `_wiki_keyword.keyword_search` over `wiki/*.md` (curated
+knowledge, ranks higher) and searches `raw/` PDF content via macOS Spotlight
+(`mdfind`, with ripgrep fallback over text sidecars). Output format:
+
+```
+[N] **<title>** (local:wiki)
+<snippet>
+path: <absolute path>
+
+[N] **<filename>** (local:raw)
+<PDF context snippet or fallback>
+path: <absolute path>
+```
+
+These local hits are **first-class sources** — merge them with web results in Step 3.
+For `local:raw` hits, if the snippet is a PDF content match, Read the file (or
+`pdftotext` it) to extract fuller context before synthesis. Local wiki hits that
+already cover the topic may narrow the research scope (skip what the wiki already knows).
+
+#### Step 2b: Web search
+
+Claude runs **3-5 targeted web queries** (not one broad query). Each query should approach the topic from a different angle:
 
 ```
 Query 1: <topic> 技术原理 最新进展
@@ -86,13 +118,22 @@ For each promising source, fetch the full content if the snippet is insufficient
 
 ### Step 3: Synthesize
 
-Claude synthesizes the research into a structured wiki page. The prompt structure:
+Claude synthesizes the research into a structured wiki page, merging **local
+sources** (Step 2a) with **web sources** (Step 2b) into one numbered References
+list. Local wiki hits also seed the cross-referencing: if `search_local.py` found
+existing pages on related subtopics, wikilink to them instead of re-explaining.
+
+The prompt structure:
 
 ```
 Synthesize a comprehensive wiki page from the following research sources.
+Sources include both local knowledge-base hits (local:wiki / local:raw) and
+web search results — treat them uniformly, but prefer local:wiki for claims
+already established in the knowledge base.
 
 ## Cross-referencing (CRITICAL)
-- The wiki has existing pages listed in the Wiki Index below
+- The wiki has existing pages listed in the Wiki Index below AND in the local
+  search hits above
 - When you mention an entity or concept that exists in the wiki, use [[wikilink]]
 - This connects new research to existing knowledge
 
@@ -176,7 +217,8 @@ This is what turns "a saved search result" into "integrated knowledge."
 
 **研究页面**: wiki/queries/research-<topic>.md
 
-**搜索来源**: 12 个网页（去重后 8 个）
+**本地来源**: N 条 (wiki: M, raw: K)
+**网络来源**: 12 个网页（去重后 8 个）
 
 **消化的新知识** (auto-ingest 产出):
 - wiki/entities/<新实体1>.md
@@ -188,10 +230,36 @@ This is what turns "a saved search result" into "integrated knowledge."
 **后续研究方向** (review items):
 - ⚠️ <review item 1>
 - 🔗 <review item 2>
-
-你可以对这些 review item 再次运行 deep research：
-  /improved-wiki deep-research "<review item title>"
 ```
+
+### Step 7: Auto-chain (onTaskFinished — NashSU parity) ⭐
+
+NashSU's `onTaskFinished()` automatically processes the next queued research
+task when the current one completes. In conversation mode there is no persistent
+queue store, but the ingest in Step 5 produces **review items** — and the most
+actionable review item is the natural "next research topic."
+
+**Auto-chain rule** (cap at **3 chained rounds** to prevent unbounded token burn):
+
+1. After Step 5's ingest completes, read the new review items in `wiki/REVIEW/`.
+2. Pick the **highest-severity** review item whose `type` is `missing-page` or
+   `confirm` and whose title maps to a researchable topic (not a pure typo fix).
+3. Announce the chain:
+   ```
+   🔗 自动接续研究 (round 2/3): <review item title>
+   ```
+4. Run Step 1–6 again for that topic, incrementing the round counter.
+5. Stop when: round cap reached, no actionable review items, or the user
+   interrupts.
+
+**When NOT to auto-chain:**
+- Round cap (3) reached — present remaining review items to the user instead.
+- All review items are `low` severity or typo-class fixes — not worth a research round.
+- The user explicitly said "just this one" or scoped the research to a single topic.
+
+This mirrors NashSU's `onTaskFinished → processQueue` loop but adapted for
+conversation mode: the "queue" is the review-item backlog produced by each
+ingest, and the cap replaces NashSU's finite task queue.
 
 ## Trigger Phrases
 
