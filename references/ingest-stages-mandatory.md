@@ -1,13 +1,13 @@
 ---
 name: improved-wiki
-description: "强制 Ingest Stage 清单——improved-wiki 流水线的 20 个编号 Stage + 2 个前置门 + Lint + Graph 规范，每 Stage 含作用/产物/go-no-go。用于约束 ingest 时不漏步。"
+description: "强制 Ingest Stage 清单——improved-wiki 流水线的 20 个 active Stage（含 Phase 0 前置门；3.3/3.6 已删留空占位）+ Lint + Graph 规范，每 Stage 含作用/产物/go-no-go。用于约束 ingest 时不漏步。"
 tags: [ingest, mandatory, pipeline]
 related: [SKILL.md, known-issues, scanned-pdf-ocr-pipeline, image-caption-strategy]
 ---
 
 # 强制 Ingest Stage 清单
 
-improved-wiki 流水线 = **Phase 0（2 前置门）+ 19 个编号 ingest Stage + Lint + Graph**。编号与 `ingest.py` 代码一致，**编号即执行顺序**。任何 Stage 都不能跳过。Graph 是独立命令（与 Ingest/Lint 并列，不属于 ingest 管线）。
+improved-wiki 流水线 = **20 个 active Stage（含 Phase 0 前置门，跨 5 个 Phase）+ Lint + Graph**。编号与 `ingest.py` 代码一致，**编号即执行顺序**。Stage 3.3 / 3.6 已删，编号留空占位不重排。任何 active Stage 都不能跳过。Graph 是独立命令（与 Ingest/Lint 并列，不属于 ingest 管线）。
 
 > **2026-06-26 NashSU 对齐**：删除 Stage 3.3（跨域 slug 碰撞审查）与 Stage 2.9A（跨域消歧义页生成）。NashSU 没有 `domain` 字段、没有消歧义概念——同名 slug 在 Stage 3.1 写盘时走三层 page-merge（frontmatter 数组 union + LLM body merge + locked 字段），保留多源 provenance。原 2.9A（生成 `{{Term}} (disambiguation)` hub 页）与 3.1 Plan B（跨域 rename）与 merge 策略冲突，已删；3.3 本就是 3.1 的事后回声（无消费者），已删。`domain` frontmatter 字段保留，仅供 graph 分区/query 用，不再作碰撞判据。
 
