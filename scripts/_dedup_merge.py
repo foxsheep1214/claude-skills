@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""_dedup_merge.py — deterministic phase-1 dedup engine.
+"""_dedup_merge.py — deterministic title-collision merge utility.
 
 Merges wiki pages that share the same ``title:`` frontmatter (case-insensitive).
 Same-title pages are the same concept; variant slugs (-zh language suffix,
 macOS " 2" collisions, case variants, parenthesized variants, underscore slugs)
 are produced by non-deterministic LLM path generation and are redundant.
 
-This is the deterministic complement to ``_dedup`` (NashSU's LLM semantic
-dedup). It needs no LLM and runs in seconds. ``cross_source_dedup.py`` runs phase 1
-(this module) before phase 2 (LLM semantic) so obvious variant duplicates are
-cheaply removed before spending LLM calls on synonym / cross-language pairs.
+This module is NOT part of the default dedup flow (NashSU parity: pure LLM
+semantic via ``_dedup``). It is retained as a standalone utility for optional
+fast no-LLM title-collision cleanup. ``cross_source_dedup.py`` no longer
+calls it.
 
 Public entry point: ``run(wiki_root, apply=True, scope=...)`` → report dict.
 """
