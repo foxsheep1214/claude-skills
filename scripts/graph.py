@@ -18,7 +18,7 @@ an edge by itself, so two same-type pages with no other signal stay unconnected.
 
 Outputs (build mode):
   <runtime>/graph.json           — full graph (nodes/edges/communities/gaps)
-  <wiki>/knowledge-gaps.md       — isolated/bridge nodes + suggested links
+  <wiki>/REVIEW/knowledge-gaps.md — isolated/bridge nodes + suggested links
   <wiki>/clusters/cluster-NNN.md — per-community hub page
 
 Modes:
@@ -757,6 +757,7 @@ def write_knowledge_gaps(out: Path, gaps: dict, pages: dict[str, Page]) -> None:
         for u, v, w, fired in gaps["suggested_links"]:
             lines.append(f"- `{pages[u].stem}` ↔ `{pages[v].stem}` (weight {w}; {', '.join(fired)})")
         lines.append("")
+    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -857,8 +858,9 @@ def run_build(wiki_root: Path, output: Path | None, dry_run: bool) -> int:
     write_graph_html(graph_html, g, pages, communities, gaps)
     print(f"🌐 Wrote {graph_html}")
     wiki_dir = wiki_root / "wiki"
-    write_knowledge_gaps(wiki_dir / "knowledge-gaps.md", gaps, pages)
-    print(f"📄 Wrote {wiki_dir / 'knowledge-gaps.md'}")
+    gaps_md = wiki_dir / "REVIEW" / "knowledge-gaps.md"
+    write_knowledge_gaps(gaps_md, gaps, pages)
+    print(f"📄 Wrote {gaps_md}")
     write_clusters(wiki_dir / "clusters", communities, pages)
     written = sum(1 for c in communities if len(c.nodes) >= 2)
     print(f"📂 Wrote {written} cluster pages to {wiki_dir / 'clusters'}/")

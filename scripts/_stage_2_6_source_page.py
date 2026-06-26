@@ -43,6 +43,51 @@ def stage_2_6_source_page(
     if template:
         template_section = f"\n# Document Type\n<template>\n{template[:2000]}\n</template>\n"
 
+    # Source-page body shape is doctype-aware: papers are not books — they have
+    # no chapter outline, so forcing "Table of Contents / EACH chapter" distorts
+    # the structure and the "Book Summary" heading mislabels them. Branch on the
+    # detected template; keep Key Takeaways + the dedicated call (better than
+    # NashSU's free-form same-call source page) for all doctypes.
+    is_paper = template.lstrip().startswith("# digest-paper")
+    if is_paper:
+        source_kind = "paper"
+        info_header = "Paper Information (from Global Digest)"
+        body_sections = """## Paper Summary
+
+2-4 sentences: the problem the paper addresses, its approach, the main result, and who it's for.
+
+## Methodology & Results
+
+Write a focused technical summary from the digest. Cover:
+- **Problem & motivation:** the gap it addresses.
+- **Core idea / method:** the technical approach and key equations ($inline$, $$display$$).
+- **Main results:** the principal findings, with numbers where available.
+- **Comparison to prior work:** how it differs from or improves on prior methods.
+
+Papers are not books — do NOT impose a chapter-by-chapter outline. Write flowing prose with [[wikilinks]] to concepts/entities.
+
+## Key Takeaways
+
+5-10 most important claims, formulas, design rules, or conclusions. Each ONE sentence."""
+    else:
+        source_kind = "book"
+        info_header = "Book Information (from Global Digest)"
+        body_sections = """## Book Summary
+
+2-4 sentences summarizing what this book covers, its approach, and who it's for.
+
+## Table of Contents & Key Concepts
+
+For EACH chapter in the outline, write one comprehensive line:
+1. **Chapter Title:** list ALL key topics — aim for 5-15 items, comma-separated.
+
+Example:
+1. **DC-DC Converters:** buck, boost, buck-boost, CCM vs DCM, voltage-mode control, PWM, synchronous rectification.
+
+## Key Takeaways
+
+5-10 most important claims, formulas, design rules, or conclusions. Each ONE sentence."""
+
     # Issue 2 fix: constrain source-page wikilinks to a known-linkable set so the
     # LLM cannot link to a concept's own (never-written) slug when that concept
     # was ALREADY COVERED by an existing page under a different slug. Without
@@ -64,9 +109,9 @@ def stage_2_6_source_page(
 
     prompt = f"""# Role
 You are writing a **source page** for a Karpathy-pattern wiki knowledge base.
-This page will be the authoritative entry for a book in the wiki.
+This page will be the authoritative entry for a {source_kind} in the wiki.
 {template_section}{linkable_rule}
-# Book Information (from Global Digest)
+# {info_header}
 ```yaml
 {digest_str}
 ```
@@ -89,21 +134,7 @@ related: []
 sources: ["raw/{source_rel}{file_path.suffix}"]
 ---
 
-## Book Summary
-
-2-4 sentences summarizing what this book covers, its approach, and who it's for.
-
-## Table of Contents & Key Concepts
-
-For EACH chapter in the outline, write one comprehensive line:
-1. **Chapter Title:** list ALL key topics — aim for 5-15 items, comma-separated.
-
-Example:
-1. **DC-DC Converters:** buck, boost, buck-boost, CCM vs DCM, voltage-mode control, PWM, synchronous rectification.
-
-## Key Takeaways
-
-5-10 most important claims, formulas, design rules, or conclusions. Each ONE sentence.
+{body_sections}
 ---END FILE---
 
 # Instructions

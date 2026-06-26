@@ -45,7 +45,7 @@ ps aux | grep ingest.py | grep -v grep
 - `lancedb/` — vector database
 - `page-history/` — wiki page version backups (audit/rollback value; 18MB+ typical)
 - `clusters/` — graph community hub pages
-- `knowledge-gaps.md` — graph gap analysis output
+- `REVIEW/knowledge-gaps.md` — graph gap analysis output
 - `review-suggestions.json` — pending review items
 
 ### Cleanup command
