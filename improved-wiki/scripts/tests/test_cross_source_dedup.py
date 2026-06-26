@@ -195,9 +195,9 @@ class TestMainConversationHandoff(unittest.TestCase):
             _make_wiki(root)
 
             # First invocation: detect call is uncached → ConversationPending → 101.
-            # --semantic opts into phase 2 (the LLM path); without it main() only
-            # runs deterministic phase 1 and returns 0.
-            rc = ds.main(["--project", str(root), "--semantic", "--dry-run"])
+            # main() now defaults to LLM semantic (NashSU parity); --semantic kept
+            # for backward compat but is a no-op.
+            rc = ds.main(["--project", str(root), "--dry-run"])
             self.assertEqual(rc, 101)
             conv_dir = root / ".llm-wiki" / "conversation" / "dedup"
             md_files = list(conv_dir.glob("*.md"))

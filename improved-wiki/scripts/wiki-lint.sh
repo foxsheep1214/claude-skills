@@ -128,13 +128,12 @@ for arg in "$@"; do
   esac
 done
 
-# --dedup: run two-phase duplicate-page merge. Standalone action — NOT run after
-# ingest, only on explicit request. Phase 1 deterministic auto-applies (deletes
-# files); --semantic adds phase 2 (LLM). --dry-run previews without writes.
+# --dedup: run LLM semantic dedup (NashSU dedup.ts parity).
+# Standalone action — NOT run after ingest, only on explicit request.
+# Auto-applies (deletes files); --dry-run previews without writes.
 if [ "$DEDUP" = true ]; then
-  DEDUP_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/dedup_sweep.py"
+  DEDUP_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cross_source_dedup.py"
   DEDUP_ARGS=("$DEDUP_SCRIPT")
-  [ "$SEMANTIC" = true ] && DEDUP_ARGS+=(--semantic)
   for a in "$@"; do
     case "$a" in --dry-run) DEDUP_ARGS+=(--dry-run) ;; esac
   done

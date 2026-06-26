@@ -5,19 +5,15 @@ Runs OFFLINE (user-invoked, not during ingest) across the ENTIRE wiki to merge
 duplicates that accumulated across multiple ingests. Distinct from Stage 2.5
 源内去重 (intra-source dedup, `_stage_2_5_dedup.py`) which is a conservative
 inline filter on one source's blocks before write. This module is thorough:
-two-phase, backs up, writes a report, and rewrites all `[[wikilinks]]` +
-`related:` across the wiki so merges leave no broken links.
+backs up, writes a report, and rewrites all `[[wikilinks]]` + `related:`
+across the wiki so merges leave no broken links.
 
-Phase 1 (deterministic, no LLM): merge pages sharing the same ``title:``
-frontmatter — variant slugs (-zh, macOS " 2", case, parens). Seconds, no API
-key.  (``_dedup_merge.run``)
+LLM semantic detection (NashSU `dedup.ts` v0.4.25 parity): detects same-topic
+different-name slugs (synonyms, EN/中文, singular/plural, abbrev/full) via
+LLM-driven self-check, then LLM body-merge each group.
 
-Phase 2 (LLM semantic): detect same-topic different-name slugs (synonyms,
-EN/中文, singular/plural, abbrev/full) via NashSU's ``_dedup`` engine, then
-LLM body-merge each group.
-
-LLM path (phase 2): **conversation-mode only** (``make_conversation_llm_call``) —
-the same prompt-file handoff primitive ingest.py uses, so the calling agent's
+LLM path: **conversation-mode only** (``make_conversation_llm_call``) — the
+same prompt-file handoff primitive ingest.py uses, so the calling agent's
 model does the work. No direct HTTP API / ``LLM_API_KEY`` path (round v,
 2026-06-23): text generation is conversation-mode everywhere, matching ingest.
 
@@ -26,14 +22,12 @@ Dedup is NOT run after ingest — it is a standalone lint-command action
 pass ``--dry-run`` to preview.
 
 Usage:
-  python3 cross_source_dedup.py                          # phase 1, auto-apply
-  python3 cross_source_dedup.py --semantic               # phase 1 + phase 2 (LLM)
+  python3 cross_source_dedup.py                          # LLM semantic dedup, auto-apply
   python3 cross_source_dedup.py --dry-run                # preview only, no writes
-  python3 cross_source_dedup.py --deterministic-only     # skip phase 2
   python3 cross_source_dedup.py --project /path/to/wiki
   python3 cross_source_dedup.py --whitelist whitelist.json
 
-Exit codes: 0 done; 101 conversation pending (phase 2 only); 2 config error.
+Exit codes: 0 done; 101 conversation pending; 2 config error.
 """
 from __future__ import annotations
 
@@ -50,7 +44,7 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 import _dedup  # noqa: E402
-import _dedup_merge  # noqa: E402
+# _dedup_merge not imported — deterministic phase removed (NashSU parity: pure LLM semantic)
 from _core import ConversationPending  # noqa: E402
 from _paths import detect_runtime_dir  # noqa: E402
 from _llm_call import make_conversation_llm_call  # noqa: E402
@@ -82,7 +76,7 @@ def make_llm_call(project_root: Path):
     return conv, runtime
 
 
-# ── phase 2: LLM semantic dedup (existing _dedup engine) ───────────────────
+# ── LLM semantic dedup (existing _dedup engine) ───────────────────
 
 def collect_wiki_pages(wiki_dir: Path) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
@@ -149,11 +143,11 @@ def _detect_groups(summaries, pages, llm_call, not_duplicates, embedding_prefilt
         pairs = candidate_pairs(emb_pages)
         clusters = cluster_by_pairs([pg["id"] for pg in emb_pages], pairs)
     except DuplicatePrefilterError as ex:
-        print(f"[dedup] phase 2: embedding prefilter failed ({ex}); "
+        print(f"[dedup] embedding prefilter failed ({ex}); "
               f"falling back to full scan.")
         return _dedup.detect_duplicate_groups(summaries, llm_call, not_duplicates=not_duplicates)
 
-    print(f"[dedup] phase 2: embedding prefilter → {len(pairs)} candidate pair(s), "
+    print(f"[dedup] embedding prefilter → {len(pairs)} candidate pair(s), "
           f"{len(clusters)} cluster(s); running LLM detector per cluster.")
     groups: list[dict] = []
     for cluster in clusters:
@@ -175,15 +169,15 @@ def run_phase2(project_root, llm_call, *, apply=True, whitelist_pairs=None,
     pages = collect_wiki_pages(wiki_dir)
     summaries = [s for s in (_dedup.extract_entity_summary(p, c) for p, c in pages) if s is not None]
     if len(summaries) < 2:
-        print("[dedup] phase 2: fewer than 2 summarizable pages; skipping.")
+        print("[dedup] fewer than 2 summarizable pages; skipping.")
         return {"groups": 0, "applied": []}
 
     not_duplicates = list(whitelist_pairs or [])
     not_duplicates += load_whitelist(runtime / "dedup-whitelist.json")
 
-    print(f"[dedup] phase 2: scanning {len(summaries)} pages for semantic duplicates ...")
+    print(f"[dedup] scanning {len(summaries)} pages for semantic duplicates ...")
     groups = _detect_groups(summaries, pages, llm_call, not_duplicates, embedding_prefilter)
-    print(f"[dedup] phase 2: detected {len(groups)} duplicate group(s).")
+    print(f"[dedup] detected {len(groups)} duplicate group(s).")
     for i, g in enumerate(groups, 1):
         print(f"  group {i}: {g['slugs']}  ({g['confidence']}) — {g['reason']}")
 
@@ -194,7 +188,7 @@ def run_phase2(project_root, llm_call, *, apply=True, whitelist_pairs=None,
     if apply and not apply_low_confidence:
         skipped = [g for g in groups if g.get("confidence") == "low"]
         if skipped:
-            print(f"[dedup] phase 2: skipping {len(skipped)} low-confidence group(s) "
+            print(f"[dedup] skipping {len(skipped)} low-confidence group(s) "
                   f"(re-run with --apply-low-confidence to merge them).")
 
     applied: list[dict] = []
@@ -224,7 +218,7 @@ def run_phase2(project_root, llm_call, *, apply=True, whitelist_pairs=None,
             removed = {_slug_from_path(p) for p in result.pages_to_delete}
             applied.append({"canonical": canonical_slug, "merged_away": sorted(removed),
                             "rewrites": [r["path"] for r in result.rewrites]})
-            print(f"[dedup] phase 2: merged → {canonical_slug} "
+            print(f"[dedup] merged → {canonical_slug} "
                   f"(removed {sorted(removed)}, {len(result.rewrites)} rewrite(s))")
 
     _write_report(runtime / "dedup-report.json", {
@@ -266,12 +260,9 @@ def _write_report(path: Path, report: dict) -> None:
 # ── main ───────────────────────────────────────────────────────────────────
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Two-phase dedup. Auto-applies by default.")
+    parser = argparse.ArgumentParser(description="LLM semantic dedup (NashSU dedup.ts parity). Auto-applies by default.")
     parser.add_argument("--project", default=None,
                         help="Wiki project root (default: IMPROVED_WIKI_ROOT or cwd)")
-    parser.add_argument("--semantic", action="store_true", help="Also run phase 2 (LLM semantic)")
-    parser.add_argument("--deterministic-only", action="store_true",
-                        help="Only run phase 1 (skip phase 2 even if --semantic)")
     parser.add_argument("--dry-run", action="store_true", help="Preview only — no writes")
     parser.add_argument("--apply-low-confidence", action="store_true",
                         help="Also merge low-confidence groups (skipped by default)")
@@ -288,29 +279,18 @@ def main(argv: list[str] | None = None) -> int:
 
     apply = not args.dry_run
 
-    print(f"[dedup] phase 1: deterministic title-collision merge ({'APPLY' if apply else 'DRY-RUN'})")
-    r1 = _dedup_merge.run(project_root, apply=apply)
-    print(f"[dedup] phase 1: {r1['groups']} groups, {r1['redundant']} redundant")
-    if apply:
-        print(f"[dedup] phase 1: deleted {r1['deleted']}, rewrote {r1['rewrites']} refs "
-              f"across {r1['files_touched']} files")
-    elif r1["groups"]:
-        for s in r1["samples"][:15]:
-            print(f"  keep {s['keep']:55s} ← {', '.join(s['merge'])}")
-
-    if args.semantic and not args.deterministic_only:
-        llm_call, _ = make_llm_call(project_root)
-        whitelist_pairs = load_whitelist(*[Path(p) for p in args.whitelist])
-        try:
-            run_phase2(project_root, llm_call, apply=apply,
-                       whitelist_pairs=whitelist_pairs,
-                       today=lambda: date.today().isoformat(),
-                       apply_low_confidence=args.apply_low_confidence,
-                       embedding_prefilter=args.embedding_prefilter)
-        except ConversationPending:
-            print("[dedup] phase 2: conversation handoff — answer prompt under "
-                  "<runtime>/conversation/dedup/ and re-invoke.", file=sys.stderr)
-            return 101
+    llm_call, _ = make_llm_call(project_root)
+    whitelist_pairs = load_whitelist(*[Path(p) for p in args.whitelist])
+    try:
+        run_phase2(project_root, llm_call, apply=apply,
+                   whitelist_pairs=whitelist_pairs,
+                   today=lambda: date.today().isoformat(),
+                   apply_low_confidence=args.apply_low_confidence,
+                   embedding_prefilter=args.embedding_prefilter)
+    except ConversationPending:
+        print("[dedup] conversation handoff — answer prompt under "
+              "<runtime>/conversation/dedup/ and re-invoke.", file=sys.stderr)
+        return 101
 
     print("[dedup] done.")
     return 0
