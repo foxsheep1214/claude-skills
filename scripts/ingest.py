@@ -128,6 +128,7 @@ from _conversation_router import (  # noqa: E402,F401  (import side-effect: regi
     call_anthropic_protocol,
     _load_task_manifest,
 )
+from _context_probe import resolve_context  # noqa: E402  (live context-window probe)
 # Wire up progress hook for LLM API calls
 set_progress_hook(_llm_call_progress)
 
@@ -360,6 +361,14 @@ def batch_ingest(
 
 # ---------- CLI ----------
 
+def _probe_and_apply_context(config) -> None:
+    """Probe the live conversation model's context window (or reuse cache) and
+    apply it to ``config``. Raises ``ConversationPending`` on the first pass
+    (normal handoff); the caller returns 101 so the agent answers and re-invokes.
+    Delete-only paths never call this."""
+    config.apply_context(resolve_context(config))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Ingest source files into the wiki (NashSU-style multi-stage)")
     parser.add_argument("file", nargs="*", help="Path(s) to raw source file(s). Multiple files enable batch mode. "
@@ -411,6 +420,10 @@ def main() -> int:
         config = Config.from_env()
         config.enrich_enabled = args.enrich_wikilinks and not args.no_enrich
         config.runtime_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            _probe_and_apply_context(config)
+        except ConversationPending:
+            return 101
         max_conc = args.parallel if args.parallel > 0 else BATCH_MAX_CONCURRENT
         ingest_watch(
             config,
@@ -439,6 +452,10 @@ def main() -> int:
     config = Config.from_env()
     config.enrich_enabled = args.enrich_wikilinks and not args.no_enrich
     config.stop_after_stage = args.stop_after_stage
+    try:
+        _probe_and_apply_context(config)
+    except ConversationPending:
+        return 101
 
     raw_files = []
     for f in args.file:

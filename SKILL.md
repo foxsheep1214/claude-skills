@@ -43,6 +43,8 @@ Text generation has exactly one path, routed by
 There is no direct-API text-gen path: this skill only runs from a CLI session
 with an agent present, so a separate paid text-gen API key has no use case.
 
+**Context-window probe (2026-06-27)**: at ingest start, one conversation round-trip asks the live model for its context window (`_context_probe.resolve_context`); the result drives all chunk/budget sizing via `Config.apply_context`, replacing the former `LLM_CONTEXT_SIZE` env convention. Budgets now adapt to whatever model the agent runs this session (GLM-5.2 1M → 192K-token chunks; a 200K model → 66K). The probed value is cached per-model in `.llm-wiki/probed-context.json` (7-day TTL) so resumes and repeat ingests pay zero round-trips; a model change triggers exactly one probe. **No fallback**: an implausible probe response (outside [8K, 10M]) pauses the ingest rather than guessing. See `references/context-probe.md`.
+
 Two other external-API dependencies (not text generation):
 - **Stage 1.3 image captioning** → MiniMax VLM (`anthropic/v1/messages`, one image per call with a context-aware prompt — NashSU `captionImage` parity). This is the only MiniMax dependency; it needs `MINIMAX_CN_API_KEY` / `LLM_API_KEY` for the caption endpoint only. **No fallback**: if the key is missing or caption calls fail consecutively after retries, the ingest **pauses** (raises) — it never silently degrades to OCR figure-text (policy 2026-06-24).
 - **Stage 3.7 embeddings** → mandatory (2026-06-21): defaults to local Ollama bge-m3 (`http://127.0.0.1:11434/v1`), no env var export required. **No fallback**: if Ollama isn't running, the model isn't pulled, or `lancedb` isn't installed, the ingest **pauses** (raises) — it never silently continues with keyword-only retrieval (policy 2026-06-24). Not routed through MiniMax.
@@ -74,6 +76,7 @@ Two other external-API dependencies (not text generation):
 - `references/save-chat-to-wiki.md` ⭐ — save any conversation as wiki page + auto-ingest (NashSU chat-save-to-wiki.ts parity)
 - `references/review-sweep.md` ⭐ — auto-resolve review items satisfied by new ingests (NashSU sweep-reviews.ts parity)
 - `references/conversation-mode.md` — **conversation mode** (the only mode): the current conversation does each text-gen LLM step with its own model (serial, prompt-file handoff)
+- `references/context-probe.md` — live context-window probe at ingest start (replaces `LLM_CONTEXT_SIZE` env); per-model cache, sanity gate, no-silent-fallback
 - `references/delegate-mode.md` — **agent invocation** via `ingest.py`: how a calling agent (Claude Code/Hermes) answers each LLM step. Includes operational pitfalls: venv Python requirement, OCR timeout handling, wikilink merge task batching, re-ingest `--delete` pattern.
 - `references/conversation-mode-agent-workflow.md` — concrete per-step prompt-file cheat sheet for a single-book ingest (Stage 2.1/2.2/2.4/2.7/2.9 prompt patterns, merge-loop subagent dispatch, reading extracted text). Companion to `delegate-mode.md` (concept) with the hands-on detail.
 - `references/nashsu-search-architecture.md` — NashSU 源码实证：graph-relevance.ts（纯确定性 4 信号）+ search.rs（hybrid keyword+vector+RRF，远程 embedding API，无本地模型）。澄清 "NashSU parity" 在搜索侧的实际覆盖范围

@@ -229,9 +229,11 @@ def load_caption_provider() -> dict:
 
 
 # ── NashSU-aligned context budget (ported from llm_wiki/src/lib/context-budget.ts + ingest.ts) ──
-# Set LLM_CONTEXT_SIZE to your model's context window (in chars). All budgets derive from this.
-# DeepSeek V4 Pro: LLM_CONTEXT_SIZE=1000000 (1M tokens ≈ chars for budget math)
-# If unset, falls back to model-name pattern matching + hardcoded defaults.
+# Context window is probed from the live conversation model at ingest start
+# (see _context_probe.resolve_context → Config.apply_context) and cached per-model.
+# The LLM_CONTEXT_SIZE env convention has been removed; budgets adapt to whatever
+# model the agent runs this session. from_env leaves a conservative placeholder
+# that apply_context overwrites before any LLM stage runs.
 _CONTEXT_SIZE_DEFAULT = 200_000
 _RESPONSE_RESERVE_FRAC = 0.15
 _STABLE_RESERVE_MIN = 12_000
@@ -249,9 +251,12 @@ _TARGET_CHARS_FRAC = 0.55
 # _stage_2_analyze._stage_2_1_chunk_text). target_chars is now only a hard char
 # *ceiling*, sized so even token-sparse Latin text can reach the token budget.
 _TARGET_TOKENS_MIN = 12_000
-_TARGET_TOKENS_FRAC = 0.45          # share of the per-source budget spent per chunk
-_TARGET_TOKENS_CEIL_FRAC = 0.33     # (A) quality ceiling scales with the context window...
-_TARGET_TOKENS_HARD_CEIL = 64_000   # ...but never exceeds this — keeps one analysis round-trip sharp
+_TARGET_TOKENS_CEIL_FRAC = 0.33     # (A) chunk size scales with the probed context window...
+_TARGET_TOKENS_HARD_CEIL = 192_000  # (B) ...but never exceeds this. Raised from 64K (2026-06-27):
+                                    # with live context probing, large-context models now get
+                                    # proportionally larger chunks (ceil = context × 0.33), cutting
+                                    # chunk count / round-trips. Small-context models are unaffected
+                                    # — the 0.33 scaling + 12K floor still govern below the cap.
 _MAX_CHARS_PER_TOKEN = 4            # char ceiling = target_tokens × this (Latin ≈ 4 chars/token)
 _TARGET_CHARS_HARD_CEIL = 320_000
 
@@ -259,16 +264,18 @@ _TARGET_CHARS_HARD_CEIL = 320_000
 def _compute_chunk_targets(source_budget: int, context_size: int) -> tuple[int, int]:
     """Return ``(target_tokens, target_chars_ceiling)``.
 
-    ``target_tokens`` — soft per-chunk budget in TOKENS. Scales with the
-    per-source budget, capped by a quality ceiling that itself scales with the
-    model context window (A) but never exceeds ``_TARGET_TOKENS_HARD_CEIL`` (B).
+    ``target_tokens`` — per-chunk budget in TOKENS. Scales with the probed
+    model context window (×0.33) and is capped by ``_TARGET_TOKENS_HARD_CEIL``.
+    Decoupled from ``source_budget`` (2026-06-27): each chunk is one analysis
+    round-trip whose safe size is bounded by the context window, not the
+    per-source digest budget. ``source_budget`` is retained in the signature for
+    call-site compatibility and still governs the Stage 2.1 digest size.
     ``target_chars`` — hard per-chunk char ceiling, large enough that even
     token-sparse text can spend its full token budget.
     """
     tokens_ceil = min(_TARGET_TOKENS_HARD_CEIL,
                       max(_TARGET_TOKENS_MIN, int(context_size * _TARGET_TOKENS_CEIL_FRAC)))
-    target_tokens = max(_TARGET_TOKENS_MIN,
-                        min(int(source_budget * _TARGET_TOKENS_FRAC), tokens_ceil))
+    target_tokens = tokens_ceil
     target_chars = min(_TARGET_CHARS_HARD_CEIL, target_tokens * _MAX_CHARS_PER_TOKEN)
     return target_tokens, target_chars
 
@@ -305,30 +312,14 @@ class Config:
         caption = load_caption_provider()
         runtime_dir = detect_runtime_dir(wiki_root)
 
-        # ── NashSU-aligned context budget ──
-        cs_env = os.environ.get("LLM_CONTEXT_SIZE")
-        context_size = int(cs_env) if cs_env else None
-
-        if context_size:
-            # sourceBudget = maxCtx - responseReserve - stableReserve - instructionReserve
-            # clamped to [SOURCE_BUDGET_MIN, min(SOURCE_BUDGET_MAX, maxCtx * 0.6)]
-            cs = context_size
-            response_reserve = int(cs * _RESPONSE_RESERVE_FRAC)
-            stable_reserve = min(int(cs * _STABLE_RESERVE_FRAC), max(_STABLE_RESERVE_MIN, 50_000))
-            instruction_reserve = max(_INSTRUCTION_RESERVE_MIN, int(cs * _INSTRUCTION_RESERVE_FRAC))
-            available = cs - response_reserve - stable_reserve - instruction_reserve
-            upper = min(_SOURCE_BUDGET_MAX, max(_SOURCE_BUDGET_MIN, int(cs * _SOURCE_BUDGET_FRAC)))
-            source_budget = max(_SOURCE_BUDGET_MIN, min(available, upper))
-
-            target_tokens, target_chars = _compute_chunk_targets(source_budget, context_size)
-
-            print(f"[config] LLM_CONTEXT_SIZE={context_size:,} → "
-                  f"source_budget={source_budget:,} target_tokens={target_tokens:,} "
-                  f"target_chars≤{target_chars:,} (token-first)")
-        else:
-            # Backward-compatible defaults (no LLM_CONTEXT_SIZE set)
-            source_budget = 200_000
-            target_tokens, target_chars = _compute_chunk_targets(source_budget, _CONTEXT_SIZE_DEFAULT)
+        # ── Context budget: pre-probe placeholder only ──
+        # The real context window is probed from the live conversation model at
+        # ingest start (see _context_probe.resolve_context → apply_context). This
+        # placeholder is overwritten before any LLM stage runs; delete-only paths
+        # never probe and simply use the conservative default.
+        context_size = None
+        source_budget = _CONTEXT_SIZE_DEFAULT
+        target_tokens, target_chars = _compute_chunk_targets(source_budget, _CONTEXT_SIZE_DEFAULT)
 
         return cls(
             wiki_root=wiki_root,
@@ -353,6 +344,26 @@ class Config:
             max_tokens=16384,
             context_size=context_size,
         )
+
+    def apply_context(self, context_size: int) -> None:
+        """Apply a live-probed context window and recompute derived budgets.
+
+        Replaces the pre-probe placeholder set in ``from_env``. Called once at
+        ingest start by ``_context_probe.resolve_context`` (after the model's
+        context window is probed or read from cache). Idempotent.
+        """
+        self.context_size = context_size
+        cs = context_size
+        response_reserve = int(cs * _RESPONSE_RESERVE_FRAC)
+        stable_reserve = min(int(cs * _STABLE_RESERVE_FRAC), max(_STABLE_RESERVE_MIN, 50_000))
+        instruction_reserve = max(_INSTRUCTION_RESERVE_MIN, int(cs * _INSTRUCTION_RESERVE_FRAC))
+        available = cs - response_reserve - stable_reserve - instruction_reserve
+        upper = min(_SOURCE_BUDGET_MAX, max(_SOURCE_BUDGET_MIN, int(cs * _SOURCE_BUDGET_FRAC)))
+        self.source_budget = max(_SOURCE_BUDGET_MIN, min(available, upper))
+        self.target_tokens, self.target_chars = _compute_chunk_targets(self.source_budget, context_size)
+        print(f"[config] probed context={context_size:,} → "
+              f"source_budget={self.source_budget:,} target_tokens={self.target_tokens:,} "
+              f"target_chars≤{self.target_chars:,}")
 
     def compute_source_budget(self, stable_length: int = 50_000) -> int:
         """NashSU-aligned: per-source budget from context window."""
