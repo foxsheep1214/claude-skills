@@ -134,7 +134,7 @@ set_progress_hook(_llm_call_progress)
 # ── Ingest orchestration helpers (refactored 2026-06-24: extracted from ingest.py) ──
 from _ingest_skip import _should_stop_after
 from _ingest_prepare import _do_prepare
-from _ingest_write import _do_write, _run_post_ingest_graph, cleanup_resolved_reviews
+from _ingest_write import _do_write, cleanup_resolved_reviews
 
 # ═════════════════════════════════════════════════════════
 # Main pipeline — ingest_one, batch, queue, CLI
@@ -154,8 +154,9 @@ def _finalize_book(raw_file: Path, config: Config,
     Embeddings stay mandatory / no-fallback here too: a missing Ollama stack
     raises (pauses this book, and in batch propagates to abort the run) rather
     than silently degrading to keyword-only retrieval (policy 2026-06-24).
-    Graph rebuild is intentionally NOT here — it is staleness-guarded and run
-    per-book by ingest_one and once at end-of-batch by batch_ingest.
+    Graph rebuild is intentionally NOT here and never triggered by ingest —
+    the graph is a separate explicit command (NashSU-aligned: NashSU has no
+    post-ingest graph rebuild). Run ``python3 scripts/graph.py`` manually.
     """
     stage_3_7_embed_new_pages(config, files_written)
     stage_4_1_validate_ingest(config, raw_file)
@@ -233,8 +234,6 @@ def ingest_one(
 
     files_written = result["files_written"]
 
-    # ── Post-ingest ──
-    _run_post_ingest_graph(config)
     # Embeddings + validation + stage_4_1 marker (shared with batch path).
     _finalize_book(raw_file, config, files_written, h)
 
@@ -356,10 +355,6 @@ def batch_ingest(
     print(f"\n{'='*60}")
     print(f"Batch complete: {ok}/{len(results)} books processed successfully")
     print(f"{'='*60}")
-
-    # Staleness-guarded: rebuild graph after batch (no-op if <30min since last rebuild)
-    if ok > 0:
-        _run_post_ingest_graph(config)
 
     return results
 
