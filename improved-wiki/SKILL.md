@@ -7,7 +7,7 @@ related_skills: [karpathy-llm-wiki, llm-wiki-local]
 
 # improved-wiki
 
-Karpathy LLM-Wiki pattern + NashSU v0.4.25 pipeline. Three peer commands: **Ingest** (18 active Stages across 5 Phases — Phase 0 included: 0 pre-processing → 1 extraction → 2 analysis/generation → 3 write & enrich → 4 validation), **Lint** (structural + semantic), **Graph** (knowledge graph — separate from lint). Graph auto-triggers post-ingest behind `AUTO_BUILD_GRAPH=1`.
+Karpathy LLM-Wiki pattern + NashSU v0.4.25 pipeline. Three peer commands: **Ingest** (18 active Stages across 5 Phases — Phase 0 included: 0 pre-processing → 1 extraction → 2 analysis/generation → 3 write & enrich → 4 validation), **Lint** (structural + semantic), **Graph** (knowledge graph — separate from lint, run explicitly; never auto-triggered by ingest/lint, NashSU-aligned).
 
 ```
 Phase 0: [0.1 raw-naming] → [0.2 source dedup]  (pre-processing gates)
@@ -25,7 +25,7 @@ Parallel (I/O only): 1.2→1.3∥2.1 image-pipeline∥digest + 1.3 per-image cap
 
 Lint:  [structural] → [semantic (LLM, conversation mode)]
 Graph: [Build Graph (4-signal)] → [Louvain communities] → [cohesion + gaps + clusters]
-       (separate command from lint; post-ingest auto-triggered via AUTO_BUILD_GRAPH=1, 30min staleness guard; deterministic — no LLM)
+       (separate command from lint; run explicitly via `python3 scripts/graph.py` — never auto-triggered by ingest/lint, NashSU-aligned; deterministic — no LLM)
 ```
 
 ## LLM execution model
@@ -112,7 +112,7 @@ Two other external-API dependencies (not text generation):
 - **Save chat to wiki** ⭐ (NashSU v0.4.25 parity): say "保存到 wiki" after any conversation — captures insight as wiki page with `origin: chat-save` + auto-ingests. Conversations become permanent knowledge. See `references/save-chat-to-wiki.md`.
 - **Review sweep** ⭐ (NashSU v0.4.25 parity): `/improved-wiki sweep-reviews` — scans pending review items, auto-resolves those satisfied by subsequent ingests (rule-based + LLM semantic judge). Keeps review backlog actionable. See `references/review-sweep.md`.
 - **Batch ingest**: `python3 scripts/ingest.py f1.pdf f2.pdf ...` — parallel Stage 1.1-2 per book, serial Stage 3.1+ write
-- **Graph** (separate command, peer of Ingest/Lint): `python3 scripts/graph.py` builds the knowledge graph (NashSU graph-view CLI parity — four-signal weighted graph + Louvain communities + cohesion + gaps + cluster hubs). Deterministic, no LLM. `AUTO_BUILD_GRAPH=1` auto-rebuilds after ingest (30-min staleness guard). `--mode query --slug <s>` for read-only per-page wikilink suggestions (manual; not wired into any ingest stage).
+- **Graph** (separate command, peer of Ingest/Lint): `python3 scripts/graph.py` builds the knowledge graph (NashSU graph-view CLI parity — four-signal weighted graph + Louvain communities + cohesion + gaps + cluster hubs). Deterministic, no LLM. Run explicitly only — ingest/lint never auto-trigger it (NashSU-aligned: NashSU has no post-ingest graph rebuild). `--mode query --slug <s>` for read-only per-page wikilink suggestions (manual; not wired into any ingest stage).
 - **Unified barrier-free pipeline**: Stage 2.2 + 2.4 merged — analyze chunk → generate pages → next chunk. Works for all chunk counts (1 to N). Accumulating context + per-chunk checkpoint for crash recovery. Legacy multi-round synthesis retired.
 - **Parallel I/O**: caption ∥ digest (Stage 1.3∥2.1), per-image caption dispatch (×12 workers). Pure I/O-bound parallelism only — no quality impact.
 - **Heading path tracking** (NashSU parity): each chunk analysis prompt includes full heading hierarchy (`Chapter 3 > Section 3.2 > Subsec 3.2.1`)

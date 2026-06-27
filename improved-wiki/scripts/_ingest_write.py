@@ -1,9 +1,7 @@
 """_ingest_write.py — Stage 3+ file writing + post-ingest (extracted from ingest.py)."""
 from __future__ import annotations
 
-import os
 import re
-import sys
 import time
 from pathlib import Path
 
@@ -87,45 +85,6 @@ def cleanup_resolved_reviews(config: Config) -> int:
         print(f"[cleanup] {removed} resolved review page(s) deleted")
 
     return removed
-
-def _run_post_ingest_graph(config: Config) -> None:
-    """Rebuild knowledge graph after ingest (once per session, stale-guarded).
-
-    Controlled by AUTO_BUILD_GRAPH=1. The graph needs the full wiki state,
-    but rebuilding after every book in a batch would be wasteful. Uses a
-    staleness guard: skips if graph.json was rebuilt < 30 minutes ago.
-
-    Mirrors NashSU's desktop app: the graph auto-refreshes when you view it.
-    """
-    if os.environ.get("AUTO_BUILD_GRAPH") != "1":
-        return
-    graph_script = Path(__file__).parent / "graph.py"
-    if not graph_script.exists():
-        print("[graph] graph.py not found — skipping")
-        return
-
-    # Staleness guard: don't rebuild more than once per 30 minutes
-    graph_json = config.runtime_dir / "graph.json"
-    if graph_json.exists():
-        age_min = (time.time() - graph_json.stat().st_mtime) / 60
-        if age_min < 30:
-            print(f"[graph] Skipped — graph rebuilt {age_min:.0f}m ago (staleness guard)")
-            return
-
-    import subprocess
-    print("[graph] Rebuilding knowledge graph...")
-    try:
-        result = subprocess.run(
-            [sys.executable, str(graph_script)],
-            cwd=config.wiki_root, capture_output=True, text=True, timeout=600,
-        )
-        if result.returncode == 0:
-            for line in result.stdout.strip().split("\n")[-3:]:
-                print(f"[graph] {line.strip()}")
-        else:
-            print(f"[graph] Failed ({result.returncode}): {result.stderr[:200]}")
-    except Exception as e:
-        print(f"[graph] Failed ({e}) — continuing")
 
 def _reconstruct_blocks_from_disk(
     config: Config, files_written_paths: list[str]

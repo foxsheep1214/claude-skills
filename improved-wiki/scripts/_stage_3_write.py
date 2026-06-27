@@ -418,6 +418,51 @@ def stage_3_1_write_wiki_file(path: Path, content: str, config: Config | None = 
     tmp.rename(path)
 
 
+# Category subdir → bilingual index.md section header (NashSU index parity).
+_INDEX_CATEGORIES: list[tuple[str, str]] = [
+    ("sources", "Sources（来源）"),
+    ("concepts", "Concepts（概念）"),
+    ("entities", "Entities（实体）"),
+    ("queries", "Queries（查询）"),
+    ("comparisons", "Comparisons（对比）"),
+    ("synthesis", "Synthesis（综合）"),
+    ("findings", "Findings（发现）"),
+    ("thesis", "Thesis（论题）"),
+]
+
+
+def _scan_wiki_inventory(wiki_dir: Path) -> dict[str, list[tuple[str, str]]]:
+    """Scan category subdirs for (stem, title) — authoritative on-disk page list.
+
+    Used by Stage 3.5 index.md rewrite so the LLM gets the real page inventory
+    instead of trusting the current index text (which drifts: only Sources was
+    ever appended, Concepts/Entities/etc. went stale)."""
+    inventory: dict[str, list[tuple[str, str]]] = {}
+    for subdir, _header in _INDEX_CATEGORIES:
+        d = wiki_dir / subdir
+        if not d.is_dir():
+            continue
+        pages: list[tuple[str, str]] = []
+        for f in sorted(d.rglob("*.md")):
+            try:
+                content = f.read_text(encoding="utf-8", errors="ignore")
+                fm, _ = parse_frontmatter(content)
+                title = ""
+                if isinstance(fm, dict):
+                    t = fm.get("title")
+                    if isinstance(t, str):
+                        title = t.strip().strip('"').strip("'")
+                if not title:
+                    m = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
+                    title = m.group(1).strip() if m else f.stem
+                pages.append((f.stem, title))
+            except Exception:
+                pages.append((f.stem, f.stem))
+        if pages:
+            inventory[subdir] = pages
+    return inventory
+
+
 def stage_3_5_aggregate_repair(
     source_path: Path,
     raw_file: Path,
@@ -426,7 +471,9 @@ def stage_3_5_aggregate_repair(
     extract_method: str,
     config: Config,
 ) -> list[str]:
-    """NashSU Stage 2.6: update index.md (append), log.md (append), overview.md (LLM rewrite)."""
+    """NashSU Stage 2.6: log.md (deterministic append), index.md (LLM whole-page
+    rewrite fed by on-disk inventory, append fallback), overview.md (LLM rewrite
+    with structural validation + compress mode, keep-current fallback)."""
     files_written: list[str] = []
 
     # log.md
@@ -448,62 +495,148 @@ def stage_3_5_aggregate_repair(
     stage_3_1_write_wiki_file(log_path, log_text, config)
     files_written.append(str(log_path.relative_to(config.wiki_root)))
 
-    # index.md — append link to new source page
+    # index.md — LLM whole-page rewrite (NashSU parity, option A: every ingest).
+    # Fed by an authoritative on-disk page inventory so ALL categories stay in
+    # sync, not just Sources. Deterministic single-line append is the hard
+    # fallback when the LLM call fails or the index exceeds the size cap.
     index_path = config.wiki_dir / "index.md"
-    if index_path.exists():
-        index_text = index_path.read_text(encoding="utf-8")
+    current_index = index_path.read_text(encoding="utf-8") if index_path.exists() else ""
+
+    def _index_append_fallback() -> None:
+        if not current_index:
+            stage_3_1_write_wiki_file(
+                index_path, "# Index\n\n## Sources（来源）\n\n", config)
+            return
+        new_link = f"- [[{source_path.stem}]]\n"
+        if "## Sources" in current_index and new_link not in current_index:
+            updated = current_index.replace("## Sources", f"## Sources\n\n{new_link}", 1)
+            stage_3_1_write_wiki_file(index_path, updated, config)
+            files_written.append(str(index_path.relative_to(config.wiki_root)))
+
+    INDEX_MAX_CHARS = max(4096, int(config.source_budget * 0.12))
+    # LLM whole-page rewrite can only produce ~250 bullets within the 4096-token
+    # output cap. For larger wikis the LLM cannot emit a complete index, so we
+    # fall back to the deterministic append (which at least keeps Sources fresh).
+    # A deterministic full-rebuild for large wikis is future work.
+    INDEX_REWRITE_MAX_PAGES = 250
+    inventory = _scan_wiki_inventory(config.wiki_dir)
+    total_pages = sum(len(v) for v in inventory.values())
+    skip_reason = ""
+    if len(current_index) > INDEX_MAX_CHARS:
+        skip_reason = f"index too large ({len(current_index)} > {INDEX_MAX_CHARS})"
+    elif total_pages > INDEX_REWRITE_MAX_PAGES:
+        skip_reason = (f"wiki has {total_pages} pages (> {INDEX_REWRITE_MAX_PAGES}), "
+                       f"LLM cannot emit a complete index")
+
+    if skip_reason:
+        print(f"[stage 3.5] {skip_reason} — LLM rewrite skipped, using append fallback")
+        _index_append_fallback()
     else:
-        index_text = "# Index\n\n## Sources\n\n"
-    new_link = f"- [[{source_path.stem}]]\n"
-    if "## Sources" in index_text and new_link not in index_text:
-        index_text = index_text.replace("## Sources\n", f"## Sources\n\n{new_link}", 1)
-        stage_3_1_write_wiki_file(index_path, index_text, config)
-        files_written.append(str(index_path.relative_to(config.wiki_root)))
+        inv_lines: list[str] = []
+        for subdir, header in _INDEX_CATEGORIES:
+            for stem, title in inventory.get(subdir, []):
+                inv_lines.append(f"- [[{stem}]] — {title}")
+        inventory_text = "\n".join(inv_lines) or "(no pages found)"
 
-    # overview.md — NashSU aggregate repair: LLM rewrite with existing content as context.
-    # Unlike the ADL8113 incident, the LLM SEES the current overview and preserves it.
+        prompt = f"""You maintain the index of a knowledge-base wiki. Below is the
+CURRENT index.md, followed by the AUTHORITATIVE on-disk page inventory (scanned
+from the filesystem — the ground truth of what pages exist now).
+
+Rewrite the COMPLETE index.md so every category lists exactly its inventory
+pages, under these bilingual section headers in this order (omit empty ones):
+Sources（来源）, Concepts（概念）, Entities（实体）, Queries（查询）,
+Comparisons（对比）, Synthesis（综合）, Findings（发现）, Thesis（论题）.
+
+Rules:
+- Preserve existing entries' descriptions verbatim where the stem matches.
+- For new entries (in inventory but not in current index), use the inventory
+  "— title" as the description.
+- One bullet per page: `- [[<stem>]] — <description>`. Sort within each section
+  alphabetically by stem.
+- Keep the existing frontmatter and top-level `# ` title unchanged.
+
+# CURRENT index.md
+{current_index or "(empty)"}
+
+# ON-DISK INVENTORY (authoritative)
+{inventory_text}
+
+# Task
+Output ONLY the complete new index.md. No commentary.
+"""
+        try:
+            response, _ = call_anthropic_protocol(prompt, config, max_tokens=4096)
+            if "---FILE:" in response:
+                print("[stage 3.5] Index LLM response contained FILE blocks — falling back")
+                _index_append_fallback()
+            elif "## " in response and "[[" in response:
+                stage_3_1_write_wiki_file(index_path, response.strip() + "\n", config)
+                files_written.append(str(index_path.relative_to(config.wiki_root)))
+                print(f"[stage 3.5] Index rewritten via LLM ({len(response)} chars)")
+            else:
+                print("[stage 3.5] Index LLM response missing sections/links — falling back")
+                _index_append_fallback()
+        except Exception as e:
+            print(f"[stage 3.5] Index LLM rewrite failed ({e}) — using append fallback")
+            _index_append_fallback()
+
+    # overview.md — LLM rewrite with improved prompt (topic-synthesis, not
+    # source-dump) + structural validation + failure fallback + compress mode.
+    # NashSU aggregate-repair parity. Unlike the old version: creates overview
+    # on first ingest (no longer skips when absent), validates the 5 required
+    # sections, and keeps the current overview on any failure (no silent stall).
     overview_path = config.wiki_dir / "overview.md"
-    if overview_path.exists():
-        current_overview = overview_path.read_text(encoding="utf-8")
-        # NashSU parity (ingest.ts L1281-1296): proportional safety caps.
-        # Section cap = max(4K, 12% of context window) for both index and overview.
-        _AGGREGATE_CAP = max(4096, int(config.source_budget * 0.12))
-        OVERVIEW_MAX_CHARS = min(24000, _AGGREGATE_CAP)
-        INDEX_MAX_CHARS = _AGGREGATE_CAP
-        if len(current_overview) > OVERVIEW_MAX_CHARS:
-            print(f"[stage 3.5] Overview too large ({len(current_overview)} > {OVERVIEW_MAX_CHARS}) — "
-                  f"skipping LLM rewrite to avoid truncation")
-            return files_written
+    current_overview = overview_path.read_text(encoding="utf-8") if overview_path.exists() else ""
+    _AGGREGATE_CAP = max(4096, int(config.source_budget * 0.12))
+    OVERVIEW_MAX_CHARS = min(24000, _AGGREGATE_CAP)
+    compress_mode = bool(current_overview) and len(current_overview) > OVERVIEW_MAX_CHARS
+    if compress_mode:
+        print(f"[stage 3.5] Overview too large ({len(current_overview)} > {OVERVIEW_MAX_CHARS}) — "
+              f"compress mode")
 
-        # Index size check (NashSU parity: isAggregateRepairSafe)
-        if index_path.exists():
-            index_size = index_path.stat().st_size
-            if index_size > INDEX_MAX_CHARS:
-                print(f"[stage 3.5] Index too large ({index_size} > {INDEX_MAX_CHARS}) — "
-                      f"skipping aggregate repair to avoid context overflow")
-                return files_written
-        source_content = source_path.read_text(encoding="utf-8") if source_path.exists() else ""
+    source_content = source_path.read_text(encoding="utf-8") if source_path.exists() else ""
+    sources_lines: list[str] = []
+    sources_dir = config.wiki_dir / "sources"
+    if sources_dir.is_dir():
+        for f in sorted(sources_dir.rglob("*.md"))[-10:]:
+            text = f.read_text(encoding="utf-8")
+            if text.startswith("---"):
+                end = text.find("\n---", 3)
+                body = text[end + 4:] if end != -1 else text
+            else:
+                body = text
+            sources_lines.append(f"### {f.stem}\n{body[:800]}")
 
-        sources_lines: list[str] = []
-        sources_dir = config.wiki_dir / "sources"
-        if sources_dir.is_dir():
-            for f in sorted(sources_dir.rglob("*.md"))[-10:]:
-                text = f.read_text(encoding="utf-8")
-                if text.startswith("---"):
-                    end = text.find("\n---", 3)
-                    body = text[end + 4:] if end != -1 else text
-                else:
-                    body = text
-                sources_lines.append(f"### {f.stem}\n{body[:800]}")
+    required_sections = ["## Where we are", "## Strong Claims", "## Weak Claims",
+                         "## Open Questions", "## Sources"]
+    if compress_mode:
+        size_directive = (
+            f"The current overview has bloated to {len(current_overview)} chars. Produce a "
+            f"TIGHTER rewrite (≤ {OVERVIEW_MAX_CHARS} chars). Compress ## Where we are by "
+            f"synthesizing topics in common — do NOT enumerate every source. Keep all "
+            f"Strong/Weak Claims and Open Questions intact.")
+    else:
+        size_directive = (
+            "Keep ## Where we are concise: 2-5 paragraphs synthesizing topics in common "
+            "across sources, not a per-source walkthrough.")
 
-        prompt = f"""You maintain the overview of a hardware knowledge base wiki.
-Below is the CURRENT overview.md, followed by the newly ingested source page.
-Rewrite overview.md to incorporate the new source into a comprehensive 2-5
-paragraph overview of ALL topics now in the wiki. Preserve all existing claims
-and source references; only add or refine based on the new source.
+    prompt = f"""You maintain the overview of a knowledge-base wiki. Below is the
+CURRENT overview.md, followed by the newly ingested source page and recent
+source pages for context. Rewrite the COMPLETE overview.md to incorporate the
+new source.
+
+CRITICAL — avoid source-listing dumps:
+- ## Where we are must SYNTHESIZE by knowledge area / topic, NOT enumerate books.
+  Group sources under shared themes; cite a source inline only when it anchors a
+  specific claim. Do NOT write "本次最新重新摄入…" source-inventory paragraphs or
+  back-to-back book-by-book summaries.
+- Each paragraph = one theme (e.g. power electronics, high-speed design, RF),
+  covering what the wiki knows, key tensions, and gaps — not which books were read.
+
+{size_directive}
 
 # Current overview.md
-{current_overview}
+{current_overview or "(empty)"}
 
 # New source page: {source_path.stem}
 {source_content[:3000]}
@@ -512,29 +645,33 @@ and source references; only add or refine based on the new source.
 {chr(10).join(sources_lines[:8])}
 
 # Task
-Rewrite the COMPLETE overview.md. Output ONLY the new overview.md content
-(starting with \"# Overview\"). Preserve the structure:
-- ## Where we are (2-5 paragraph comprehensive overview of ALL topics)
+Output ONLY the new overview.md (starting with "# Overview"). Preserve structure:
+- ## Where we are (2-5 paragraph topic-synthesized overview of ALL topics)
 - ## Strong Claims (well-supported by multiple sources)
 - ## Weak Claims (single-source or speculative)
 - ## Open Questions
-- ## Sources (auto-populated list — keep existing entries, add new source link)
+- ## Sources (keep existing source links, add the new one as `- [[<stem>]]`)
 
-Do NOT change or remove existing Strong Claims / Weak Claims / Open Questions
-unless the new source directly contradicts or answers them.
+Do NOT remove or weaken existing Strong/Weak Claims or Open Questions unless the
+new source directly contradicts or answers them.
 """
-        try:
-            response, stop_reason = call_anthropic_protocol(prompt, config, max_tokens=4096)
-            # NashSU parity: filter aggregate repair output — reject FILE blocks (ingest.ts L1216-1235)
-            if "---FILE:" in response:
-                print(f"[stage 3.5] LLM response contained FILE blocks — discarding")
-            elif response.strip().startswith("#"):
-                stage_3_1_write_wiki_file(overview_path, response.strip() + "\n", config)
+    try:
+        response, stop_reason = call_anthropic_protocol(prompt, config, max_tokens=4096)
+        if "---FILE:" in response:
+            print("[stage 3.5] Overview LLM response contained FILE blocks — keeping current")
+        else:
+            body = response.strip()
+            body_lower = body.lower()
+            missing = [s for s in required_sections if s.lower() not in body_lower]
+            if missing:
+                print(f"[stage 3.5] Overview LLM response missing sections {missing} — keeping current")
+            elif not body.startswith("#"):
+                print("[stage 3.5] Overview LLM response did not start with '#' — keeping current")
+            else:
+                stage_3_1_write_wiki_file(overview_path, body + "\n", config)
                 files_written.append(str(overview_path.relative_to(config.wiki_root)))
                 print(f"[stage 3.5] Overview updated via LLM ({len(response)} chars, stop={stop_reason})")
-            else:
-                print(f"[stage 3.5] LLM overview response did not start with '# Overview' — skipping")
-        except Exception as e:
-            print(f"[stage 3.5] Overview LLM update failed: {e}")
+    except Exception as e:
+        print(f"[stage 3.5] Overview LLM update failed ({e}) — keeping current")
 
     return files_written
