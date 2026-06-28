@@ -125,6 +125,7 @@ class Page:
     stem: str             # filename stem (e.g. 'X')
     title: str
     page_type: str        # frontmatter 'type:' lowercased; 'unknown' if missing
+    role: str             # frontmatter 'role:' lowercased (entity role); '' if none
     domain: str
     sources: tuple[str, ...]
     links: tuple[str, ...]   # raw wikilink/related targets as written
@@ -171,6 +172,7 @@ def load_pages(wiki_root: Path) -> dict[str, Page]:
         fm, body = _parse_frontmatter(text)
         page_type = str(fm.get("type", "unknown")).lower().strip()
         title = str(fm.get("title", md.stem))
+        role = str(fm.get("role", "")).lower().strip()
         domain = str(fm.get("domain", "")).lower().strip()
         sources = tuple(s for s in _as_list(fm.get("sources")))
         # Direct links = [[wikilinks]] in body + `related:` frontmatter paths.
@@ -180,7 +182,7 @@ def load_pages(wiki_root: Path) -> dict[str, Page]:
         links = tuple(t for t in targets if t)
         pages[node_id] = Page(
             node_id=node_id, stem=md.stem, title=title, page_type=page_type,
-            domain=domain, sources=sources, links=links, path=md,
+            role=role, domain=domain, sources=sources, links=links, path=md,
         )
     return pages
 
@@ -444,8 +446,9 @@ def write_graph_html(out: Path, g: nx.Graph, pages: dict[str, Page],
         p = pages.get(nid)
         title = p.title if p else nid.split("/")[-1]
         ptype = p.page_type if p else "other"
+        prole = p.role if p else ""
         cid = node_community.get(nid, -1)
-        nodes_js.append({"id": nid, "label": title[:30], "type": ptype, "community": cid})
+        nodes_js.append({"id": nid, "label": title[:30], "type": ptype, "role": prole, "community": cid})
 
     edges_js = [
         {"source": u, "target": v, "weight": round(d["weight"], 2)}
@@ -463,6 +466,18 @@ def write_graph_html(out: Path, g: nx.Graph, pages: dict[str, Page],
         "synthesis": "综合", "overview": "概览", "comparison": "对比",
         "finding": "发现", "thesis": "论点", "methodology": "方法论", "other": "其他",
     }
+    # Entity-role sub-coloring (NashSU parity: entity pages carry a `role:`
+    # field). Used by the "按角色" color mode to group entities by role.
+    role_colors = {
+        "person": "#60a5fa", "organization": "#f59e0b", "system": "#10b981",
+        "standard": "#a855f7", "model": "#ef4444", "device": "#14b8a6",
+        "": "#64748b",  # entity without a role
+    }
+    role_labels = {
+        "person": "人物", "organization": "机构", "system": "系统",
+        "standard": "标准", "model": "型号", "device": "器件",
+        "": "实体(无角色)",
+    }
     community_colors = [
         "#60a5fa", "#4ade80", "#fb923c", "#c084fc", "#f87171", "#2dd4bf",
         "#facc15", "#f472b6", "#a78bfa", "#38bdf8", "#34d399", "#fbbf24",
@@ -476,6 +491,17 @@ def write_graph_html(out: Path, g: nx.Graph, pages: dict[str, Page],
         f'<span>{type_labels.get(t, t)} <span class="legend-meta">{cnt}</span></span></div>'
         for t, cnt in sorted(type_counts.items(), key=lambda x: -x[1])
     )
+
+    role_counts: dict[str, int] = {}
+    for n in nodes_js:
+        if n["type"] == "entity":
+            r = n["role"] or ""
+            role_counts[r] = role_counts.get(r, 0) + 1
+    role_legend = "".join(
+        f'<div class="legend-item"><span class="legend-dot" style="background:{role_colors.get(r, "#64748b")}"></span>'
+        f'<span>{role_labels.get(r, r or "实体(无角色)")} <span class="legend-meta">{cnt}</span></span></div>'
+        for r, cnt in sorted(role_counts.items(), key=lambda x: -x[1])
+    ) or '<div class="legend-item" style="color:#64748b">无实体节点</div>'
 
     community_legend = ""
     for c in communities:
@@ -537,6 +563,7 @@ svg{width:100%;height:100%}
   <div id="hstats">%%TOTAL_PAGES%% pages &nbsp;|&nbsp; %%TOTAL_EDGES%% edges &nbsp;|&nbsp; %%TOTAL_COMMUNITIES%% communities</div>
   <div id="controls">
     <button id="btn-type" class="active">按类型</button>
+    <button id="btn-role">按角色</button>
     <button id="btn-community">按社区</button>
   </div>
 </div>
@@ -545,6 +572,7 @@ svg{width:100%;height:100%}
     <input id="search" type="text" placeholder="搜索节点..." oninput="filterNodes(this.value)">
     <h3>图例</h3>
     <div id="legend-type">%%TYPE_LEGEND%%</div>
+    <div id="legend-role" style="display:none">%%ROLE_LEGEND%%</div>
     <div id="legend-community" style="display:none">%%COMMUNITY_LEGEND%%</div>
     <h3>知识空缺</h3>
     %%GAPS%%
@@ -558,6 +586,7 @@ const nodes = %%NODES%%;
 const links = %%EDGES%%;
 
 const TYPE_COLORS = {entity:"#60a5fa",concept:"#c084fc",source:"#fb923c",query:"#4ade80",synthesis:"#f87171",overview:"#facc15",comparison:"#2dd4bf",finding:"#a855f7",thesis:"#f43f5e",methodology:"#14b8a6",other:"#94a3b8"};
+const ROLE_COLORS = {person:"#60a5fa",organization:"#f59e0b",system:"#10b981",standard:"#a855f7",model:"#ef4444",device:"#14b8a6","":"#64748b"};
 const COMMUNITY_COLORS = ["#60a5fa","#4ade80","#fb923c","#c084fc","#f87171","#2dd4bf","#facc15","#f472b6","#a78bfa","#38bdf8","#34d399","#fbbf24"];
 let colorMode = "type";
 
@@ -583,6 +612,12 @@ function nodeR(d) {
 }
 function colorOf(d) {
   if (colorMode === "community") return COMMUNITY_COLORS[d.community % COMMUNITY_COLORS.length] || "#888";
+  if (colorMode === "role") {
+    // Only entities carry a role; non-entities get a neutral gray so the role
+    // grouping stands out.
+    if (d.type !== "entity") return "#475569";
+    return ROLE_COLORS[d.role] || "#64748b";
+  }
   return TYPE_COLORS[d.type] || TYPE_COLORS.other;
 }
 
@@ -622,7 +657,7 @@ function renderPositions() {
 const tt = document.getElementById("tooltip");
 function showTooltip(e,d) {
   tt.style.display="block";
-  tt.innerHTML = `<b>${d.label}</b><br><span style="color:#94a3b8;font-size:10px">${d.type} · C${d.community}</span><br><span style="color:#64748b;font-size:10px">${d.id}</span><br>Degree: ${deg[d.id]||0}`;
+  tt.innerHTML = `<b>${d.label}</b><br><span style="color:#94a3b8;font-size:10px">${d.type}${d.role ? " · " + d.role : ""} · C${d.community}</span><br><span style="color:#64748b;font-size:10px">${d.id}</span><br>Degree: ${deg[d.id]||0}`;
   moveTooltip(e);
 }
 function moveTooltip(e) { tt.style.left=(e.clientX+12)+"px"; tt.style.top=(e.clientY-20)+"px"; }
@@ -660,13 +695,16 @@ window.filterNodes = function(q) {
 };
 
 document.getElementById("btn-type").onclick = () => setColorMode("type");
+document.getElementById("btn-role").onclick = () => setColorMode("role");
 document.getElementById("btn-community").onclick = () => setColorMode("community");
 function setColorMode(m) {
   colorMode = m;
   node.select("circle").attr("fill", colorOf);
   document.getElementById("btn-type").classList.toggle("active", m==="type");
+  document.getElementById("btn-role").classList.toggle("active", m==="role");
   document.getElementById("btn-community").classList.toggle("active", m==="community");
   document.getElementById("legend-type").style.display = m==="type" ? "block" : "none";
+  document.getElementById("legend-role").style.display = m==="role" ? "block" : "none";
   document.getElementById("legend-community").style.display = m==="community" ? "block" : "none";
 }
 
@@ -724,6 +762,7 @@ try {
             .replace("%%NODES%%", nodes_json)
             .replace("%%EDGES%%", edges_json)
             .replace("%%TYPE_LEGEND%%", type_legend)
+            .replace("%%ROLE_LEGEND%%", role_legend)
             .replace("%%COMMUNITY_LEGEND%%", community_legend)
             .replace("%%GAPS%%", gaps_html)
             .replace("%%TOTAL_PAGES%%", str(total_pages))

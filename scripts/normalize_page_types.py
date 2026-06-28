@@ -8,9 +8,10 @@ meaningless, and corrupts the Graph command's type-affinity signal.
 
 This migrates role-as-type → `type: entity` + `role: <role>`, and fixes the
 `entities` typo. The canonical page-type vocabulary is:
-  source, concept, entity, query, comparison, synthesis (findings/thesis/
-  methodology are sub-types of synthesis). Entity roles live in a separate
-  `role:` field: person, organization, system, standard, model, device, ...
+  source, concept, entity, query, comparison, synthesis, findings, thesis,
+  methodology (all independent top-level types, NashSU parity). Entity roles
+  live in a separate `role:` field: person, organization, system, standard,
+  model, device, ...
 
 Idempotent: a page already `type: entity` (with or without role) is untouched.
 

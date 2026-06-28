@@ -1,6 +1,49 @@
 
 from _stage_2_base import *
 
+
+def _render_review_page(rtype: str, title: str, desc: str, affected: list[str],
+                        queries: list[str], severity: str, date_str: str,
+                        source_stem: str) -> str:
+    """Render one review item's markdown page (frontmatter + body).
+
+    Extracted from the write loop so the frontmatter shape — including the
+    NashSU ``search_queries`` field — is unit-testable without an LLM call.
+    """
+    affected_links = "\n".join(f"- [[{p.replace('.md', '')}]]" for p in affected)
+    # Deep-Research seed queries (NashSU searchQueries parity) — shown in the
+    # body only when present, so non-applicable types render clean.
+    if queries:
+        search_section = (
+            "\n## Search Queries (Deep Research)\n"
+            + "\n".join(f"- {q}" for q in queries)
+            + "\n"
+        )
+    else:
+        search_section = ""
+    return f"""---
+type: review
+review_type: {rtype}
+severity: {severity}
+affected_pages: [{', '.join(affected)}]
+search_queries: [{', '.join(f'"{q}"' for q in queries)}]
+resolved: false
+created: {date_str}
+source_ingest: "{source_stem}"
+---
+
+# [{rtype}] {title}
+
+{desc}
+
+## Affected Pages
+{affected_links}
+{search_section}
+## Resolution
+_待审核。处理完成后将 frontmatter 中 `resolved: false` 改为 `resolved: true`，下次 ingest 时自动清理。_
+"""
+
+
 def stage_3_4_review_suggestions(file_blocks: list[tuple[str, str]], raw_file: Path,
                                   config: Config, *, verbose: bool = False) -> dict:
     """Stage 3.4: Run LLM review over newly generated wiki pages (quality assurance).
@@ -110,7 +153,11 @@ def stage_3_4_review_suggestions(file_blocks: list[tuple[str, str]], raw_file: P
   description: "详细描述"
   affected_pages: ["sources/xxx.md", "concepts/yyy.md"]
   severity: high|medium|low
+  search_queries: ["keyword query 1", "keyword query 2"]
 ```
+对 suggestion 和 missing-page 类型，search_queries 必填：2-3 条关键词式 web 搜索查询
+（用于 Deep Research——关键词丰富、具体、面向搜索引擎，不是标题或整句）；
+其它类型用空数组 []。
 至少 5 个 items。数字、参数、公式要严格。"""
 
     prompt = f"{system_prompt}\n\n{user_content}"
@@ -161,6 +208,14 @@ def stage_3_4_review_suggestions(file_blocks: list[tuple[str, str]], raw_file: P
         if isinstance(affected, str):
             affected = [affected]
         severity = it.get("severity", "medium")
+        # NashSU searchQueries parity — 2-3 web search queries for Deep Research,
+        # populated by the LLM for suggestion/missing-page reviews. Surfaced on
+        # the review page so deep-research can seed its queries without a separate
+        # optimize-research-topic LLM call.
+        queries = it.get("search_queries", [])
+        if isinstance(queries, str):
+            queries = [queries]
+        queries = [str(q).strip() for q in queries if str(q).strip()]
 
         # Build short-slug from title (kebab-case, English only, max 40 chars)
         import unicodedata
@@ -175,29 +230,8 @@ def stage_3_4_review_suggestions(file_blocks: list[tuple[str, str]], raw_file: P
         filename = f"{date_str}-{safe_source}-{short_slug}.md"
         page_path = reviews_dir / filename
 
-        # Build wikilinks for affected pages
-        affected_links = "\n".join(f"- [[{p.replace('.md', '')}]]" for p in affected)
-
-        md = f"""---
-type: review
-review_type: {rtype}
-severity: {severity}
-affected_pages: [{', '.join(affected)}]
-resolved: false
-created: {date_str}
-source_ingest: "{raw_file.stem}"
----
-
-# [{rtype}] {title}
-
-{desc}
-
-## Affected Pages
-{affected_links}
-
-## Resolution
-_待审核。处理完成后将 frontmatter 中 `resolved: false` 改为 `resolved: true`，下次 ingest 时自动清理。_
-"""
+        md = _render_review_page(rtype, title, desc, affected, queries,
+                                 severity, date_str, raw_file.stem)
         tmp = page_path.with_suffix(page_path.suffix + ".tmp")
         tmp.write_text(md, encoding="utf-8")
         tmp.rename(page_path)
