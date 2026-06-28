@@ -69,8 +69,10 @@ class TestSchemaFolders(unittest.TestCase):
         self.assertEqual(_core.schema_folders(""), set())
 
     def test_extras_are_folders_beyond_base(self):
+        # methodology is a BASE_PAGE_DIR (NashSU parity); only `people` is a
+        # schema-declared folder beyond the base set.
         extra = _core.schema_folders(_SCHEMA_WITH_EXTRAS) - _core.BASE_PAGE_DIRS
-        self.assertEqual(extra, {"methodology", "people"})
+        self.assertEqual(extra, {"people"})
 
 
 class TestLoadSchemaMd(unittest.TestCase):
@@ -116,6 +118,59 @@ class TestWriterAcceptsSchemaFolders(unittest.TestCase):
         self.assertIn("methodology", valid)   # would have been dropped before
         self.assertIn("people", valid)
         self.assertIn("concepts", valid)      # base preserved
+
+
+class TestSchemaTypedCandidates(unittest.TestCase):
+    """NashSU 0.5.3 parity — Stage 2.2 flags schema-typed candidates, Stage 2.4
+    surfaces them so generation routes a page into the candidate's folder."""
+
+    def test_stage_2_2_block_only_with_extras(self):
+        import _stage_2_analyze as ana
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            cfg = _make_config(tmp)
+            self.assertEqual(ana._stage_2_2_schema_types_block(cfg), "")
+            (cfg.wiki_root / "schema.md").write_text(_SCHEMA_BASE_ONLY, encoding="utf-8")
+            self.assertEqual(ana._stage_2_2_schema_types_block(cfg), "")
+            (cfg.wiki_root / "schema.md").write_text(_SCHEMA_WITH_EXTRAS, encoding="utf-8")
+            block = ana._stage_2_2_schema_types_block(cfg)
+            self.assertIn("Schema-Defined Page Types", block)
+            self.assertIn("people", block)
+            self.assertIn("schema_typed_candidates", block)
+
+    def test_stage_2_4_prompt_surfaces_candidates(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            cfg = _make_config(tmp)
+            (cfg.wiki_dir).mkdir(parents=True, exist_ok=True)
+            (cfg.raw_root).mkdir(parents=True, exist_ok=True)
+            chunk_analysis = {
+                "concepts_found": [],
+                "entities_found": [],
+                "schema_typed_candidates": [
+                    {"type": "person", "name": "Ada Lovelace",
+                     "folder": "people", "rationale": "biography in this chunk"},
+                ],
+            }
+            prompt = gen._stage_2_4_build_prompt(
+                chunk_analysis, "chunk text", 0, cfg.raw_root / "book.pdf", cfg,
+            )
+            self.assertIn("Schema-typed pages found in this chunk", prompt)
+            self.assertIn("people/ada-lovelace", prompt)
+            self.assertIn("Ada Lovelace", prompt)
+
+    def test_stage_2_4_prompt_none_when_no_candidates(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            cfg = _make_config(tmp)
+            (cfg.wiki_dir).mkdir(parents=True, exist_ok=True)
+            (cfg.raw_root).mkdir(parents=True, exist_ok=True)
+            prompt = gen._stage_2_4_build_prompt(
+                {"concepts_found": [], "entities_found": []},
+                "chunk text", 0, cfg.raw_root / "book.pdf", cfg,
+            )
+            self.assertIn("Schema-typed pages found in this chunk", prompt)
+            self.assertIn("(none)", prompt)
 
 
 if __name__ == "__main__":

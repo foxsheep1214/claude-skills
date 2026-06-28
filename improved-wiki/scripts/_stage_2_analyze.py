@@ -336,6 +336,32 @@ The source is a **{file_path.parent.name}** document. Follow these type-specific
 """
 
 
+def _stage_2_2_schema_types_block(config: Config) -> str:
+    """NashSU 0.5.3 parity — tell Stage 2.2 which schema-defined page types
+    (beyond entity/concept) this project supports, so the analysis can flag
+    schema-typed candidates for the generation stage to route.
+
+    Empty for default projects (schema.md absent or no extra folders) so the
+    heavily-tuned book-ingest prompt sees zero noise.
+    """
+    text = load_schema_md(config)
+    if not text.strip():
+        return ""
+    extra = schema_folders(text) - BASE_PAGE_DIRS - SCHEMA_NON_PAGE_DIRS
+    if not extra:
+        return ""
+    return (
+        "\n# Schema-Defined Page Types (NashSU 0.5.3 parity)\n"
+        "This project's schema.md defines extra typed page types beyond entity/concept. "
+        "When THIS chunk genuinely contains content fitting one of these types, record it "
+        "under `schema_typed_candidates` below so the generation stage can route a page "
+        "into the matching folder. Use a type ONLY when the source actually supports it; "
+        "NEVER invent goals, habits, journal entries, decisions, or other user-authored "
+        "records that are not present in the source.\n"
+        f"Available schema types: {', '.join(sorted(extra))}\n"
+    )
+
+
 def _stage_2_2_build_overlap_section(overlap_before: str) -> str:
     """Format the overlap boundary text for continuity context (NashSU parity).
 
@@ -411,6 +437,8 @@ def _stage_2_2_build_prompt(
 
     overlap_section = _stage_2_2_build_overlap_section(overlap_before)
 
+    schema_types_section = _stage_2_2_schema_types_block(config)
+
     # ── Heading path (NashSU parity: chunk.headingPath) ──
     heading_section = ""
     if heading_path:
@@ -423,7 +451,7 @@ You are analyzing content from: **{heading_path}**
     return f"""# Role
 You are the LLM maintainer of a Karpathy-pattern personal knowledge base.
 You are performing **Stage 2.2: Chunk Analysis** (chunk {chunk_index + 1}/{chunk_total}) of a book ingest pipeline.
-{template_section}
+{template_section}{schema_types_section}
 # Context: Accumulated Global Digest
 This digest is cumulative context from the Stage 2.1 outline and all PREVIOUS
 chunks — use it for continuity and to avoid re-writing the same *prose* twice.
@@ -465,6 +493,12 @@ Analyze THIS CHUNK of the book. Extract:
    Accumulated Global Digest above, so the next chunk benefits from everything
    learned so far. Keep it concise but cumulative: add new concepts, entities,
    and key claims. Do NOT remove anything from the existing digest.
+6. **Schema-typed page candidates** — if the project schema defines page types
+   beyond entity/concept (e.g. finding, decision, methodology) AND this chunk
+   genuinely contains matching content, note it for the generation stage. Use a
+   schema-defined type ONLY when the source actually supports it; NEVER invent
+   goals, habits, journal entries, decisions, or other user-authored records
+   that are not present in the source.
 
 # Output (YAML only, in ```yaml block)
 ```yaml
@@ -520,6 +554,17 @@ formulas:
 connections_to_existing_wiki:
   - existing_page: "..."
     relationship: "extends" | "contrasts" | "applies" | "cites"
+
+# Schema-typed page candidates (NashSU 0.5.3 parity). ONLY when the project
+# schema defines extra types AND this chunk genuinely contains matching content.
+# `type` MUST be one of the schema types listed above. Leave empty (`[]`) when
+# the schema adds no types or this chunk has no matching content. NEVER invent
+# goals/habits/journal/decisions not present in the source.
+schema_typed_candidates:
+  - type: "finding" | "decision" | "methodology" | "..."   # a schema-declared type
+    name: "..."        # short specific kebab-case-friendly name (3-6 words)
+    folder: "findings"  # the wiki/<folder>/ the page should land in
+    rationale: "..."    # one sentence: why this chunk supports this typed page
 
 updated_global_digest: |
   # Accumulated Global Digest (after chunk {chunk_index + 1}/{chunk_total})

@@ -67,7 +67,7 @@ Two other external-API dependencies (not text generation):
 - `references/ingest-stages-mandatory.md` — ingest stage checklist (Phase 0-4 + Lint + Graph, ⭐ easy-to-skip stages marked)
 - `references/query-generation.md` — Stage 2.7: auto-generate `wiki/queries/`
 - `references/comparison-generation.md` — Stage 2.9: auto-generate `wiki/comparisons/` (in-source concept pairs AND systematic multi-way 3+ comparisons)
-- `references/knowledge-gap-lint.md` — lint system: synthesis/finding/thesis/methodology formation triggers
+- `references/domains.md` — domain classification for graph partitioning / query routing
 - `references/dedup-design.md` — two dedup tiers: intra-source (Stage 2.5, ingest-time) vs cross-source (CLI, lint-time); distinct responsibilities, not interchangeable
 - `references/scanned-pdf-ocr-pipeline.md` — minerU local API extraction pipeline (all PDFs: text/scanned/mixed unified)
 - `references/raw-naming-conventions.md` — raw 文件命名规范检查机制（项目级 `raw/NAMING.md` + auto-check）

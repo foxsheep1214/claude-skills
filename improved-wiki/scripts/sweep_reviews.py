@@ -116,6 +116,7 @@ def _scan_reviews(wiki_dir: Path) -> list[dict]:
             "type": fm.get("type", "confirm"),
             "title": fm.get("title", f.stem),
             "affected_pages": fm.get("affected_pages", []) if isinstance(fm.get("affected_pages"), list) else [],
+            "search_queries": fm.get("search_queries", []) if isinstance(fm.get("search_queries"), list) else [],
             "created": fm.get("created", ""),
             "frontmatter": fm,
         })

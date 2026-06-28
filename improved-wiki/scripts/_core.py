@@ -781,7 +781,7 @@ def list_existing_slugs(config: Config) -> list[str]:
 # Base page-type folders always valid regardless of schema (the fixed core types).
 BASE_PAGE_DIRS = {
     "sources", "concepts", "entities", "queries", "comparisons",
-    "synthesis", "findings", "thesis",
+    "synthesis", "findings", "thesis", "methodology",
 }
 
 
@@ -977,7 +977,7 @@ def parse_file_blocks(response: str) -> list[tuple[str, str]]:
     # Known wiki subdirectories (must match WIKI_TYPE_DIRS)
     _KNOWN_SUBDIRS = (
         "sources", "concepts", "entities", "queries", "comparisons",
-        "synthesis", "findings", "thesis",
+        "synthesis", "findings", "thesis", "methodology",
     )
 
     lines = response.split("\n")

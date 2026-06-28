@@ -110,7 +110,7 @@ Query 5: <topic> 最新研究 2025 2026
 Use the available search tools:
 - **WebSearch** (built-in): General web search
 - **Tavily MCP** (`mcp__tavily__tavily_search`): Advanced search with configurable depth
-- **WebFetch** (built-in): Fetch full content of promising pages
+- **Tavily extract/crawl** (`mcp__tavily__tavily_extract` / `tavily_crawl`): fetch full content of promising pages — WebFetch is denied in this harness, so all page fetching goes through Tavily.
 
 Deduplicate results by URL. Cap at 20 sources. Prefer recent, authoritative sources.
 
@@ -177,15 +177,15 @@ sources: [<source-urls>]
 ...
 ```
 
-The `origin: deep-research` frontmatter field marks this as a research page (distinct from `origin: ingest` for source-derived pages).
+The `origin: deep-research` frontmatter field marks this as a research page. (NashSU writes `origin` only on deep-research pages — ingest-generated source/concept/entity pages carry no `origin` field — so this is how a research page is distinguished downstream.)
 
 ### Step 4: Write to Wiki
 
 Write the synthesized page to `wiki/queries/<slug>.md`. Use CJK-aware slug generation:
 
 ```python
-from scripts._paths import make_slug
-slug = make_slug(f"research-{topic}")
+from _core import slugify
+slug = slugify(f"research-{topic}")
 path = f"wiki/queries/{slug}.md"
 ```
 
@@ -198,6 +198,8 @@ This is the critical step that makes it a closed loop. Immediately after writing
 ```bash
 python3 scripts/ingest.py wiki/queries/<slug>.md
 ```
+
+The ingest entry-point accepts a `wiki/queries/` path directly (NashSU `autoIngest` parity): `_bridge_wiki_queries_to_raw` copies the page into `raw/queries/<slug>.md` and ingests that copy, so the rest of the raw-root-centric pipeline sees a normal source. The original `wiki/queries/<slug>.md` stays as the human-readable research page. (NashSU's `autoIngest` is path-agnostic and reads `wiki/queries/` directly; the improved-wiki pipeline derives source identity from a `raw/` path in ~20 places, so the copy is the bridge instead of a full refactor.)
 
 The ingest pipeline will:
 1. **Stage 2.1**: Analyze the research page → extract key entities/concepts
@@ -288,7 +290,7 @@ User: deep research the review item "缺少 GaN HEMT 驱动电路设计"
 Claude: [reads the review item → formulates search queries → ...]
 ```
 
-The review item's `searchQueries` field (if present) provides the initial queries. The review item's `affectedPages` field tells Claude which pages to read for context.
+The review item's `search_queries` field (populated by Stage 3.4 for `suggestion`/`missing-page` reviews — NashSU `searchQueries` parity) provides 2-3 keyword-rich web search queries that seed Step 2b directly, with no extra LLM round-trip. The review item's `affected_pages` field tells Claude which pages to read for context. (NashSU also has a separate `optimizeResearchTopic` LLM call that refines a gap into a topic + queries; the improved-wiki skips it — the pre-computed `search_queries` already cover that role. If a review item lacks `search_queries`, fall back to deriving queries from `title` + `affected_pages`.)
 
 ### Variant B: From Comparison Gap
 

@@ -49,6 +49,11 @@ from _llm_api import (
 )
 from _paths import media_slug as _stage_1_2_media_slug
 
+# Folders that may appear in schema.md but are not LLM-generated page types.
+# Shared by Stage 2.2 (analysis) and 2.4 (generation) schema routing
+# (NashSU 0.5.3 schema-typed-candidates parity).
+SCHEMA_NON_PAGE_DIRS = frozenset({"media", "raw", "page-history", "chats"})
+
 
 def _stage_2_frontmatter_title(content: str) -> str:
     """Extract a page's `title:` frontmatter value, quotes stripped.

@@ -25,11 +25,7 @@ wiki/
 │   ├── suggestion/     # 改进建议
 │   ├── missing-page/   # 缺少的重要页面
 │   ├── contradiction/  # 内容矛盾
-│   ├── duplicate/      # 重复内容
-│   ├── missing-synthesis/   # lint: 可以合成综述了
-│   ├── missing-finding/     # lint: 可以提炼发现了
-│   ├── missing-thesis/      # lint: 可以提出假说了
-│   └── missing-methodology/ # lint: 可以蒸馏方法论了
+│   └── duplicate/      # 重复内容
 ├── lint/          # lint findings (improved-wiki 扩展)
 ├── index.md       # 聚合页：索引
 ├── overview.md    # 聚合页：概述

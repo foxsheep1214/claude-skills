@@ -43,9 +43,11 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import traceback
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any
@@ -101,6 +103,7 @@ from _stage_2_4_generation import (
     _stage_2_4_per_concept_fallback,
 )
 from _stage_2_6_source_page import stage_2_6_source_page
+from _source_filter import is_sensitive_config_source_file
 from _stage_2_7_query_generation import stage_2_7_query_generation, _stage_2_7_build_prompt
 from _stage_2_9_comparison import stage_2_9_comparison_generation
 from _stage_3_4_review import stage_3_4_review_suggestions
@@ -140,6 +143,36 @@ from _ingest_write import _do_write, cleanup_resolved_reviews
 # ═════════════════════════════════════════════════════════
 # Main pipeline — ingest_one, batch, queue, CLI
 # ═════════════════════════════════════════════════════════
+
+def _bridge_wiki_queries_to_raw(rf: Path, config: Config) -> Path:
+    """Accept a ``wiki/queries/<page>`` deep-research page as an ingest source.
+
+    NashSU ``deep-research.ts`` writes the research page to ``wiki/queries/``
+    and hands its absolute path straight to ``autoIngest``, which is
+    path-agnostic (``sourceIdentityForPath`` falls back to the filename for
+    non-raw paths). The improved-wiki pipeline derives source identity from a
+    ``raw/`` path in ~20 places (``relative_to(config.raw_root)``), so a pure
+    gate-relax would crash on the first stage. This bridge copies the research
+    page into ``raw/queries/<same-rel-path>`` and returns the copy — the rest
+    of the pipeline then sees a normal raw source.
+
+    The original ``wiki/queries/`` page stays as the human-readable research
+    artifact (NashSU keeps it too); ``raw/queries/<name>.md`` is the source of
+    record for this ingest. Idempotent: a same-name copy is overwritten so a
+    re-ingest is a clean redo. No-op for paths not under ``wiki/queries/``.
+    """
+    queries_dir = config.wiki_dir / "queries"
+    try:
+        rel = rf.relative_to(queries_dir)
+    except ValueError:
+        return rf
+    dest_dir = config.raw_root / "queries"
+    dest = dest_dir / rel
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(rf, dest)
+    print(f"[ingest] deep-research bridge: wiki/queries/{rel} -> raw/queries/{rel}")
+    return dest
+
 
 def _finalize_book(raw_file: Path, config: Config,
                    files_written: list, source_hash: str) -> None:
@@ -243,6 +276,70 @@ def ingest_one(
 # ═══════════════════════════════════════════════════════════════
 # Batch ingest: parallel Stage 0-2, serial Stage 3+
 # ═══════════════════════════════════════════════════════════════
+def _bg_state_path(config: Config) -> Path:
+    return config.runtime_dir / "batch-bg.json"
+
+
+def _load_bg_state(config: Config) -> dict:
+    try:
+        return json.loads(_bg_state_path(config).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_bg_state(config: Config, state: dict) -> None:
+    try:
+        _bg_state_path(config).write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _pid_alive(pid: int) -> bool:
+    """True if `pid` is an alive process (os.kill probe)."""
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+def _launch_bg_extract(file: Path, config: Config, state: dict) -> None:
+    """Launch a DETACHED background subprocess to run Phase 0/1 (minerU + caption)
+    for ``file``. start_new_session makes it survive the batch's ConversationPending
+    exits, so the slow non-LLM extraction of book N+1 overlaps with the current
+    book's LLM spine. ``--no-project-lock`` avoids deadlocking on the lock the
+    batch already holds (Phase 0/1 never touches wiki/)."""
+    h = file_sha256(file)
+    if h in state and _pid_alive(state[h].get("pid", 0)):
+        return  # already running
+    # stale entry (dead pid) or new — (re)launch
+    log_path = config.runtime_dir / f"bg-extract-{h[:8]}.log"
+    cmd = [sys.executable, str(_script_dir / "ingest.py"),
+           "--stop-after-stage", "1", "--no-project-lock", str(file)]
+    try:
+        log = open(log_path, "w", encoding="utf-8")
+    except OSError:
+        log = subprocess.DEVNULL
+    proc = subprocess.Popen(cmd, cwd=str(config.wiki_root),
+                            stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    state[h] = {"pid": proc.pid, "file": file.name}
+    _save_bg_state(config, state)
+    print(f"[batch] bg extract launched (pid {proc.pid}) — {file.name}", flush=True)
+
+
+def _wait_extract_done(config: Config, h: str, timeout: int = 7200) -> bool:
+    """Block until Phase 0/1 (stage_1_3_done) is cached for this book. The bg
+    subprocess does the extraction; this just polls the stage marker."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if is_stage_done(config, h, "stage_1_3_done"):
+            return True
+        time.sleep(5)
+    return is_stage_done(config, h, "stage_1_3_done")
+
+
 def batch_ingest(
     raw_files: list[Path],
     config: Config,
@@ -250,105 +347,92 @@ def batch_ingest(
     template_override: str | None = None,
     verbose: bool = False,
 ) -> list[dict]:
-    """Ingest multiple books one at a time through the wiki-write spine, with the
-    next book's wiki-independent stages prefetched in parallel.
+    """Pipeline batch ingest: book N's LLM work (2.1/2.2 + spine) overlaps with
+    book N+1's minerU extraction (Phase 0/1).
 
-    Cross-book PARALLELISM of wiki-dependent stages is intentionally NOT allowed:
+    Design (pipeline, not barrier):
+      - The slow non-LLM part of EVERY book (Phase 0/1 = minerU + caption) runs in
+        a detached background subprocess launched at batch start. They serialize on
+        the minerU fcntl.flock but otherwise overlap with the main conversation.
+      - The main conversation drives books ONE AT A TIME: wait for book N's
+        Phase 0/1 (bg) → 2.1/2.2 (LLM handoffs) → 2.3+ spine (LLM handoffs).
+        So minerU[N+1] runs while spine[N] is being answered.
 
-      - **Prefetch (Stage 0/1/2.1/2.2)** is wiki-independent — it reads only each
-        book's own text/digest. Several books run concurrently here (the only
-        speedup): OCR/extraction/caption overlap and chunk analysis is cached.
-      - **Spine (Stage 2.3 → write)** is wiki-dependent — Stage 2.3 links/dedups
-        against ``config.wiki_dir``. Books run ONE AT A TIME, each fully written
-        before the next book's 2.3, so cross-book dedup/linking sees prior pages.
-        (The old "parallel Stage 0-2, write on completion" design ran every
-        book's 2.3-2.9 blind to its siblings — fixed 2026-06-28.)
+    Cross-book PARALLELISM of wiki-dependent stages (2.3+) is NOT allowed: each
+    book's spine runs fully before the next book's 2.3, so dedup/linking sees
+    prior pages. Only the wiki-independent minerU overlaps (safe — never touches
+    wiki/). (The prior "barrier all prefetch, then all spine" design made book 1's
+    spine wait for book N's minerU — fixed 2026-06-28.)
 
-    Conversation mode: prefetch may leave several pending LLM prompts (answered in
-    parallel); the spine re-raises ConversationPending so only the current book is
-    pending and the next never jumps ahead. Re-invoke resumes from cache.
+    Conversation mode: each LLM handoff re-raises ConversationPending (exit 101);
+    the bg subprocesses are detached so they keep running across re-invokes, and
+    per-book stage-progress cache makes the loop resume cleanly.
     """
-    if max_concurrent < 1:
-        max_concurrent = 1
-    max_concurrent = min(max_concurrent, len(raw_files))
     total_books = len(raw_files)
-
     print(f"\n{'='*60}")
-    print(f"Batch ingest: {total_books} books — prefetch ≤{max_concurrent} parallel, write serial")
+    print(f"Batch ingest (pipeline): {total_books} books — minerU[N+1] ∥ spine[N]")
     print(f"{'='*60}")
 
     lock = ProjectLock(config, owner_id="batch")
     if not lock.acquire():
         raise RuntimeError("Could not acquire project lock for batch write phase")
 
+    bg_state = _load_bg_state(config)
+    # Launch bg extract for every book whose Phase 0/1 isn't already cached.
+    # _launch_bg_extract checks PID aliveness internally, so stale (dead) entries
+    # get re-launched rather than blocking the wait.
+    for f in raw_files:
+        h = file_sha256(f)
+        if not is_stage_done(config, h, "stage_1_3_done"):
+            _launch_bg_extract(f, config, bg_state)
+
     results: list[dict] = []
     try:
-        # ── Phase A: parallel PREFETCH (wiki-independent 0/1/2.1/2.2) ──
-        # Safe to overlap across books — none touch wiki/. Each book either
-        # reaches the 2.2/2.3 boundary (PrepareStopAfter) or pauses at an LLM
-        # step (ConversationPending — prompt is on disk for the agent to answer).
-        pending_prefetch: ConversationPending | None = None
-        with ThreadPoolExecutor(max_workers=max_concurrent) as executor:
-            futures: dict[concurrent.futures.Future, Path] = {
-                executor.submit(_do_prepare, f, config, template_override,
-                                verbose, True): f
-                for f in raw_files
-            }
-            ready = 0
-            for future in as_completed(futures):
-                name = futures[future].name
-                try:
-                    future.result()
-                    ready += 1  # already-complete book (skip/short-circuit)
-                    print(f"[batch] prefetch {ready}/{total_books} ready — {name}", flush=True)
-                except PrepareStopAfter:
-                    ready += 1  # reached the 2.2/2.3 boundary — chunk analysis cached
-                    print(f"[batch] prefetch {ready}/{total_books} ready (2.2 cached) — {name}", flush=True)
-                except ConversationPending as cp:
-                    pending_prefetch = cp
-                    print(f"[batch] prefetch paused at LLM handoff — {name} "
-                          f"(re-invoke to resume)", flush=True)
-                except Exception as e:
-                    print(f"[batch] prefetch FAILED for {name}: {e}", flush=True)
-                    import traceback
-                    traceback.print_exc()
-
-        # If any book is still mid-handoff, hand back so the agent answers those
-        # prefetch prompts and re-invokes. The spine starts only once every book's
-        # 2.2 is cached — keeping spine resumes cheap and strictly ordered.
-        if pending_prefetch is not None:
-            raise pending_prefetch
-
-        # ── Phase B: serial SPINE (wiki-dependent 2.3 → write), one book/time ──
-        # Submission order. A book is fully WRITTEN before the next book's 2.3
-        # runs. On an LLM handoff we re-raise (NOT continue) so only the current
-        # book has a pending prompt and the next never jumps ahead.
         for i, f in enumerate(raw_files, 1):
-            print(f"\n[batch] spine {i}/{total_books} — {f.name}", flush=True)
+            h = file_sha256(f)
+            print(f"\n[batch] book {i}/{total_books} — {f.name}", flush=True)
+
+            # Wait for this book's Phase 0/1 (bg extract). For book 1 this is the
+            # initial minerU wait; for later books it should already be done
+            # (overlapped with the prior book's spine).
+            if not is_stage_done(config, h, "stage_1_3_done"):
+                print(f"[batch] waiting for bg extract (Phase 0/1) — {f.name}", flush=True)
+                if not _wait_extract_done(config, h):
+                    print(f"[batch] bg extract timed out — falling back to sync — {f.name}", flush=True)
+
+            # 2.1/2.2 (Phase 0/1 cached). Raises ConversationPending on an LLM
+            # handoff (chunk prompt); PrepareStopAfter at the 2.2/2.3 boundary.
             try:
-                prepared = _do_prepare(f, config, template_override, verbose)
-                if prepared is None:
-                    print(f"[batch] {i}/{total_books} skipped (already complete) — {f.name}", flush=True)
-                    continue
+                _do_prepare(f, config, template_override, verbose, True)
+            except PrepareStopAfter:
+                pass  # reached 2.2/2.3 boundary — 2.2 cached, ready for spine
+            except ConversationPending:
+                raise  # LLM handoff in 2.1/2.2 — agent answers + re-invokes
+
+            # Spine: 2.3+ (Phase 0/1/2.1/2.2 cached). Wiki-dependent, strictly serial.
+            prepared = _do_prepare(f, config, template_override, verbose)
+            if prepared is None:
+                print(f"[batch] {i}/{total_books} skipped (already complete) — {f.name}", flush=True)
+                continue
+            try:
                 result = _do_write(prepared, verbose=verbose)
             except ConversationPending:
-                # LLM handoff in 2.4/2.8/2.9 or the write phase. Re-raise to stop
-                # the spine here; the agent answers this one prompt and re-invokes,
-                # resuming THIS book before any later book's 2.3 runs.
                 raise
             except Exception as e:
-                # Isolate a corrupt book — must not abort the rest of the batch.
                 print(f"[batch] {i}/{total_books} FAILED for {f.name}: {e}", flush=True)
-                import traceback
                 traceback.print_exc()
                 continue
             results.append(result)
             # Per-book finalization (embeddings + validate + stage_4_1 marker).
-            # OUTSIDE the try/except: a missing embedding stack must pause the run
-            # (no-fallback policy), not be isolated like a corrupt PDF.
             if result.get("status") == "ok":
                 _finalize_book(prepared["raw_file"], config,
                                result.get("files_written", []), prepared["h"])
+
+        # Drop bg-state entries for books whose extraction has finished.
+        for f in raw_files:
+            if is_stage_done(config, file_sha256(f), "stage_1_3_done"):
+                bg_state.pop(file_sha256(f), None)
+        _save_bg_state(config, bg_state)
     finally:
         lock.release()
 
@@ -413,6 +497,12 @@ def main() -> int:
              "Stages: 0=text+image extract, 1=global digest, 1.5=chunk analysis, "
              "2=concept/entity gen, 2.5=review, 3=write+merge+enrich",
     )
+    parser.add_argument(
+        "--no-project-lock", action="store_true",
+        help="Skip the ProjectLock acquire (for background extract subprocesses that "
+             "only do Phase 0/1 — minerU+caption — and never touch wiki/). The batch "
+             "coordinator holds the lock; a bg extract must not deadlock on it.",
+    )
     args = parser.parse_args()
 
     # ── Watch mode: continuous queue consumer ──
@@ -457,21 +547,43 @@ def main() -> int:
     config = Config.from_env()
     config.enrich_enabled = args.enrich_wikilinks and not args.no_enrich
     config.stop_after_stage = args.stop_after_stage
-    try:
-        _probe_and_apply_context(config)
-    except ConversationPending:
-        return 101
 
+    # Validate raw files BEFORE probing context. A wrong cwd / missing file must
+    # error immediately instead of triggering a fresh context-probe handoff —
+    # otherwise the probe (which runs before this check) caches into the wrong
+    # project's .llm-wiki and the actual file-not-found is never reached.
     raw_files = []
     for f in args.file:
         rf = Path(f).expanduser().resolve()
         if not rf.exists():
             print(f"ERROR: {rf} not found", file=sys.stderr)
             return 1
+        # NashSU deep-research parity: accept a wiki/queries/<page> research page
+        # as an ingest source by bridging it into raw/queries/ (see
+        # _bridge_wiki_queries_to_raw). NashSU's autoIngest is path-agnostic; the
+        # improved-wiki pipeline derives source identity from a raw/ path in ~20
+        # places, so we copy instead of refactoring all of them. No-op for normal
+        # raw/ inputs.
+        rf = _bridge_wiki_queries_to_raw(rf, config)
         if not rf.is_relative_to(config.raw_root):
             print(f"ERROR: {rf} is not under raw_root ({config.raw_root})", file=sys.stderr)
             return 1
+        if is_sensitive_config_source_file(rf):
+            print(
+                f"ERROR: {rf} is an agent/tool config file (under "
+                f".claude/.codex/.cursor/.gemini/.mcp with a config extension) — "
+                f"refusing to ingest to avoid leaking secrets. "
+                f"Move it out of the config dir or rename to a non-config extension.",
+                file=sys.stderr,
+            )
+            return 1
         raw_files.append(rf)
+
+    try:
+        _probe_and_apply_context(config)
+    except ConversationPending:
+        return 101
+
 
     # Batch mode: multiple files or explicit --parallel
     if len(raw_files) > 1 or args.parallel > 1:
@@ -519,6 +631,15 @@ def main() -> int:
         return 0
 
     h = file_sha256(raw_file)
+    if args.no_project_lock:
+        # Background extract subprocess (Phase 0/1 only) — the batch coordinator
+        # already holds the ProjectLock; this subprocess must not re-acquire it.
+        try:
+            result = ingest_one(raw_file, config, args.type, verbose=args.verbose)
+            print(f"\nResult: {result}")
+            return 0 if result["status"] in ("ok", "skipped") else 1
+        except ConversationPending:
+            return 101
     lock = ProjectLock(config, owner_id=h[-8:])
     if not lock.acquire():
         print("ERROR: Could not acquire project lock — another ingest may be running", file=sys.stderr)

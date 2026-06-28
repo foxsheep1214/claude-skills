@@ -8,13 +8,15 @@
 #   Phase 3 · 写入         — write .lint-cache.json + .llm-wiki/lint/*.md + summary
 #   Phase 4 · 自动修复     — optional --fix / --fix-links
 #
-# Detects 6 categories of issues:
+# Detects 7 categories of issues:
 #   1. broken-link        — [[wikilink]] points to a non-existent page
 #   2. orphan              — page no other page links to
 #   3. no-outlinks         — page has no outbound [[wikilink]]s
 #   4. missing-frontmatter — page lacks the required YAML block
 #   5. missing-domain      — concept/entity page lacks 'domain' in frontmatter
 #   6. invalid-domain      — domain value not in allowed list (see references/domains.md)
+#   7. invalid-role        — entity page has a `role:` value outside the canonical
+#                            set, or a non-entity page carries `role:`
 #
 # Plus a 5th category when --semantic is passed:
 #   5. semantic       — LLM-driven contradiction/stale/missing-page/suggestion
@@ -277,6 +279,8 @@ def _normalize_domain(d: str) -> str:
     }
     return aliases.get(d, d)
 DOMAIN_APPLICABLE_DIRS = {"concepts", "entities"}
+# Canonical entity roles (NashSU parity). `role:` is only valid on entity pages.
+VALID_ROLES = {"person", "organization", "system", "standard", "model", "device"}
 for stem, path in pages.items():
     # Determine page directory from relative path
     rel = str(path.relative_to(wiki_dir))
@@ -296,6 +300,33 @@ for stem, path in pages.items():
         m = re.match(r'type:\s*(\S+)', line)
         if m:
             page_type = m.group(1).strip()
+    # Entity role validation (NashSU parity): `role:` is only meaningful on
+    # entity pages and must be one of the canonical roles.
+    role_found = None
+    for line in fm_text.split("\n"):
+        m = re.match(r'role:\s*(\S+)', line)
+        if m:
+            role_found = m.group(1).strip().strip('"').strip("'")
+            break
+    if role_found is not None:
+        if page_type != "entity":
+            findings.append({
+                "type": "invalid-role",
+                "severity": "warning",
+                "page": str(path.relative_to(wiki_dir)),
+                "detail": f"'role:' field only valid on entity pages (this page is type '{page_type}'). Remove the role: line.",
+                "id": f"lint-ir-{stem}",
+                "createdAt": now_ms,
+            })
+        elif role_found not in VALID_ROLES:
+            findings.append({
+                "type": "invalid-role",
+                "severity": "warning",
+                "page": str(path.relative_to(wiki_dir)),
+                "detail": f"Role '{role_found}' is not in the allowed set. Valid roles: {', '.join(sorted(VALID_ROLES))}.",
+                "id": f"lint-ir-{stem}",
+                "createdAt": now_ms,
+            })
     # Only concept and entity pages need domain
     if page_type not in ("concept", "entity"):
         continue
@@ -339,7 +370,7 @@ from collections import Counter
 findings = json.load(open('$LINT_CACHE', 'r', encoding='utf-8'))
 c = Counter(f['type'] for f in findings)
 total = sum(c.values())
-parts = [f'{total} findings', f'broken-link: {c.get(\"broken-link\", 0)}', f'orphan: {c.get(\"orphan\", 0)}', f'no-outlinks: {c.get(\"no-outlinks\", 0)}', f'missing-frontmatter: {c.get(\"missing-frontmatter\", 0)}', f'missing-domain: {c.get(\"missing-domain\", 0)}', f'invalid-domain: {c.get(\"invalid-domain\", 0)}']
+parts = [f'{total} findings', f'broken-link: {c.get(\"broken-link\", 0)}', f'orphan: {c.get(\"orphan\", 0)}', f'no-outlinks: {c.get(\"no-outlinks\", 0)}', f'missing-frontmatter: {c.get(\"missing-frontmatter\", 0)}', f'missing-domain: {c.get(\"missing-domain\", 0)}', f'invalid-domain: {c.get(\"invalid-domain\", 0)}', f'invalid-role: {c.get(\"invalid-role\", 0)}']
 print(' | '.join(parts))
 ")
 
@@ -491,6 +522,7 @@ parts = [f'{total} findings',
          f'missing-frontmatter: {c.get(\"missing-frontmatter\", 0)}',
          f'missing-domain: {c.get(\"missing-domain\", 0)}',
          f'invalid-domain: {c.get(\"invalid-domain\", 0)}',
+         f'invalid-role: {c.get(\"invalid-role\", 0)}',
          f'semantic: {c.get(\"semantic\", 0)}']
 print(' | '.join(parts))
 ")

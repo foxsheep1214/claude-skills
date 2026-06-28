@@ -46,7 +46,8 @@ def _collect_formulas_block(analyses: list[dict], cap: int = 60) -> str:
 
 
 # Folders that may appear in schema.md but are not LLM-generated page types.
-_SCHEMA_NON_PAGE_DIRS = {"media", "raw", "page-history", "chats"}
+# Shared constant lives in _stage_2_base.SCHEMA_NON_PAGE_DIRS (NashSU 0.5.3
+# schema-typed-candidates parity — used by Stage 2.2 analysis too).
 
 
 def _schema_routing_block(config: Config) -> str:
@@ -60,7 +61,7 @@ def _schema_routing_block(config: Config) -> str:
     text = load_schema_md(config)
     if not text.strip():
         return ""
-    extra = schema_folders(text) - BASE_PAGE_DIRS - _SCHEMA_NON_PAGE_DIRS
+    extra = schema_folders(text) - BASE_PAGE_DIRS - SCHEMA_NON_PAGE_DIRS
     if not extra:
         return ""
     return (
@@ -176,6 +177,39 @@ def _stage_2_4_build_prompt(
     concept_str = "\n".join(concept_lines[:100]) if concept_lines else "(none)"
     entity_str = "\n".join(entity_lines[:30]) if entity_lines else "(none)"
 
+    # NashSU 0.5.3 parity: schema-typed candidates pre-identified by Stage 2.2.
+    # Surface them explicitly so generation routes a page into the candidate's
+    # folder instead of re-deriving the type from concepts/entities. Skip any
+    # whose slug is already covered (existing/prior-chunk) — wikilink only.
+    schema_candidate_slugs: list[tuple[str, str]] = []  # (name, folder/slug)
+    schema_candidate_lines: list[str] = []
+    for cand in chunk_analysis.get("schema_typed_candidates", []) or []:
+        if not isinstance(cand, dict):
+            continue
+        name = str(cand.get("name", "")).strip()
+        folder = str(cand.get("folder", "")).strip()
+        if not name or not folder:
+            continue
+        slug = slugify(name)
+        full_slug = f"{folder}/{slug}"
+        if name in existing_refs and existing_refs[name]:
+            schema_candidate_lines.append(
+                f"  - {name} → ALREADY COVERED by [[{existing_refs[name][0]}]]: "
+                f"do NOT generate; wikilink ONLY as [[{existing_refs[name][0]}]]"
+            )
+        elif full_slug in generated_slugs:
+            schema_candidate_lines.append(f"  - {name} (slug: {full_slug}) [ALREADY COVERED — SKIP]")
+        else:
+            cand_type = str(cand.get("type") or folder)
+            cand_rationale = str(cand.get("rationale", ""))
+            schema_candidate_lines.append(
+                f"  - {name} (slug: {full_slug}) [{cand_type}]: {cand_rationale}"
+            )
+            schema_candidate_slugs.append((name, full_slug))
+    schema_candidates_str = (
+        "\n".join(schema_candidate_lines[:40]) if schema_candidate_lines else "(none)"
+    )
+
     generated_str = "\n".join(f"  - {s}" for s in generated_slugs) if generated_slugs else "(none yet — you are the first chunk)"
 
     # Build linkable slugs list: all slugs the LLM is allowed to wikilink to.
@@ -183,6 +217,8 @@ def _stage_2_4_build_prompt(
     for _, s in concept_slugs:
         linkable.add(s)
     for _, s in entity_slugs:
+        linkable.add(s)
+    for _, s in schema_candidate_slugs:
         linkable.add(s)
     for s in generated_slugs:
         if "/" in s:
@@ -282,6 +318,9 @@ Chunk: {chunk_index + 1}
 # Entities found in this chunk (generate a page for key ones — skip ALREADY COVERED):
 {entity_str}
 
+# Schema-typed pages found in this chunk (NashSU 0.5.3 parity — generate at wiki/<folder>/<slug>.md when NOT already covered; skip ALREADY COVERED):
+{schema_candidates_str}
+
 # Supplementary foundational pages (use sparingly)
 If THIS chunk clearly defines or depends on a foundational concept that is NOT in
 the lists above AND is NOT in the Linkable pages list below (i.e. no existing page
@@ -321,6 +360,9 @@ Rules:
 6. Math: ALWAYS write formulas in LaTeX — inline $...$, display $$...$$. Transcribe
    each formula from the source / Formulas list verbatim (same variables, same form);
    never paraphrase a formula into prose or swap in a generic textbook version.
+7. Entity pages MUST include a `role:` frontmatter field copied from the entity's
+   "(role)" in the list above (person|organization|system|standard|model|device).
+   Omit the line only if the listed role is empty.
 
 # Output Format — EXACT
 ---FILE:wiki/concepts/<slug>.md---
@@ -341,7 +383,22 @@ updated: {time.strftime('%Y-%m-%d')}
 
 ---END FILE---
 ---FILE:wiki/entities/<slug>.md---
-(frontmatter + content)
+---
+type: entity
+role: "<role from the entity list: person|organization|system|standard|model|device>"
+domain: general
+title: "<entity name>"
+tags: [...]
+related: [...]
+sources: ["raw/{file_path.relative_to(config.raw_root)}"]
+created: {time.strftime('%Y-%m-%d')}
+updated: {time.strftime('%Y-%m-%d')}
+---
+
+# <entity name>
+
+(content)
+
 ---END FILE---
 
 Generate a page for EVERY concept listed above that is NOT marked [ALREADY COVERED]. Go!
@@ -867,6 +924,9 @@ Rules:
 6. Math: ALWAYS write formulas in LaTeX — inline $...$, display $$...$$. Transcribe
    each formula from the source / Formulas list verbatim (same variables, same form);
    never paraphrase a formula into prose or swap in a generic textbook version.
+7. Entity pages MUST include a `role:` frontmatter field copied from the entity's
+   "(role)" in the list above (person|organization|system|standard|model|device).
+   Omit the line only if the listed role is empty.
 
 # Output Format — EXACT
 ---FILE:wiki/concepts/<slug>.md---
@@ -887,7 +947,22 @@ updated: {time.strftime('%Y-%m-%d')}
 
 ---END FILE---
 ---FILE:wiki/entities/<slug>.md---
-(frontmatter + content)
+---
+type: entity
+role: "<role from the entity list: person|organization|system|standard|model|device>"
+domain: general
+title: "<entity name>"
+tags: [...]
+related: [...]
+sources: ["raw/{file_path.relative_to(config.raw_root)}"]
+created: {time.strftime('%Y-%m-%d')}
+updated: {time.strftime('%Y-%m-%d')}
+---
+
+# <entity name>
+
+(content)
+
 ---END FILE---
 
 Generate a page for EVERY concept listed above that is NOT marked [ALREADY COVERED], in ONE response. Go!
