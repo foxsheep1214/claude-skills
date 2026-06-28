@@ -48,6 +48,7 @@ def _prepare_source_page(
     global_digest: dict, raw_file: Path, config: Config,
     template_content: str, progress: dict | None, file_blocks: list,
     verbose: bool, source_context: str = "",
+    associations: dict | None = None,
 ) -> list:
     """Stage 2.6: generate the source page (dedicated LLM call) and merge into file_blocks."""
     current_domain = _detect_domain(raw_file, template_content, global_digest)
@@ -67,11 +68,18 @@ def _prepare_source_page(
             if _stem.endswith(".md"):
                 _stem = _stem[:-3]
             _linkable.append(_stem)
+        # Generated-this-ingest concept/entity slugs (from 2.4 file_blocks) —
+        # feeds the source page Key Concepts/Entities (NashSU single-tier: list
+        # ALL generated pages, not the curated 2.1 key_concepts).
+        _gen_concepts = [s for s in _linkable if s.startswith("concepts/")]
+        _gen_entities = [s for s in _linkable if s.startswith("entities/")]
         _linkable.extend(list_existing_slugs(config))
         source_page_response, _ = stage_2_6_source_page(
             global_digest, raw_file, config,
             template=template_content, current_domain=current_domain, verbose=verbose,
             linkable_slugs=_linkable, source_context=source_context,
+            associations=associations,
+            generated_concepts=_gen_concepts, generated_entities=_gen_entities,
         )
 
     if not source_page_response:
@@ -419,7 +427,8 @@ def _do_prepare(
             # Stage 2.6: Source page generation + merge
             file_blocks = _prepare_source_page(
                 global_digest, raw_file, config, template_content, progress,
-                file_blocks, verbose, source_context=_src_grounding)
+                file_blocks, verbose, source_context=_src_grounding,
+                associations=incremental_associations)
             _verify_stage_2_4_file_blocks(file_blocks, raw_file, incremental_associations)
 
             _q29_source = _src_grounding  # same budgeted excerpt as 2.6

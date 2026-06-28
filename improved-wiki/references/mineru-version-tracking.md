@@ -30,12 +30,6 @@ Method flag (`-m`) controls text extraction independently of backend:
 mineru -b pipeline -m txt -l ch <input.pdf>
 ```
 
-> **Note**: improved-wiki Stage 1 currently still routes text-based PDFs through
-> the VLM backend (`-b vlm-engine`). Replacing it with `-b pipeline -m txt -l ch`
-> for text-layer PDFs is the planned optimization — see `improved-wiki-extraction-mineru-only`.
-> Not yet integrated; awaiting confirmation of which "API error" prompted the
-> 2026-06-23 investigation (mineru API vs LLM API vs earlier SSL/TLS issue).
-
 ## 3.4.0 changelog highlights
 
 - **Pipeline backend OCR**: PP-OCRv6 (~11% accuracy gain)
