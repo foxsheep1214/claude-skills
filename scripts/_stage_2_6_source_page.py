@@ -10,6 +10,9 @@ def stage_2_6_source_page(
     verbose: bool = False,
     linkable_slugs: list[str] | None = None,
     source_context: str = "",
+    associations: dict | None = None,
+    generated_concepts: list[str] | None = None,
+    generated_entities: list[str] | None = None,
 ) -> tuple[str, str]:
     """Stage 2.6: Dedicated source page generation.
 
@@ -74,9 +77,32 @@ Write a focused technical summary from the digest. Cover:
 
 Papers are not books — do NOT impose a chapter-by-chapter outline. Write flowing prose with [[wikilinks]] to concepts/entities.
 
-## Key Takeaways
+## Key Entities
 
-5-10 most important claims, formulas, design rules, or conclusions. Each ONE sentence."""
+List **EVERY entity page from the "Generated pages" block above** (do NOT omit any), one bullet per entity, each with:
+- **Name + type** (person / organization / dataset / tool / model).
+- **Role in this paper** — central vs. peripheral, one sentence.
+- **Exists in wiki** — use the status shown in the Generated pages block. Wikilink each to its slug.
+
+## Main Arguments & Findings
+
+The paper's core claims. For EACH:
+- **Claim:** the assertion (one sentence).
+- **Evidence:** which figure / table / section supports it.
+- **Strength:** high / medium / low.
+- **Subject:** which entity or method the claim attaches to — do NOT transfer claims across subjects just because they share keywords.
+
+## Connections to Existing Wiki
+
+Which existing wiki pages does this source relate to? For each, does it **strengthen**, **challenge**, or **extend** existing knowledge? Wikilink each. If none, state "None identified."
+
+## Contradictions & Tensions
+
+Does anything in this source conflict with existing wiki content? Any internal tensions or caveats? If none, state "None identified."
+
+## Recommendations
+
+Which wiki pages should be created or updated based on this source? What should be emphasized vs. de-emphasized? Any open questions worth flagging for the user?"""
     else:
         source_kind = "book"
         info_header = "Book Information (from Global Digest)"
@@ -92,9 +118,37 @@ For EACH chapter in the outline, write one comprehensive line:
 Example:
 1. **DC-DC Converters:** buck, boost, buck-boost, CCM vs DCM, voltage-mode control, PWM, synchronous rectification.
 
-## Key Takeaways
+Then list **EVERY concept page from the "Generated pages" block above** (this ingest created a page for each — do NOT omit any), one bullet per concept, each with:
+- **Name + brief definition** — the concept's definition as stated in the book.
+- **Why it matters in this book** — one sentence.
+- **Exists in wiki** — use the status shown in the Generated pages block ("new" or "exists (merged)"). Wikilink each to its slug.
 
-5-10 most important claims, formulas, design rules, or conclusions. Each ONE sentence."""
+## Key Entities
+
+List **EVERY entity page from the "Generated pages" block above** (do NOT omit any), one bullet per entity, each with:
+- **Name + type** (person / organization / standard / device / system / model).
+- **Role in this book** — central vs. peripheral, one sentence.
+- **Exists in wiki** — use the status shown in the Generated pages block. Wikilink each to its slug.
+
+## Main Arguments & Findings
+
+The book's core claims, results, or design rules. For EACH:
+- **Claim:** the assertion (one sentence).
+- **Evidence:** which chapter / case / equation supports it.
+- **Strength:** high / medium / low.
+- **Subject:** which entity or concept the claim attaches to — do NOT transfer claims, limits, or evaluations from one subject to another just because they share keywords.
+
+## Connections to Existing Wiki
+
+Which existing wiki pages does this source relate to? For each, does it **strengthen**, **challenge**, or **extend** existing knowledge? Wikilink each. If none, state "None identified."
+
+## Contradictions & Tensions
+
+Does anything in this source conflict with existing wiki content? Any internal tensions or caveats? If none, state "None identified."
+
+## Recommendations
+
+Which wiki pages should be created or updated based on this source? What should be emphasized vs. de-emphasized? Any open questions worth flagging for the user?"""
 
     # Issue 2 fix: constrain source-page wikilinks to a known-linkable set so the
     # LLM cannot link to a concept's own (never-written) slug when that concept
@@ -131,10 +185,70 @@ Example:
     else:
         source_section = ""
 
+    # NashSU parity: Stage 2.3 association already answered "does this concept/
+    # entity already exist in the wiki?" — feed those FACTS into the prompt so
+    # the LLM fills the "exists in wiki" field truthfully instead of guessing.
+    # associations = {name: [existing_slug, ...]} (only names that matched).
+    assoc = associations or {}
+    existing_lines: list[str] = []
+    new_lines: list[str] = []
+    for c in key_concepts:
+        name = c.get("name", "").strip() if isinstance(c, dict) else str(c).strip()
+        if not name:
+            continue
+        m = assoc.get(name)
+        if m:
+            existing_lines.append(f"- {name} → exists as [[{m[0]}]]")
+        else:
+            new_lines.append(f"- {name} (new)")
+    for e in key_entities:
+        name = e.get("name", "").strip() if isinstance(e, dict) else str(e).strip()
+        if not name:
+            continue
+        m = assoc.get(name)
+        if m:
+            existing_lines.append(f"- {name} → exists as [[{m[0]}]]")
+        else:
+            new_lines.append(f"- {name} (new)")
+    if existing_lines or new_lines:
+        assoc_section = (
+            "\n# Existing-wiki associations (Stage 2.3 FACTS — use for the "
+            "\"exists in wiki\" field, do NOT guess)\n"
+            "Already exist in wiki (wikilink to the listed slug; do NOT create new):\n"
+            + "\n".join(existing_lines or ["(none)"]) + "\n"
+            "New (not yet in wiki — new pages created this ingest):\n"
+            + "\n".join(new_lines or ["(none)"]) + "\n"
+        )
+    else:
+        assoc_section = ""
+
+    # Option A (NashSU single-tier): Key Concepts / Key Entities list EVERY
+    # page generated this ingest (Stage 2.4 file_blocks), NOT the curated 2.1
+    # key_concepts. Exists status comes from the 2.3 association facts above
+    # (a slug is "exists (merged)" if 2.3 matched it to an existing page).
+    _assoc_slugs: set[str] = set()
+    for _slugs in (assoc or {}).values():
+        _assoc_slugs.update(_slugs)
+    def _exists_mark(slug: str) -> str:
+        return "exists (merged)" if slug in _assoc_slugs else "new"
+    _gen_c = generated_concepts or []
+    _gen_e = generated_entities or []
+    if _gen_c or _gen_e:
+        _gp = ["# Generated pages (list EVERY one in Key Concepts / Key Entities — do NOT omit any)"]
+        if _gen_c:
+            _gp.append("Concept pages generated this ingest:")
+            _gp.extend(f"- [[{s}]] ({_exists_mark(s)})" for s in _gen_c)
+        if _gen_e:
+            _gp.append("Entity pages generated this ingest:")
+            _gp.extend(f"- [[{s}]] ({_exists_mark(s)})" for s in _gen_e)
+        generated_pages_section = "\n".join(_gp) + "\n"
+    else:
+        generated_pages_section = ""
+
     prompt = f"""# Role
 You are writing a **source page** for a Karpathy-pattern wiki knowledge base.
 This page will be the authoritative entry for a {source_kind} in the wiki.
-{template_section}{linkable_rule}{source_section}
+{template_section}{linkable_rule}{source_section}{assoc_section}{generated_pages_section}
 # {info_header}
 ```yaml
 {digest_str}
@@ -165,7 +279,7 @@ sources: ["raw/{source_rel}{file_path.suffix}"]
 - Your FIRST line MUST be `---FILE:wiki/sources/{source_rel}.md---`, immediately followed by `---` (frontmatter start) on the NEXT line with NO blank line in between
 - Your LAST line MUST be `---END FILE---`
 - The frontmatter MUST use real data from the digest. NO ``` fences. NO blank lines before frontmatter.
-- Do NOT add extra sections beyond the 3 listed above. Link to concepts via [[wikilinks]].
+- Do NOT add extra sections beyond those listed above. Link to concepts via [[wikilinks]].
 - tags: 3-8 relevant tags (do NOT leave empty)
 - related: 2-5 related wiki page slugs
 - Math: $inline$ $$display$$

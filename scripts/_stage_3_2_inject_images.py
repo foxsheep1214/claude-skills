@@ -6,6 +6,7 @@ page, reading from the unified _manifest.json (Path A PyMuPDF + Path B minerU)
 with legacy _figures.json / cloud-OCR caption fallbacks.
 """
 import json
+import os
 import re
 from pathlib import Path
 
@@ -45,13 +46,28 @@ def stage_3_2_inject_images(config: Config, raw_file: Path, source_path: Path,
             is_mineru = any("mineru_" in i.get("filename", "") for i in images[:10])
             section = f"## Embedded Images\n\n"
             section += f"本书共抽出 {len(images)} 张{'图表' if is_mineru else '嵌入图'}。\n\n"
-            section += "| 页号 | Caption | 文件 |\n|------|---------|------|\n"
+            # NashSU parity (extract-source-images.ts:buildImageMarkdownSection):
+            # group by page under `### Page N`, emit markdown image syntax
+            # ![caption](path) with the FULL caption as alt text (sanitized —
+            # no newlines, no `]`), not a truncated table cell. Path is resolved
+            # relative to the source page so the image renders without a
+            # markdown-image-resolver (which improved-wiki does not have).
+            source_dir = source_path.parent
+            by_page: dict[int, list] = {}
             for img in sorted(images, key=lambda x: (x["page"], x.get("img_idx_in_page", 0))):
-                cap_path = media_dir / (img["filename"] + ".caption.txt")
-                cap = cap_path.read_text(encoding="utf-8").strip() if cap_path.exists() else "（无 caption）"
-                if len(cap) > 80:
-                    cap = cap[:80] + "..."
-                section += f"| p{img['page']} | {cap} | `{img['path']}` |\n"
+                by_page.setdefault(img["page"], []).append(img)
+            for page in sorted(by_page):
+                section += f"### Page {page}\n\n"
+                for img in by_page[page]:
+                    cap_path = media_dir / (img["filename"] + ".caption.txt")
+                    cap = cap_path.read_text(encoding="utf-8").strip() if cap_path.exists() else ""
+                    cap = re.sub(r"[\r\n]+", " ", cap).replace("]", ")").strip()
+                    img_abs = media_dir / img["filename"]
+                    try:
+                        rel = os.path.relpath(img_abs, source_dir)
+                    except ValueError:
+                        rel = img.get("path", "")
+                    section += f"![{cap}]({rel})\n\n"
             section += f"\n> 图片由 {'minerU VLM' if is_mineru else 'PyMuPDF'} 提取，caption 由 {config.caption_model} 生成。详细 manifest 见 `wiki/media/{slug}/`\n"
             content += section
             tmp = source_path.with_suffix(source_path.suffix + ".tmp")
