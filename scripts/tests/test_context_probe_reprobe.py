@@ -76,12 +76,14 @@ def _write_cache(rt, payload):
     (rt / "probed-context.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
-def test_load_cached_skips_when_env_unreliable(tmp_path):
-    # env name proven unreliable (self-report disagreed) → force re-probe.
+def test_load_cached_reuses_even_when_env_unreliable(tmp_path):
+    # env_reliable=False is INFORMATIONAL (warning only) — the live-probed value is
+    # still correct and reused. Blocking would stall multi-handoff ingests (a probe
+    # handoff before every stage). Staleness is bounded by the TTL instead.
     rt = tmp_path / ".llm-wiki"
     _write_cache(rt, {"model_env": "glm-5.2", "model_self": "claude-opus-4-8",
                       "env_reliable": False, "context": 1000000, "probed_at": int(time.time())})
-    assert cp.load_cached(_Cfg(rt, "glm-5.2")) is None
+    assert cp.load_cached(_Cfg(rt, "glm-5.2")) == 1000000
 
 
 def test_load_cached_reuses_when_env_reliable(tmp_path):
