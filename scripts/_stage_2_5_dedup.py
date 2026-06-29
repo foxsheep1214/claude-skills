@@ -62,55 +62,76 @@ def _stage_2_5_find_duplicate_concepts(concepts, *, embeddings=None):
     return [[slug_to_index[sid] for sid in cl] for cl in clusters]
 
 
-def _stage_2_5_confirm_prompt(group_concepts):
-    items = "\n\n".join(
-        "### Concept {n}: {title}\nslug: {slug}\n{defn}".format(
-            n=i + 1, title=c["title"], slug=c["slug"], defn=c["definition_snippet"])
-        for i, c in enumerate(group_concepts)
-    )
-    return """You are reviewing concept pages generated from the same source for duplicates.
+def _stage_2_5_confirm_prompt(groups_concepts):
+    """Batched confirm prompt: ALL candidate groups in ONE call.
 
-{items}
+    Was one LLM call per group (Finding C: N groups → N conversation-mode
+    handoffs). NashSU batches its dedup detector similarly. Each group is
+    numbered; the model returns one verdict line per group.
+    """
+    sections = []
+    for gi, group_concepts in enumerate(groups_concepts, 1):
+        items = "\n".join(
+            "  - {title} (slug: {slug}): {defn}".format(
+                title=c["title"], slug=c["slug"], defn=c["definition_snippet"])
+            for c in group_concepts
+        )
+        sections.append("## Group {gi}\n{items}".format(gi=gi, items=items))
+    body = "\n\n".join(sections)
+    return """You are reviewing groups of concept pages generated from the same source for duplicates.
+Each group below is a set of candidate concepts that MIGHT be the same underlying concept.
 
-Are these concepts describing the SAME underlying concept (just named/worded differently)?
-- If YES: reply `MERGE: yes | PRIMARY: <slug of the best canonical one> | REASON: <one sentence>`
-- If NO:  reply `MERGE: no | REASON: <one sentence>`
+{body}
 
-When unsure, reply `MERGE: no`.
-""".format(items=items)
+For EACH group, decide whether its concepts describe the SAME underlying concept
+(just named/worded differently). Reply with EXACTLY one line per group:
+- If SAME: `GROUP <n>: MERGE yes | PRIMARY: <slug of the best canonical one>`
+- If NOT:  `GROUP <n>: MERGE no`
+
+When unsure, reply `GROUP <n>: MERGE no`.
+""".format(body=body)
 
 
-def _stage_2_5_confirm_merge_with_llm(group_concepts, config):
-    prompt = _stage_2_5_confirm_prompt(group_concepts)
+def _stage_2_5_confirm_merges_with_llm(groups_concepts, config):
+    """One LLM call confirming ALL candidate groups. Returns a list of
+    (should_merge, primary_slug) aligned to ``groups_concepts``. Conservative:
+    any group whose verdict is missing/unparseable/not-yes → (False, "")."""
+    prompt = _stage_2_5_confirm_prompt(groups_concepts)
     try:
-        response, _ = call_anthropic_protocol(prompt, config, max_tokens=200, label="dedup-confirm")
+        response, _ = call_anthropic_protocol(prompt, config, max_tokens=400, label="dedup-confirm")
     except Exception as e:
         print("  [stage 2.4] LLM confirm failed: {} — keeping all candidates".format(e))
-        return False, ""
-    m = re.search(r"MERGE:\s*(yes|no)", response, re.IGNORECASE)
-    if not m or m.group(1).lower() != "yes":
-        return False, ""
-    pm = re.search(r"PRIMARY:\s*(\S+)", response)
-    primary = pm.group(1).strip() if pm else ""
-    return True, primary
+        return [(False, "")] * len(groups_concepts)
+    verdicts = []
+    for gi in range(1, len(groups_concepts) + 1):
+        m = re.search(r"GROUP\s+{}\s*:\s*MERGE\s*(yes|no)".format(gi), response, re.IGNORECASE)
+        if not m or m.group(1).lower() != "yes":
+            verdicts.append((False, ""))
+            continue
+        line = response[m.start():].split("\n", 1)[0]
+        pm = re.search(r"PRIMARY:?\s*(\S+)", line)
+        primary = pm.group(1).strip().strip("|").strip() if pm else ""
+        verdicts.append((True, primary))
+    return verdicts
 
 
 def _stage_2_5_generate_merge_rules(concepts, duplicate_groups, config=None):
     rules = []
-    for group in duplicate_groups:
-        group_concepts = [concepts[i] for i in group]
-        primary_slug = ""
-        # Conservative default: never merge without an LLM confirmation — a
-        # missing config must not silently merge every Jaccard-candidate group.
-        should_merge = False
-        if config is not None:
-            should_merge, primary_slug = _stage_2_5_confirm_merge_with_llm(group_concepts, config)
+    if not duplicate_groups:
+        return rules
+    groups_concepts = [[concepts[i] for i in group] for group in duplicate_groups]
+    # Conservative default: never merge without an LLM confirmation — a missing
+    # config must not silently merge every candidate group.
+    if config is None:
+        return rules
+    verdicts = _stage_2_5_confirm_merges_with_llm(groups_concepts, config)
+    for group_concepts, (should_merge, primary_slug) in zip(groups_concepts, verdicts):
         if not should_merge:
             continue
         group_slugs = [c["slug"] for c in group_concepts]
         if not primary_slug or primary_slug not in group_slugs:
-            primary_idx = max(group, key=lambda i: len(concepts[i]["definition_snippet"]))
-            primary_slug = concepts[primary_idx]["slug"]
+            primary = max(group_concepts, key=lambda c: len(c["definition_snippet"]))
+            primary_slug = primary["slug"]
         duplicate_slugs = [c["slug"] for c in group_concepts if c["slug"] != primary_slug]
         if not duplicate_slugs:
             continue
