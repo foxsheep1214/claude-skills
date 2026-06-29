@@ -116,7 +116,6 @@ from _stage_3_write import (
 )
 from _stage_3_2_inject_images import stage_3_2_inject_images
 from _stage_3_7_embed import stage_3_7_embed_new_pages
-from _stage_4_1_validate import stage_4_1_validate_ingest
 from _enrich_wikilinks import enrich_wikilinks_batch
 from _watch import ingest_watch
 from _stage_validators import (verify_stage_0, StageValidationError, _verify_or_die, _verify_stage_1_1_text, _verify_stage_2_1_digest, _verify_stage_2_2_chunks, _verify_stage_2_4_file_blocks, validate_stage_outputs)
@@ -178,12 +177,23 @@ def _finalize_book(raw_file: Path, config: Config,
                    files_written: list, source_hash: str) -> None:
     """Per-book post-write finalization shared by the single-book and batch paths.
 
-    Runs Stage 3.7 (embeddings) → Stage 4.1 (validation) → sets the
-    ``stage_4_1`` completion marker. This used to live ONLY in ingest_one, so
-    batch_ingest — and the ``--watch`` queue daemon, which routes through
-    batch_ingest — silently skipped embeddings and validation, never set the
-    stage_4_1 marker, and left every batch-ingested book perpetually
-    "mid-flight" in _stage_0_2_should_skip (re-running 3.4–3.7 on each pass).
+    Runs Stage 3.7 (embeddings) → sets the ``stage_4_1`` completion marker.
+
+    The dedicated post-ingest validation audit (formerly "Stage 4.1", running
+    validate_ingest.py) was REMOVED for NashSU alignment: NashSU has no
+    post-ingest verification stage. NashSU's only ingest-time check is schema
+    routing (``validateWikiPageRouting``), which improved-wiki already performs
+    where NashSU does — at WRITE time in Stage 3.1
+    (``_stage_3_1_auto_correct_wiki_path``) — so it is preserved automatically.
+    The ``stage_4_1`` marker KEY is kept (not renamed) as the finalize-complete
+    signal that ``_stage_0_2_should_skip`` reads, so already-ingested books stay
+    recognized as complete. ``validate_ingest.py`` remains as a standalone manual
+    tool; it is just no longer auto-run by ingest.
+
+    This finalization used to live ONLY in ingest_one, so batch_ingest — and the
+    ``--watch`` queue daemon, which routes through batch_ingest — silently
+    skipped embeddings and never set the completion marker, leaving every
+    batch-ingested book perpetually "mid-flight" in _stage_0_2_should_skip.
 
     Embeddings stay mandatory / no-fallback here too: a missing Ollama stack
     raises (pauses this book, and in batch propagates to abort the run) rather
@@ -193,7 +203,6 @@ def _finalize_book(raw_file: Path, config: Config,
     post-ingest graph rebuild). Run ``python3 scripts/graph.py`` manually.
     """
     stage_3_7_embed_new_pages(config, files_written)
-    stage_4_1_validate_ingest(config, raw_file)
     mark_stage_done(config, source_hash, "stage_4_1")
 
 
@@ -268,7 +277,7 @@ def ingest_one(
 
     files_written = result["files_written"]
 
-    # Embeddings + validation + stage_4_1 marker (shared with batch path).
+    # Embeddings + completion marker (shared with batch path).
     _finalize_book(raw_file, config, files_written, h)
 
     return {"status": "ok", "files_written": files_written}
@@ -436,7 +445,7 @@ def batch_ingest(
                 traceback.print_exc()
                 continue
             results.append(result)
-            # Per-book finalization (embeddings + validate + stage_4_1 marker).
+            # Per-book finalization (embeddings + completion marker).
             if result.get("status") == "ok":
                 _finalize_book(prepared["raw_file"], config,
                                result.get("files_written", []), prepared["h"])
