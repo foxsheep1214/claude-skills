@@ -109,7 +109,8 @@ class TestDryRun(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             root = Path(t)
             _make_wiki(root)
-            report = ds.run_phase2(root, _mock_llm(), apply=False, today=FIXED_TODAY)
+            report = ds.run_phase2(root, _mock_llm(), apply=False, today=FIXED_TODAY,
+                                    embedding_prefilter=False)
             self.assertEqual(len(report["groups"]), 1)
             self.assertEqual(report["groups"][0]["slugs"], ["paos", "聚磷菌"])
             self.assertEqual(report["applied"], [])
@@ -125,7 +126,8 @@ class TestApply(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             root = Path(t)
             _make_wiki(root)
-            report = ds.run_phase2(root, _mock_llm(), apply=True, today=FIXED_TODAY)
+            report = ds.run_phase2(root, _mock_llm(), apply=True, today=FIXED_TODAY,
+                                    embedding_prefilter=False)
 
             self.assertEqual(len(report["applied"]), 1)
             applied = report["applied"][0]
@@ -175,6 +177,7 @@ class TestWhitelist(unittest.TestCase):
             report = ds.run_phase2(
                 root, _mock_llm(), apply=False, today=FIXED_TODAY,
                 whitelist_pairs=[["paos", "聚磷菌"]],
+                embedding_prefilter=False,
             )
             self.assertEqual(report["groups"], [])
 
@@ -199,7 +202,7 @@ class TestMainConversationHandoff(unittest.TestCase):
 
             # First invocation: detect call is uncached → ConversationPending → 101.
             # main() defaults to LLM semantic (NashSU parity).
-            rc = ds.main(["--project", str(root), "--dry-run"])
+            rc = ds.main(["--project", str(root), "--dry-run", "--no-embedding-prefilter"])
             self.assertEqual(rc, 101)
             conv_dir = root / ".llm-wiki" / "conversation" / "dedup"
             md_files = list(conv_dir.glob("*.md"))
@@ -211,7 +214,7 @@ class TestMainConversationHandoff(unittest.TestCase):
                                               encoding="utf-8")
 
             # Second invocation: detect cached → no groups → report written → 0.
-            rc = ds.main(["--project", str(root), "--dry-run"])
+            rc = ds.main(["--project", str(root), "--dry-run", "--no-embedding-prefilter"])
             self.assertEqual(rc, 0)
             report = json.loads(
                 (root / ".llm-wiki" / "dedup-report.json").read_text("utf-8")
@@ -461,6 +464,27 @@ class TestMergeLock(unittest.TestCase):
                 fcntl.flock(fd, fcntl.LOCK_UN)
             finally:
                 os.close(fd)
+
+
+class TestEmbeddingPrefilterDefault(unittest.TestCase):
+    """The embedding prefilter is ON by default at the CLI (NashSU dedup-runner
+    parity: it always prefilters). The lint command exposes no flag, so the
+    default IS the only behavior most users get — it must bound the detector."""
+
+    def _capture_prefilter(self, argv):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            _make_wiki(root)
+            with mock.patch.object(ds, "run_phase2", return_value={"groups": [], "applied": []}) as m:
+                ds.main(["--project", str(root), "--dry-run", *argv])
+            return m.call_args.kwargs["embedding_prefilter"]
+
+    def test_default_on(self):
+        self.assertTrue(self._capture_prefilter([]))
+
+    def test_opt_out_flag_disables(self):
+        self.assertFalse(self._capture_prefilter(["--no-embedding-prefilter"]))
 
 
 if __name__ == "__main__":

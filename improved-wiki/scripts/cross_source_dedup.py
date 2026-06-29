@@ -280,7 +280,7 @@ def _detect_groups(summaries, pages, llm_call, not_duplicates, embedding_prefilt
 
 def run_phase2(project_root, llm_call, *, apply=True, whitelist_pairs=None,
                today=None, apply_low_confidence=False,
-               embedding_prefilter=False) -> dict:
+               embedding_prefilter=True) -> dict:
     wiki_dir = project_root / "wiki"
     runtime = detect_runtime_dir(project_root)
     pages = collect_wiki_pages(wiki_dir)
@@ -421,9 +421,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="Preview only — no writes")
     parser.add_argument("--apply-low-confidence", action="store_true",
                         help="Also merge low-confidence groups (skipped by default)")
-    parser.add_argument("--embedding-prefilter", action="store_true",
+    # NashSU dedup-runner ALWAYS prefilters by embedding before the LLM detector
+    # — it is not optional there. Default ON to match: without it the detector
+    # gets the WHOLE wiki in one prompt (the #359 hang on large wikis). The
+    # prefilter degrades safely when local embeddings are unavailable (small
+    # wikis fall back to a full scan; large wikis skip rather than hang — see
+    # _detect_groups). --no-embedding-prefilter forces the old full-scan path.
+    parser.add_argument("--embedding-prefilter", dest="embedding_prefilter",
+                        action="store_true", default=True,
                         help="Pre-cluster pages by embedding similarity before the LLM "
-                             "detector (bounds LLM call size on large wikis; needs local Ollama)")
+                             "detector (default: ON; needs local Ollama)")
+    parser.add_argument("--no-embedding-prefilter", dest="embedding_prefilter",
+                        action="store_false",
+                        help="Disable the embedding prefilter; run a single full-wiki "
+                             "LLM detector scan (small wikis only — can hang on large ones)")
     parser.add_argument("--whitelist", action="append", default=[])
     parser.add_argument("--mark-not-duplicate", nargs=2, metavar=("SLUG_A", "SLUG_B"),
                         default=None,
