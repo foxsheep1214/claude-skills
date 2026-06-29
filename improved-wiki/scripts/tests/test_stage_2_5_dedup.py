@@ -62,7 +62,7 @@ class TestLlmConfirmGate(unittest.TestCase):
     def test_llm_no_blocks_merge(self):
         concepts = [_concept("pao", "PAO"), _concept("julinjun", "聚磷菌")]
         orig = d.call_anthropic_protocol
-        d.call_anthropic_protocol = lambda *a, **k: ("MERGE: no | REASON: distinct", None)
+        d.call_anthropic_protocol = lambda *a, **k: ("GROUP 1: MERGE no", None)
         try:
             rules = d._stage_2_5_generate_merge_rules(concepts, [[0, 1]], config=object())
         finally:
@@ -73,7 +73,7 @@ class TestLlmConfirmGate(unittest.TestCase):
         concepts = [_concept("pao", "PAO", "longer definition wins primary"),
                     _concept("julinjun", "聚磷菌", "x")]
         orig = d.call_anthropic_protocol
-        d.call_anthropic_protocol = lambda *a, **k: ("MERGE: yes | PRIMARY: pao | REASON: same", None)
+        d.call_anthropic_protocol = lambda *a, **k: ("GROUP 1: MERGE yes | PRIMARY: pao", None)
         try:
             rules = d._stage_2_5_generate_merge_rules(concepts, [[0, 1]], config=object())
         finally:
@@ -81,6 +81,48 @@ class TestLlmConfirmGate(unittest.TestCase):
         self.assertEqual(len(rules), 1)
         self.assertEqual(rules[0]["primary_slug"], "pao")
         self.assertEqual(rules[0]["duplicate_slugs"], ["julinjun"])
+
+    def test_all_groups_confirmed_in_one_llm_call(self):
+        """Perf (Finding C): N candidate groups → ONE batched confirm call, not
+        N. Each group still gets its own verdict, conservative default holds."""
+        concepts = [
+            _concept("pao", "PAO", "phosphate accumulating organisms"),
+            _concept("julinjun", "聚磷菌", "聚磷菌"),
+            _concept("ft", "Fourier transform", "integral transform"),
+            _concept("flbyhh", "傅里叶变换", "傅里叶变换"),
+        ]
+        calls = {"n": 0}
+
+        def _mock(*a, **k):
+            calls["n"] += 1
+            # group 1 (pao/julinjun) merges; group 2 (ft/flbyhh) does not
+            return ("GROUP 1: MERGE yes | PRIMARY: pao\nGROUP 2: MERGE no", None)
+
+        orig = d.call_anthropic_protocol
+        d.call_anthropic_protocol = _mock
+        try:
+            rules = d._stage_2_5_generate_merge_rules(
+                concepts, [[0, 1], [2, 3]], config=object())
+        finally:
+            d.call_anthropic_protocol = orig
+        self.assertEqual(calls["n"], 1)            # ← single batched call
+        self.assertEqual(len(rules), 1)            # only group 1 confirmed
+        self.assertEqual(rules[0]["primary_slug"], "pao")
+        self.assertEqual(rules[0]["duplicate_slugs"], ["julinjun"])
+
+    def test_llm_failure_keeps_all_candidates(self):
+        concepts = [_concept("pao", "PAO"), _concept("julinjun", "聚磷菌")]
+
+        def _boom(*a, **k):
+            raise RuntimeError("handoff died")
+
+        orig = d.call_anthropic_protocol
+        d.call_anthropic_protocol = _boom
+        try:
+            rules = d._stage_2_5_generate_merge_rules(concepts, [[0, 1]], config=object())
+        finally:
+            d.call_anthropic_protocol = orig
+        self.assertEqual(rules, [])
 
 
 class TestApplyMergeRewritesWikilinks(unittest.TestCase):
