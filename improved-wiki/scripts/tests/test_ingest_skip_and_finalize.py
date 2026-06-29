@@ -54,20 +54,21 @@ def _raw_file(tmp: Path) -> Path:
 
 
 class TestFinalizeBook(unittest.TestCase):
-    """_finalize_book = embeddings → validate → stage_4_1 marker, in order."""
+    """_finalize_book = embeddings → stage_4_1 marker, in order.
+
+    The post-ingest validation auto-run (formerly between embed and the marker)
+    was removed for NashSU alignment; _finalize_book now runs embeddings then
+    sets the completion marker."""
 
     def setUp(self):
         self._orig_embed = ingest.stage_3_7_embed_new_pages
-        self._orig_validate = ingest.stage_4_1_validate_ingest
         self.calls: list[str] = []
         ingest.stage_3_7_embed_new_pages = lambda *a, **k: self.calls.append("embed")
-        ingest.stage_4_1_validate_ingest = lambda *a, **k: self.calls.append("validate")
 
     def tearDown(self):
         ingest.stage_3_7_embed_new_pages = self._orig_embed
-        ingest.stage_4_1_validate_ingest = self._orig_validate
 
-    def test_runs_embed_validate_then_marks_complete(self):
+    def test_runs_embed_then_marks_complete(self):
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
             cfg = _make_config(tmp)
@@ -79,7 +80,7 @@ class TestFinalizeBook(unittest.TestCase):
 
             # Order matters: embeddings must precede the completion marker so a
             # failing/missing embed stack pauses BEFORE the book is marked done.
-            self.assertEqual(self.calls, ["embed", "validate"])
+            self.assertEqual(self.calls, ["embed"])
             self.assertTrue(_core.is_stage_done(cfg, h, "stage_4_1"))
 
     def test_embed_failure_leaves_book_unmarked(self):
