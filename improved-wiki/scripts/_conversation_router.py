@@ -171,7 +171,23 @@ def _infer_stage(prompt: str) -> str:
     for improvements", which previously made every digest/chunk-analysis call
     for that book misreport itself as the Stage 3.4 review step).
     """
-    head = prompt[:500]
+    # The output-language directive (commit c359232) is prepended to every
+    # generation/analysis prompt and runs ~890 chars — it would push the
+    # distinctive stage marker past this 500-char window and collapse every
+    # generation stage to the generic "LLM-task" label (observed live on the
+    # Printed Circuits Handbook ingest: Stage 2.4/2.6/2.7/2.9 all mislabeled,
+    # which also defeats the per-stage cache-file grouping). When the prompt
+    # literally opens with the directive, skip that block and scan the
+    # instruction text that follows. Prompts that don't open with it (e.g. the
+    # cached 2.1/2.2 digest/chunk-analysis prompts, whose marker is already in
+    # the first 500 chars) are untouched, so their slug/cache key is unchanged.
+    scan = prompt
+    if prompt.lstrip().startswith("## ⚠️ MANDATORY OUTPUT LANGUAGE"):
+        stripped = prompt.lstrip()
+        idx = stripped.find("\n# ")
+        if idx != -1:
+            scan = stripped[idx + 1:]
+    head = scan[:500]
     if "generating wiki pages" in head.lower() or ("Synthesis" in head and "FILE blocks" in head):
         return "Stage-2-4-Generation"
     if "review agent" in head or "可疑项" in head:
