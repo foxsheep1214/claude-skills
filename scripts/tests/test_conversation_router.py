@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import _llm_api
 import ingest  # noqa: F401  (import side-effect: registers the router)
 from _core import Config, ConversationPending
+from _conversation_router import _infer_stage
 
 
 def _make_config(tmp: Path) -> Config:
@@ -150,6 +151,44 @@ class TestConversationHandoff(unittest.TestCase):
             self.assertEqual(len(md_files), 1,
                              f"volatile wiki list must not split the cache; got {[m.name for m in md_files]}")
             self.assertEqual(md_files[0], first_md)
+
+
+class TestInferStageWithLanguageDirective(unittest.TestCase):
+    # Regression (fallout of the c359232 output-language fix): the ~890-char
+    # "## ⚠️ MANDATORY OUTPUT LANGUAGE" directive is prepended to every
+    # generation/analysis prompt. It pushed the distinctive stage marker past
+    # _infer_stage's 500-char head window, collapsing Stage 2.4/2.6/2.7/2.9 to
+    # the generic "LLM-task" label (observed live on the Printed Circuits
+    # Handbook ingest — every chunk-generation cache file mis-prefixed). The
+    # directive block must be skipped before inferring the stage.
+    DIRECTIVE = (
+        "## ⚠️ MANDATORY OUTPUT LANGUAGE: English\n"
+        + ("Preserve proper nouns and technical identifiers in their original form. " * 14)
+    )
+
+    def test_generation_label_survives_language_directive_prefix(self):
+        prompt = self.DIRECTIVE + "\n\n# Role\nYou are generating wiki pages for ONE chunk of a book.\n"
+        # The marker sits well past char 500, so only directive-skipping recovers it.
+        self.assertGreater(prompt.find("generating wiki pages"), 500)
+        self.assertEqual(_infer_stage(prompt), "Stage-2-4-Generation")
+
+    def test_source_page_label_survives_language_directive_prefix(self):
+        prompt = self.DIRECTIVE + "\n\n# Role\nYou are writing a **source page** for a book.\n"
+        self.assertEqual(_infer_stage(prompt), "Stage-2-6-SourcePage")
+
+    def test_bare_generation_prompt_still_labeled(self):
+        self.assertEqual(
+            _infer_stage("# Role\nYou are generating wiki pages for ONE chunk.\n"),
+            "Stage-2-4-Generation")
+
+    def test_non_directive_prompt_untouched(self):
+        # Prompts that do NOT open with the directive (e.g. the cached 2.1/2.2
+        # digest/chunk-analysis prompts) must infer exactly as before, so their
+        # slug/cache key is unchanged across this fix.
+        self.assertEqual(
+            _infer_stage("performing **Stage 1: Global Digest** for this source"),
+            "Stage-2-1-Global-Digest")
+        self.assertEqual(_infer_stage("plain prompt with no markers"), "LLM-task")
 
 
 if __name__ == "__main__":
