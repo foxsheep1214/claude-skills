@@ -44,7 +44,7 @@ def _stage_4_1_find_cache_entry(slug: str) -> Optional[dict]:
     """Find the cache entry whose key or filesWritten contains *slug*.
 
     Matching strategy (in order):
-      1. Exact CACHE_KEY env var match (set by ingest.py's stage_4_1_validate_ingest)
+      1. Exact CACHE_KEY env var match (set manually when running validate_ingest.py standalone)
       2. slug appears in cache key (substring)
       3. slug appears in filesWritten paths
       4. Normalized match: strip common prefixes (book/, paper/, datasheet/)

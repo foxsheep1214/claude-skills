@@ -4,8 +4,10 @@ Runs after Stage 3 writes wiki pages to disk: embeds new pages into the
 local LanceDB for semantic retrieval (mandatory; **pauses the ingest** if
 the local Ollama/lancedb/bge-m3 stack is missing — no silent fallback).
 
-Sibling of _stage_4_1_validate.py (Stage 4.1 final validation). Embed-side
-I/O here; verification gate there — different concerns, one stage per file.
+Stage 3.7 is the FINAL ingest stage: after it, _finalize_book sets the
+completion marker. (The former Stage 4.1 post-ingest validation audit was
+removed for NashSU alignment — NashSU has no such stage; its only ingest-time
+check, schema routing, runs at write time in Stage 3.1.)
 """
 from __future__ import annotations
 
