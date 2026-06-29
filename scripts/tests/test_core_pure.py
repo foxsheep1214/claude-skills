@@ -371,6 +371,26 @@ class TestSlugifyBracketHygiene(unittest.TestCase):
             self.assertNotIn(",", s, f"{name!r} -> {s!r} kept comma")
             self.assertNotIn("&", s, f"{name!r} -> {s!r} kept ampersand")
 
+    def test_cjk_titles_preserved_not_emptied(self):
+        """Regression for the 2026-06-30 无源器件篇 re-ingest: the ASCII-only
+        edge-strips (^[^a-z0-9]+ / [^a-z0-9]+$) deleted leading/trailing CJK, so
+        pure-Chinese concept names collapsed to "" (colliding empty slugs) and
+        mixed names like "电感DCR" lost their Chinese prefix → "dcr". NashSU
+        wiki-filename.ts keeps Unicode letters across all scripts."""
+        self.assertEqual(_core.slugify("贴片电阻"), "贴片电阻")
+        self.assertEqual(_core.slugify("磁珠"), "磁珠")
+        self.assertEqual(_core.slugify("上拉电阻阻值选择原则"), "上拉电阻阻值选择原则")
+        # Mixed CJK + Latin keeps both, lowercasing the Latin run.
+        self.assertEqual(_core.slugify("电感DCR"), "电感dcr")
+        self.assertEqual(_core.slugify("MLCC的ESR"), "mlcc的esr")
+        # Hyphenated Chinese keeps its internal hyphen.
+        self.assertEqual(_core.slugify("金属膜电阻-碳膜电阻"), "金属膜电阻-碳膜电阻")
+        # CJK + trailing parenthetical abbreviation: keep the Chinese, strip brackets.
+        self.assertEqual(_core.slugify("热电制冷 (Peltier-TEC)"), "热电制冷-peltier-tec")
+        # No pure-CJK title yields an empty slug.
+        for name in ["贴片电阻", "磁珠", "电感", "上拉电阻"]:
+            self.assertNotEqual(_core.slugify(name), "", f"{name!r} collapsed to empty")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
