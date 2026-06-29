@@ -2,17 +2,20 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
 from _core import (
     Config,
+    ConversationPending,
     stage_begin as _stage_begin,
     file_sha256,
     is_stage_done,
     mark_stage_done,
     unmark_stage_done,
     save_progress,
+    slugify,
     PrepareStopAfter,
 )
 from _stage_2_analyze import (
@@ -61,6 +64,42 @@ def _analyze_all_chunks(
         print(f"  [analyze] {done}/{chunk_total} [{pct}% ETA {eta:.0f}s]")
     return chunk_analyses
 
+def _build_gen_inventory(chunk_meta: list, chunk_analyses: list) -> dict[str, int]:
+    """Eager slug→owner-chunk inventory for the parallel-gen path.
+
+    Every concept/entity slug is DETERMINISTIC: ``slug = slugify(name)`` where
+    ``name`` is taken from the (cached, stable) chunk analyses. So the canonical
+    slug of every page is computable BEFORE generation. Returns a flat
+    ``slug_stem -> owner_chunk_index`` map where the owner is the FIRST chunk
+    (in chunk order) that lists that name. Concepts and entities share one flat
+    map, matching how the serial loop mixes both kinds of stems into
+    ``generated_slugs``. Blank names are skipped.
+    """
+    inventory: dict[str, int] = {}
+    for meta, analysis in zip(chunk_meta, chunk_analyses):
+        i = meta[0]
+        for key in ("concepts_found", "entities_found"):
+            for item in analysis.get(key, []):
+                name = item.get("name", "")
+                if not name or not name.strip():
+                    continue
+                stem = slugify(name)
+                if not stem:
+                    continue
+                if stem not in inventory:  # first chunk owns
+                    inventory[stem] = i
+    return inventory
+
+
+def _other_chunk_slugs(inventory: dict[str, int], chunk_idx: int) -> list[str]:
+    """Sorted list of inventory stems owned by chunks OTHER than ``chunk_idx``.
+
+    Order-independent + sorted → deterministic prompt text → stable cache key
+    across re-invokes, regardless of execution order.
+    """
+    return sorted(stem for stem, owner in inventory.items() if owner != chunk_idx)
+
+
 def _generate_all_chunks(
     chunk_meta: list, chunk_analyses: list, existing_refs: dict,
     raw_file: Path, config: Config, template_content: str,
@@ -90,6 +129,12 @@ def _generate_all_chunks(
         print(f"  [generate] 1/1 [single-shot, grounded, {time.time() - t_start:.0f}s]")
         return all_file_blocks, generated_slugs, stop_reason
 
+    if _parallel_gen_enabled():
+        return _generate_all_chunks_parallel(
+            chunk_meta, chunk_analyses, existing_refs, raw_file, config,
+            template_content, chunk_total, t_start, verbose,
+            related_pages=related_pages)
+
     all_file_blocks: list = []
     generated_slugs: list = []
     for meta, analysis in zip(chunk_meta, chunk_analyses):
@@ -110,6 +155,71 @@ def _generate_all_chunks(
     # No single stop_reason for the per-chunk path; gaps fall to the caller's
     # zero-block per-concept fallback. Smaller per-chunk scope makes mid-chunk
     # truncation unlikely, and each concept is already source-grounded.
+    return all_file_blocks, generated_slugs, None
+
+
+def _parallel_gen_enabled() -> bool:
+    """OPT-IN: ``IMPROVED_WIKI_PARALLEL_GEN`` truthy → eager+drain gen mode.
+
+    Truthy = "1"/"true"/"yes" (case-insensitive). Unset/falsy = the existing
+    serial path, byte-identical to before.
+    """
+    return os.environ.get("IMPROVED_WIKI_PARALLEL_GEN", "").strip().lower() in (
+        "1", "true", "yes")
+
+
+def _generate_all_chunks_parallel(
+    chunk_meta: list, chunk_analyses: list, existing_refs: dict,
+    raw_file: Path, config: Config, template_content: str,
+    chunk_total: int, t_start: float, verbose: bool,
+    related_pages: list[dict] | None = None,
+) -> tuple[list, list, str | None]:
+    """Eager-inventory + drain variant of the >1-chunk generation loop.
+
+    The serial path forces order by feeding each chunk the slugs PRODUCED by
+    prior chunks. Here every concept/entity slug is computed up front from the
+    cached analyses (``_build_gen_inventory``), so each chunk can be told to
+    skip+link the concepts owned by OTHER chunks independent of execution order
+    (``_other_chunk_slugs``, sorted → stable cache key).
+
+    Drain: in conversation mode an uncached prompt raises ``ConversationPending``
+    AFTER writing its prompt .md. We catch it per chunk and CONTINUE so a single
+    pipeline invocation emits ALL uncached chunk prompts for parallel answering,
+    then raise ``ConversationPending`` once at the end. On the final all-cached
+    replay no chunk raises, so we return ``(blocks, slug_union, None)`` exactly
+    like the serial path's contract.
+    """
+    inventory = _build_gen_inventory(chunk_meta, chunk_analyses)
+    all_file_blocks: list = []
+    generated_slugs: list = []
+    pending = 0
+    for meta, analysis in zip(chunk_meta, chunk_analyses):
+        i, chunk_text = meta[0], meta[1]
+        other_slugs = _other_chunk_slugs(inventory, i)
+        try:
+            blocks = stage_2_4_generate_chunk(
+                analysis, i, other_slugs, raw_file, config, template_content,
+                verbose=verbose, chunk_text=chunk_text,
+                existing_refs=existing_refs, related_pages=related_pages,
+            )
+        except ConversationPending:
+            # Prompt .md already written; defer this chunk's answer.
+            pending += 1
+            continue
+        all_file_blocks.extend(blocks)
+        for path, _ in blocks:
+            slug = Path(path).stem.lower().replace(" ", "-").replace("/", "-")
+            if slug not in generated_slugs:
+                generated_slugs.append(slug)
+        print(f"  [generate] {i + 1}/{chunk_total} [parallel-eager, grounded]")
+
+    if pending > 0:
+        print(f"  [generate] emitted {pending} chunk prompt(s) for "
+              f"parallel answering")
+        raise ConversationPending()
+
+    print(f"  [generate] {chunk_total}/{chunk_total} parallel-eager grounded done "
+          f"[{time.time() - t_start:.0f}s]")
     return all_file_blocks, generated_slugs, None
 
 def _run_chunk_pipeline(
