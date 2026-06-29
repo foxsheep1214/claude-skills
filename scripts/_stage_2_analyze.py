@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from _stage_2_base import *
+from _language import build_language_directive
 
 # ── Token estimation (tiktoken if installed, else CJK-aware heuristic) ──
 # tiktoken is optional: the pipeline must not hard-depend on it. The heuristic
@@ -230,7 +231,10 @@ The source is a **{file_path.parent.name}** document. Follow these type-specific
 
 """
 
-    return f"""# Role
+    language_directive = build_language_directive(summary_text)
+    return f"""{language_directive}
+
+# Role
 You are the LLM maintainer of a Karpathy-pattern personal knowledge base.
 You are performing **Stage 1: Global Digest** of a book ingest pipeline.
 {template_section}
@@ -448,7 +452,10 @@ You are analyzing content from: **{heading_path}**
 
 """
 
-    return f"""# Role
+    language_directive = build_language_directive(chunk_text)
+    return f"""{language_directive}
+
+# Role
 You are the LLM maintainer of a Karpathy-pattern personal knowledge base.
 You are performing **Stage 2.2: Chunk Analysis** (chunk {chunk_index + 1}/{chunk_total}) of a book ingest pipeline.
 {template_section}{schema_types_section}
