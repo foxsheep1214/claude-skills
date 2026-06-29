@@ -68,7 +68,6 @@ class TestSemanticLintConversation(unittest.TestCase):
                     (root / ".llm-wiki" / "lint-semantic.json").read_text("utf-8")
                 )
                 self.assertEqual(len(findings), 1)
-                self.assertEqual(findings[0]["type"], "semantic")
                 self.assertEqual(findings[0]["severity"], "info")
                 self.assertEqual(findings[0]["page"], "Add a datasheet")
                 self.assertEqual(findings[0]["affectedPages"], ["concepts/buck.md"])

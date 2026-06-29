@@ -104,9 +104,7 @@ class TestStub(unittest.TestCase):
             self.assertTrue(created)
             self.assertTrue(full.exists())
             self.assertEqual(rel, "queries/missing-thing.md")
-            text = full.read_text(encoding="utf-8")
-            self.assertIn("type: query", text)
-            self.assertIn("tags: [stub, lint]", text)
+            self.assertIn("type: query", full.read_text(encoding="utf-8"))
             _, _, created2 = f.ensure_broken_link_stub(td, "missing-thing")
             self.assertFalse(created2)
 

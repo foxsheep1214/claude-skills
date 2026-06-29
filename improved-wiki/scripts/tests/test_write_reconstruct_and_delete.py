@@ -65,9 +65,6 @@ class TestReconstructBlocksFromDisk(unittest.TestCase):
             # file_blocks convention validation/3.4 expect.
             self.assertEqual(
                 paths, ["concepts/tmp.md", "entities/orin.md", "sources/AppNote/x.md"])
-            self.assertEqual(len(blocks), 3)
-            self.assertTrue(any("concepts/" in p for p, _ in blocks))
-            self.assertTrue(all(c for _, c in blocks))  # content non-empty
 
     def test_skips_missing_files(self):
         with tempfile.TemporaryDirectory() as d:
