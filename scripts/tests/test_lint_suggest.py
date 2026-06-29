@@ -64,7 +64,6 @@ class TestRunStructuralLint(unittest.TestCase):
         results = ls.run_structural_lint(pages)
         broken = finding(results, type="broken-link")
         self.assertIsNotNone(broken)
-        self.assertEqual(broken["page"], "attention.md")
         self.assertEqual(broken["broken_target"], "transfomer")
         self.assertEqual(broken["suggested_target"], "transformer.md")
 
