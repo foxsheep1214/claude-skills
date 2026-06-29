@@ -1204,6 +1204,10 @@ def slugify(text: str) -> str:
     otherwise produce a colon-bearing slug that the FILE-block parser
     silently drops the page for).
     """
+    # NFKC-normalize first so full-width CJK punctuation/digits fold to their
+    # half-width equivalents before slugging (NashSU wiki-filename.ts parity).
+    import unicodedata
+    text = unicodedata.normalize("NFKC", text)
     slug = text.lower().replace(" ", "-").replace("/", "-")
     slug = _ILLEGAL_CHARS_RE.sub("", slug)
     # Strip interior punctuation that doesn't belong in slugs: commas, ampersands,
@@ -1218,14 +1222,16 @@ def slugify(text: str) -> str:
     # malformed "total-module-power-(tmp" (interior "(" kept, trailing ")"
     # stripped). Converting them up front yields a clean "total-module-power-tmp".
     slug = re.sub(r"[()\[\]{}（）【】]+", "-", slug)
-    # Strip leading/trailing non-alphanumerics that survive the illegal-char
-    # strip. A trailing period (e.g. "Tron Future Tech Inc." -> "tron-future-
-    # tech-inc.") otherwise yields a filename the FILE-block writer silently
-    # drops, causing "29/30 blocks written" with a broken wikilink target.
-    slug = re.sub(r"^[^a-z0-9]+", "", slug)
-    slug = re.sub(r"[^a-z0-9]+$", "", slug)
-    # Collapse any doubled hyphens introduced by the bracket substitution.
-    slug = re.sub(r"-{2,}", "-", slug)
+    # Keep Unicode letters/digits (CJK, Cyrillic, …) plus ASCII hyphen/underscore;
+    # drop everything else (emoji, residual punctuation). NashSU wiki-filename.ts
+    # parity: a non-Latin title must NOT collapse to an empty slug. The old
+    # ASCII-only edge-strips (^[^a-z0-9]+ / [^a-z0-9]+$) deleted leading/trailing
+    # CJK, turning "贴片电阻" into "" (colliding empty slugs) and "电感DCR" into "dcr".
+    # The comma/bracket→hyphen substitutions above already ran, so dropping the
+    # remaining non-slug chars here preserves intended word boundaries.
+    slug = "".join(ch for ch in slug if ch in "-_" or ch.isalnum())
+    # Collapse doubled hyphens (from bracket/space substitution) and trim edges.
+    slug = re.sub(r"-{2,}", "-", slug).strip("-")
     return slug
 
 
