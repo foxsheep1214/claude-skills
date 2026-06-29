@@ -209,6 +209,23 @@ def run_structural_lint(pages: list[tuple[str, str]], with_suggestions: bool = T
     slug_map = _build_slug_map(data)
 
     def suggest_broken_target(target: str) -> _PageData | None:
+        # Fast path: strip surrounding quotes that leak from YAML-formatted
+        # related fields (e.g. [[concepts/foo"]] or [["concepts/foo"]]).
+        # Try the clean version as an exact slug lookup before fuzzy scoring —
+        # otherwise the fuzzy scorer can pick a shorter slug that merely
+        # *contains* the clean target (CONTAINS_TARGET_SCORE = 0.82).
+        clean = target.strip().strip('"').strip("'")
+        if clean != target:
+            clean_norm = normalize_link_target(clean)
+            if clean_norm in slug_map:
+                clean_short = slug_map[clean_norm]
+                return next((p for p in data if p.short_name == clean_short), None)
+            # Also try basename-only lookup (for targets like "concepts/ieee").
+            clean_base = re.sub(r"\.md$", "", _get_file_name(clean)).lower()
+            if clean_base in slug_map:
+                clean_short = slug_map[clean_base]
+                return next((p for p in data if p.short_name == clean_short), None)
+
         best: tuple[_PageData, float] | None = None
         for candidate in data:
             score = max(
