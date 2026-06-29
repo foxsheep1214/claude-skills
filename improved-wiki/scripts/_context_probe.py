@@ -13,13 +13,19 @@ max context in tokens. Two caches make resumes/repeats cheap:
 
 **Do not trust the env model name alone.** ``config.llm_model`` comes from the
 ambient ``ANTHROPIC_MODEL`` env, which can be STALE (env says glm-5.2 while the
-real model answering is Claude). So the probe also asks the model to self-report
-its identity and compares it to the env name:
-- env name matches self-report → ``env_reliable=True`` → cheap cache reuse by env.
-- they disagree → ``env_reliable=False`` → the cache is NEVER reused by env name;
-  every ingest re-probes the live model (a ``.ctxprobe-pending`` marker makes the
-  re-probe genuinely re-ask — clearing the stale conversation answer on a fresh
-  start — without looping on the handoff re-invocation).
+real model answering is Claude Opus 4.8). So the probe also asks the model to
+self-report its identity and compares it to the env name:
+- env name matches self-report → ``env_reliable=True``.
+- they disagree → ``env_reliable=False`` → a loud WARNING that the env name is
+  stale, so the operator can fix ANTHROPIC_MODEL (or run ``--reprobe``).
+``env_reliable`` is INFORMATIONAL — it does not block cache reuse. The cached
+value is the live-probed context (correct regardless of the env label), and
+reuse is keyed on env name + a 7-day TTL that bounds staleness. (Blocking reuse
+on mismatch would force a probe handoff before every stage, since each
+conversation-mode handoff is a fresh process invocation re-running the probe.)
+A ``.ctxprobe-pending`` marker makes a genuine probe (cache miss / TTL / model
+change / ``--reprobe``) re-ask the live model — clearing the stale conversation
+answer on a fresh start — without looping on the handoff re-invocation.
 
 Reliability: the answer is sanity-gated to [8K, 10M]. The existing budget
 reserves (15% response + 25% stable + 8% instruction ≈ 48%) already provide
@@ -94,9 +100,14 @@ def _identities_match(self_reported: str | None, env_name: str | None):
 def load_cached(config) -> int | None:
     """Return a cached context for the current model, or None if stale/missing.
 
-    Never reuses across ingests when the env name was proven unreliable
-    (``env_reliable`` is False); that forces a fresh live probe. Backward
-    compatible with the old ``{model, context, probed_at}`` schema.
+    Reuse is keyed on the env name + 7-day TTL. ``env_reliable`` is INFORMATIONAL
+    only (surfaced as a warning when probed) — it does NOT block reuse: the cached
+    value is the live-probed context, correct regardless of whether the env name
+    matches the model's self-report. (Blocking reuse on env_reliable=False would
+    force a probe handoff before every stage, since each conversation-mode handoff
+    is a fresh process invocation that re-runs resolve_context — it would stall the
+    ingest.) Staleness is instead bounded by the TTL. Backward compatible with the
+    old ``{model, context, probed_at}`` schema.
     """
     p = _cache_path(config)
     if not p.exists():
@@ -110,8 +121,6 @@ def load_cached(config) -> int | None:
         return None
     if time.time() - d.get("probed_at", 0) > _PROBE_CACHE_TTL:
         return None
-    if d.get("env_reliable") is False:
-        return None  # env name proven unreliable for this model → always re-probe
     try:
         return int(d.get("context"))
     except (TypeError, ValueError):
@@ -222,10 +231,10 @@ def probe_context(config) -> int:
         pass
 
     if model_self and env_reliable is False:
-        print(f"[context-probe] WARNING: env model name '{config.llm_model}' disagrees "
-              f"with the live model's self-report '{model_self}'. Using the live probe "
-              f"({raw:,} tokens); the env name will NOT be trusted as a cache key "
-              f"(re-probes each ingest). Fix ANTHROPIC_MODEL or run --reprobe.")
+        print(f"[context-probe] WARNING: env model name '{config.llm_model}' is STALE — "
+              f"disagrees with the live model's self-report '{model_self}'. Using the live "
+              f"probe ({raw:,} tokens) and caching it (TTL-bounded). Fix ANTHROPIC_MODEL so "
+              f"the cache key reflects the real model, or run 'ingest.py --reprobe'.")
     print(f"[context-probe] model_self={model_self!r} env={config.llm_model!r} "
           f"reported={raw:,} tokens → using as-is (reserves already provide headroom)")
     return raw
