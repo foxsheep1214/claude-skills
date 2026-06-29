@@ -60,12 +60,12 @@ def make_query_slug(title: str) -> str:
 def lint_link_target(target: str) -> str:
     """Normalize a wikilink target to a wiki-relative slug form (port of
     lint-fixes.ts:lintLinkTarget). Strips a leading ``wiki/`` and a trailing
-    ``.md``, trims whitespace. Preserves case (matching is case-insensitive
-    elsewhere via lowercasing at compare time)."""
+    ``.md``, trims whitespace. Also strips surrounding quotes that leak from
+    YAML-formatted related fields (e.g. [[concepts/foo"]] or [["concepts/foo"]])."""
     t = target.replace("\\", "/")
     t = re.sub(r"^wiki/", "", t, flags=re.IGNORECASE)
     t = re.sub(r"\.md$", "", t, flags=re.IGNORECASE)
-    return t.strip()
+    return t.strip().strip('"').strip("'")
 
 
 def _normalized_link_target(target: str) -> str:
