@@ -1,5 +1,6 @@
 
 from _stage_2_base import *
+from _language import build_language_directive
 
 # Stage 2.9: in-source concept comparison pages.
 
@@ -34,7 +35,10 @@ def _stage_2_9_build_prompt_in_source(
     else:
         source_section = ""
 
-    return f"""# Role
+    language_directive = build_language_directive(source_context or concepts_with_desc)
+    return f"""{language_directive}
+
+# Role
 You are maintaining a wiki knowledge base. Review the concepts just generated for a book.
 
 # Source

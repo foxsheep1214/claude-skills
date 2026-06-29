@@ -1,5 +1,6 @@
 
 from _stage_2_base import *
+from _language import build_language_directive
 
 def _stage_2_7_build_prompt(
     global_digest: dict,
@@ -45,7 +46,10 @@ def _stage_2_7_build_prompt(
     except ValueError:
         raw_rel = file_path.name
 
-    return f"""# Role
+    language_directive = build_language_directive(source_context or digest_str)
+    return f"""{language_directive}
+
+# Role
 You are maintaining a Karpathy-pattern knowledge base wiki. You have just finished generating source/concept/entity pages for a book.
 
 # Book Context

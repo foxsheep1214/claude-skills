@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from _stage_2_base import *
+from _language import build_language_directive
 
 
 def _collect_formulas_block(analyses: list[dict], cap: int = 60) -> str:
@@ -294,7 +295,10 @@ def _stage_2_4_build_prompt(
     formulas_section = _collect_formulas_block([chunk_analysis])
     schema_section = _schema_routing_block(config)
 
-    return f"""# Role
+    language_directive = build_language_directive(chunk_text)
+    return f"""{language_directive}
+
+# Role
 You are generating wiki pages for ONE chunk of a book. Previous chunks have
 already been processed — their pages are listed below. Do NOT regenerate them.
 
@@ -536,12 +540,16 @@ def _stage_2_4_per_concept_fallback(
         source_rel = f"sources/{file_path.relative_to(config.raw_root).with_suffix('.md')}"
     except ValueError:
         source_rel = f"sources/{file_path.with_suffix('.md').name}"
-    source_prompt = f"""# Role
+    digest_json = json.dumps(global_digest, ensure_ascii=False, indent=2)
+    language_directive = build_language_directive(digest_json)
+    source_prompt = f"""{language_directive}
+
+# Role
 Generate a source page for this document from the global digest.
 
 # Global Digest
 ```yaml
-{json.dumps(global_digest, ensure_ascii=False, indent=2)[:4000]}
+{digest_json[:4000]}
 ```
 
 # Concepts generated ({len(all_file_blocks)} pages)
@@ -618,7 +626,11 @@ def _stage_2_4_build_per_concept_prompt(
     if template:
         template_section = f"\n# Document Type\n<template>\n{template[:800]}\n</template>\n"
 
-    return f"""# Role
+    language_directive = build_language_directive(
+        " ".join([str(name), str(definition), *map(str, details)]))
+    return f"""{language_directive}
+
+# Role
 Generate ONE wiki concept page. Output ONLY this one page, then stop.
 
 {template_section}
@@ -679,7 +691,11 @@ def _stage_2_4_build_per_entity_prompt(
     except ValueError:
         raw_rel = file_path.name
 
-    return f"""# Role
+    language_directive = build_language_directive(
+        f"{entity_name} " + json.dumps(global_digest, ensure_ascii=False))
+    return f"""{language_directive}
+
+# Role
 Generate ONE wiki entity page. Output ONLY this one page, then stop.
 
 # Entity to Generate
@@ -869,7 +885,11 @@ def _stage_2_4_build_all_prompt(
     formulas_section = _collect_formulas_block(chunk_analyses)
     schema_section = _schema_routing_block(config)
 
-    return f"""# Role
+    language_sample = source_context or json.dumps(chunk_analyses, ensure_ascii=False)
+    language_directive = build_language_directive(language_sample)
+    return f"""{language_directive}
+
+# Role
 You are generating wiki pages for ALL chunks of a book in ONE pass. The complete
 concept/entity lists aggregated across every chunk are below. Generate a page for
 each one that is NOT marked ALREADY COVERED — in a single response.

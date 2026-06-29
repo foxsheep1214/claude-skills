@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from _stage_2_base import *
+from _language import build_language_directive
 
 def stage_2_6_source_page(
     global_digest: dict,
@@ -245,7 +246,11 @@ Which wiki pages should be created or updated based on this source? What should 
     else:
         generated_pages_section = ""
 
-    prompt = f"""# Role
+    language_sample = source_context or json.dumps(global_digest, ensure_ascii=False)
+    language_directive = build_language_directive(language_sample)
+    prompt = f"""{language_directive}
+
+# Role
 You are writing a **source page** for a Karpathy-pattern wiki knowledge base.
 This page will be the authoritative entry for a {source_kind} in the wiki.
 {template_section}{linkable_rule}{source_section}{assoc_section}{generated_pages_section}
