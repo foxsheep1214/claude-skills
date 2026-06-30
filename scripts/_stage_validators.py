@@ -61,7 +61,7 @@ def _verify_stage_1_1_text(raw_file: Path, extracted_text: str, method: str) -> 
 
 def _verify_stage_2_1_digest(global_digest: dict, raw_file: Path) -> None:
     """Verify global digest has required structural keys."""
-    required_keys = {"book_meta", "outline", "key_concepts", "key_claims", "key_entities", "chunk_plan"}
+    required_keys = {"book_meta", "outline", "key_concepts", "key_claims", "key_entities"}
     missing = required_keys - set(global_digest.keys())
     _verify_or_die(len(missing) == 0, "Stage 1",
                    f"Global digest missing required keys: {missing}. "

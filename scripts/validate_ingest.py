@@ -232,7 +232,7 @@ def main():
     if entry:
         dk = stages.get("global_digest_keys", 0)
         check(f"global digest complete", dk >= 1,
-              f"{dk} top-level keys (ingest.py schema: book_meta/outline/key_entities/key_concepts/key_claims/chunk_plan)")
+              f"{dk} top-level keys (ingest.py schema: book_meta/outline/key_entities/key_concepts/key_claims)")
     else:
         check("cache entry found", False)
 

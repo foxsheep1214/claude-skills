@@ -281,15 +281,6 @@ key_concepts:
 key_claims:
   - claim: "..."
     chapter: N
-
-chunk_plan:
-  # How many chunks needed? Where's the natural split?
-  estimated_total_chunks: N
-  # For each chunk: which chapters does it cover?
-  chunk_boundaries:
-    - chunk: 1
-      chapters: [1, 2]
-      estimated_chars: N
 ```
 
 # Constraints
