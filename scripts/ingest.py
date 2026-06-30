@@ -136,7 +136,7 @@ set_progress_hook(_llm_call_progress)
 # ── Ingest orchestration helpers (refactored 2026-06-24: extracted from ingest.py) ──
 from _ingest_skip import _should_stop_after
 from _ingest_prepare import _do_prepare
-from _ingest_write import _do_write, cleanup_resolved_reviews
+from _ingest_write import _do_write
 
 # ═════════════════════════════════════════════════════════
 # Main pipeline — ingest_one, batch, queue, CLI
@@ -215,8 +215,10 @@ def ingest_one(
     _set_current_file(raw_file.name)
     print(f"\n=== Ingest: {raw_file} ===")
 
-    # 0. Clean up resolved review pages
-    cleanup_resolved_reviews(config)
+    # NashSU parity: resolved review pages are KEPT (never auto-deleted) so the
+    # content-stable review_id + resolved-wins dedup keeps them resolved across
+    # re-ingest. (Previously cleanup_resolved_reviews() deleted them here, which
+    # destroyed the resolved twins that dedup relies on.)
 
     # 1. Dedup + Stage 0-2 (delegated to shared implementation)
     h = file_sha256(raw_file)

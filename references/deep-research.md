@@ -1,6 +1,6 @@
 # Deep Research — Closed-Loop Research → Wiki Pipeline
 
-NashSU v0.4.25 parity for `deep-research.ts` + `web-search.ts` closed-loop research system.
+参考 NashSU `deep-research.ts` + `web-search.ts` closed-loop research system. **Strict NashSU minimal implementation** — verbatim synthesis, code-generated References, fixed `tags: [research]`, no review-derived auto-chain.
 
 ## Core Idea
 
@@ -19,14 +19,14 @@ Each cycle expands the knowledge base without needing new raw source files. The 
 
 | NashSU | improved-wiki (Claude Code) |
 |--------|---------------------------|
-| Search via Tavily/SerpAPI/SearXNG/Firecrawl | WebSearch + WebFetch (Claude Code built-in + Tavily MCP) |
-| `collectResearchSources()` — multi-query, dedup, cap 20 | Claude runs 3-5 targeted queries, deduplicates |
-| AnyTXT local file search + LLM query rewrite | `search_local.py` — reuses `keyword_search` on wiki/ + `mdfind`/ripgrep on raw/ |
-| `executeResearch()` — LLM synthesis with wiki index | Claude synthesizes using wiki context + local + web search results |
-| Save to `wiki/queries/<slug>.md` | Write via FILE block or direct file write |
+| Search via Tavily / SerpAPI / SearXNG / Ollama / Brave / Firecrawl (6 providers; `deepResearchSource` = web / anytxt / both) | WebSearch (built-in) + Tavily MCP (`tavily_search`); page fetch via Tavily extract/crawl (WebFetch is denied in this harness) |
+| `collectResearchSources()` — multi-query, **5 results/query**, **snippet-only**, dedup by URL, cap 20 | Claude runs targeted queries, dedups by URL, cap 20 — synthesize from snippets (like NashSU) |
+| AnyTXT local-file source mode (`deepResearchSource: anytxt`/`both`) | `search_local.py` — CLI analog of AnyTXT mode: `keyword_search` on wiki/ + `mdfind`/ripgrep on raw/ (not byte-identical to AnyTXT) |
+| `executeResearch()` — LLM synthesis, reads `wiki/index.md` for cross-ref | Claude synthesizes from sources + `wiki/index.md` |
+| Save to `wiki/queries/<slug>-<date>-<HHMMSS>.md` | Same filename rule (Step 4) |
 | `autoIngest()` on research result | `ingest.py` on the new query page |
-| `queueResearch()` — concurrency queue (maxConcurrent=3) | Serial (conversation-based, one at a time) — no concurrency needed |
-| `onTaskFinished()` → process next queued | **Auto-chain on highest-severity review item, cap 3 rounds** (Step 7) |
+| `queueResearch()` — concurrency queue (maxConcurrent=3) | Serial (conversation-based, one at a time) — CLI adaptation, no persistent queue |
+| `onTaskFinished()` → process next **already-queued** task | One topic per invocation (NashSU does NOT derive new topics from reviews) |
 
 ## Workflow
 
@@ -46,27 +46,17 @@ User: wiki 里有没有关于 GaN 驱动电路的资料？
 Claude: [searches wiki] 没有找到。要我 deep research 这个主题并消化到 wiki 里吗？
 ```
 
-### Step 1: Understand the Research Scope
+### Step 1: Ground in Wiki Context
 
-Claude first reads the wiki context to ground the research:
+NashSU's `executeResearch` reads `wiki/index.md` (only) to ground cross-references. Do the same:
 
-1. Read `wiki/index.md` — what pages exist, what terms to link to
-2. Read `wiki/overview.md` — what the wiki broadly covers
-3. If the topic relates to a specific area, read relevant existing pages
+1. Read `wiki/index.md` — what pages exist, what terms to `[[link]]` to.
 
-Then Claude **asks clarifying questions** if the topic is too broad:
-
-```
-Claude: "反无人机雷达"这个主题比较广。你更关心哪个方面？
-  1. 技术瓶颈（探测距离、多目标跟踪、低慢小目标识别）
-  2. 成本与部署（单套系统成本、组网方案）
-  3. 对抗与反制（诱饵、干扰、隐身）
-  4. 市场与产业（供应商对比、采购趋势）
-```
+The topic then goes straight to search — NashSU does **not** insert a clarifying-question step. (If a topic is genuinely too broad, see the "Research Topic Too Broad" edge case, which mirrors NashSU's pre-search scope guard.)
 
 ### Step 2: Search for Sources
 
-#### Step 2a: Local source search (NashSU AnyTXT parity) ⭐
+#### Step 2a: Local source search (CLI analog of NashSU's AnyTXT source mode)
 
 **Before hitting the web**, search the project's own `wiki/` + `raw/` for existing
 material. Personal knowledge bases often hold un-ingested PDFs or partially-related
@@ -112,84 +102,80 @@ Use the available search tools:
 - **Tavily MCP** (`mcp__tavily__tavily_search`): Advanced search with configurable depth
 - **Tavily extract/crawl** (`mcp__tavily__tavily_extract` / `tavily_crawl`): fetch full content of promising pages — WebFetch is denied in this harness, so all page fetching goes through Tavily.
 
-Deduplicate results by URL. Cap at 20 sources. Prefer recent, authoritative sources.
+Deduplicate results by URL. Cap at 20 sources (NashSU `MAX_RESEARCH_SOURCES`). Prefer recent, authoritative sources.
 
-For each promising source, fetch the full content if the snippet is insufficient.
+Synthesize from the search **snippets** — NashSU's `collectResearchSources` passes snippet text only and never fetches full page bodies. Only fetch a full page via Tavily extract/crawl when a snippet is too thin to use, and treat that as a CLI extra, not NashSU behavior.
 
 ### Step 3: Synthesize
 
-Claude synthesizes the research into a structured wiki page, merging **local
-sources** (Step 2a) with **web sources** (Step 2b) into one numbered References
-list. Local wiki hits also seed the cross-referencing: if `search_local.py` found
-existing pages on related subtopics, wikilink to them instead of re-explaining.
+Claude synthesizes the research into one wiki page from the collected sources
+(local Step 2a + web Step 2b). NashSU writes the LLM's synthesis **verbatim**
+(stripping only `<think>` blocks) and appends a **code-generated** References list
+— so follow these writing rules rather than forcing a fixed section template:
 
-The prompt structure:
+Synthesis prompt (matches NashSU's `executeResearch`):
 
 ```
-Synthesize a comprehensive wiki page from the following research sources.
-Sources include both local knowledge-base hits (local:wiki / local:raw) and
-web search results — treat them uniformly, but prefer local:wiki for claims
-already established in the knowledge base.
+Synthesize a wiki page from the following research sources. Sources include local
+knowledge-base hits (local:wiki / local:raw) and web results — treat them
+uniformly, preferring local:wiki for claims already in the knowledge base.
 
-## Cross-referencing (CRITICAL)
-- The wiki has existing pages listed in the Wiki Index below AND in the local
-  search hits above
-- When you mention an entity or concept that exists in the wiki, use [[wikilink]]
-- This connects new research to existing knowledge
+## Cross-referencing
+- When you mention an entity/concept that exists in the Wiki Index below (or in a
+  local:wiki hit), use a [[wikilink]] to connect new research to existing knowledge.
 
-## Writing Rules
-- Organize into clear sections with ## headings
-- Cite sources using [N] notation matching the References list
-- Note contradictions between sources (don't paper over them)
-- Highlight areas where sources agree (stronger signal)
-- Flag open questions and areas needing further research
-- Neutral, encyclopedic tone
-- Output language: match the wiki's primary language
+## Writing rules (NashSU)
+- Organize into clear sections with ## headings — let the content shape them; do
+  NOT force a fixed Overview / Key Findings / Thematic / Contradictions skeleton.
+- Cite sources with [N] notation matching the References list.
+- Note contradictions between sources (don't paper over them); flag agreement.
+- Flag open questions and areas needing further research.
+- Neutral, encyclopedic tone. Output language: match the wiki's primary language.
+- Do NOT write the frontmatter or the References list yourself — they are added
+  deterministically by the steps below.
+```
 
-## Output Format
-Output a complete wiki page with YAML frontmatter:
+Then assemble the page (NashSU builds this in code, not via the LLM):
 
+```
 ---
 type: query
-title: "Research: <topic>"
-created: <today>
+title: "Research: <topic, with any \" escaped as \\\">"
+created: <today, UTC>
 origin: deep-research
-tags: [research, <topic-tags>]
-sources: [<source-urls>]
+tags: [research]
 ---
 
 # Research: <topic>
 
-## Overview
-...
-
-## Key Findings
-...
-
-## <Thematic Sections>
-...
-
-## Contradictions & Open Questions
-...
+<the LLM synthesis, verbatim except <think> blocks stripped>
 
 ## References
-[1] [Title](URL) — source
-...
+1. [<title>](<url>) — <source>
+2. ...
 ```
 
-The `origin: deep-research` frontmatter field marks this as a research page. (NashSU writes `origin` only on deep-research pages — ingest-generated source/concept/entity pages carry no `origin` field — so this is how a research page is distinguished downstream.)
+Frontmatter is exactly these five keys. **No** `<topic-tags>` (NashSU hardcodes
+`tags: [research]`); **no** `sources` field (source URLs live in the code-generated
+References list, not in frontmatter). Escape any `"` in the title. The
+`origin: deep-research` field mirrors NashSU's marker for research pages (NashSU
+sets it; ingest-generated source/concept/entity pages carry no `origin`).
 
 ### Step 4: Write to Wiki
 
-Write the synthesized page to `wiki/queries/<slug>.md`. Use CJK-aware slug generation:
+Write the synthesized page to `wiki/queries/<slug>-<YYYY-MM-DD>-<HHMMSS>.md`
+(port of NashSU `makeDeepResearchFileName` → `makeQueryFileName("research-" + topic)`):
 
 ```python
-from _core import slugify
+from _core import slugify           # CJK-aware slug
+import subprocess
 slug = slugify(f"research-{topic}")
-path = f"wiki/queries/{slug}.md"
+ts = subprocess.check_output(["date", "-u", "+%Y-%m-%d-%H%M%S"]).decode().strip()
+path = f"wiki/queries/{slug}-{ts}.md"
 ```
 
-If a page with the same slug exists, version it: `research-<topic>-2.md`.
+The UTC timestamp suffix guarantees that repeated research on the same topic never
+collides — no `-2` versioning needed, matching NashSU.
 
 ### Step 5: Auto-Ingest (THE CLOSED LOOP) ⭐
 
@@ -234,34 +220,15 @@ This is what turns "a saved search result" into "integrated knowledge."
 - 🔗 <review item 2>
 ```
 
-### Step 7: Auto-chain (onTaskFinished — NashSU parity) ⭐
+### One Topic Per Invocation (no review-derived chaining)
 
-NashSU's `onTaskFinished()` automatically processes the next queued research
-task when the current one completes. In conversation mode there is no persistent
-queue store, but the ingest in Step 5 produces **review items** — and the most
-actionable review item is the natural "next research topic."
-
-**Auto-chain rule** (cap at **3 chained rounds** to prevent unbounded token burn):
-
-1. After Step 5's ingest completes, read the new review items in `wiki/REVIEW/`.
-2. Pick the **highest-severity** review item whose `type` is `missing-page` or
-   `confirm` and whose title maps to a researchable topic (not a pure typo fix).
-3. Announce the chain:
-   ```
-   🔗 自动接续研究 (round 2/3): <review item title>
-   ```
-4. Run Step 1–6 again for that topic, incrementing the round counter.
-5. Stop when: round cap reached, no actionable review items, or the user
-   interrupts.
-
-**When NOT to auto-chain:**
-- Round cap (3) reached — present remaining review items to the user instead.
-- All review items are `low` severity or typo-class fixes — not worth a research round.
-- The user explicitly said "just this one" or scoped the research to a single topic.
-
-This mirrors NashSU's `onTaskFinished → processQueue` loop but adapted for
-conversation mode: the "queue" is the review-item backlog produced by each
-ingest, and the cap replaces NashSU's finite task queue.
+NashSU's `onTaskFinished()` only advances the **already-queued** research tasks
+(`processQueue` pulls the next *queued* task); it does **not** read review items or
+derive new topics from them. There is no persistent queue store in conversation
+mode, so each invocation researches one topic and stops. The review items produced
+by Step 5's ingest are surfaced to the user (Step 6) as candidate next topics — but
+auto-chaining onto them is **not** NashSU behavior and is not done here. The user
+can start a new deep-research invocation on any surfaced topic.
 
 ## Trigger Phrases
 
@@ -320,12 +287,14 @@ Claude: [fetches those URLs + complementary web search → synthesizes]
 ### Research Topic Too Broad
 If the topic would produce >20 high-quality sources with divergent themes, Claude should ask the user to narrow scope BEFORE searching. Wasted search on an overbroad topic helps no one.
 
-### Zero Useful Results
-If all search queries return garbage, Claude should:
-1. Report the failure honestly
-2. Suggest alternative query formulations
-3. Ask the user for better search terms
-4. NOT fabricate a page from thin air
+### Zero Useful Results (NashSU `noResearchSourcesTaskPatch`)
+NashSU distinguishes two states — mirror them:
+1. **Search errors** → report the failure (task `error`); surface the errors and
+   suggest alternative query formulations or better search terms.
+2. **No errors but zero results** → write **no page** and run **no ingest**; report
+   "No research sources found." (task `done`).
+
+Either way, **never** fabricate a page from thin air.
 
 ### Topic Already Well-Covered in Wiki
 If the wiki already has extensive coverage, Claude should:

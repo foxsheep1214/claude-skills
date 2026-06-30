@@ -1,7 +1,6 @@
 """_ingest_write.py — Stage 3+ file writing + post-ingest (extracted from ingest.py)."""
 from __future__ import annotations
 
-import re
 import time
 from pathlib import Path
 
@@ -64,32 +63,6 @@ def _preserve_stage_counters(prev_stages: dict, new_stages: dict) -> dict:
             out[k] = max(int(prev_stages.get(k, 0) or 0), int(out[k] or 0))
     return out
 
-
-def cleanup_resolved_reviews(config: Config) -> int:
-    """Delete review pages whose frontmatter has `resolved: true`.
-
-    Called at the start of each ingest run. Returns count of deleted pages.
-    """
-    reviews_dir = config.wiki_dir / "REVIEW"
-    if not reviews_dir.exists():
-        return 0
-
-    removed = 0
-    for f in sorted(reviews_dir.rglob("*.md")):
-        if not f.suffix == ".md":
-            continue
-        content = f.read_text(encoding="utf-8")
-        # Check frontmatter for resolved: true
-        m = re.search(r'^resolved:\s*true\s*$', content, re.MULTILINE)
-        if m:
-            f.unlink()
-            removed += 1
-            print(f"[cleanup] Resolved review removed: {f.name}")
-
-    if removed > 0:
-        print(f"[cleanup] {removed} resolved review page(s) deleted")
-
-    return removed
 
 def _reconstruct_blocks_from_disk(
     config: Config, files_written_paths: list[str]

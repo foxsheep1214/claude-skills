@@ -20,7 +20,7 @@ def stage_2_6_source_page(
     Separated from concept/entity generation so the LLM can focus entirely
     on producing a high-quality source page from the global digest.
 
-    NOTE — divergence from NashSU 0.5.2 (intentional): NashSU's ingest is a
+    NOTE — divergence from NashSU (intentional): NashSU's ingest is a
     two-step Analysis→Generation flow where the *Generation* step is a SINGLE
     combined LLM call that emits the source summary page AND all concept/entity
     FILE blocks together (ingest.ts ~L835-868, buildGenerationPrompt). improved-
@@ -38,9 +38,27 @@ def stage_2_6_source_page(
     if not isinstance(book_meta, dict):
         book_meta = {}
     title = book_meta.get("title", file_path.stem) if isinstance(book_meta, dict) else file_path.stem
-    authors = book_meta.get("authors", []) if isinstance(book_meta, dict) else []
-    year = book_meta.get("year", "") if isinstance(book_meta, dict) else ""
-    publisher = book_meta.get("publisher", "") if isinstance(book_meta, dict) else ""
+    # Bibliographic metadata for the source-page frontmatter (NashSU source-page
+    # parity: authors/year/url/venue). Pull from whichever *_meta block the digest
+    # carries — book_meta (books), paper_meta (papers; has venue/doi), part_meta /
+    # clip_meta / deck_meta (datasheets/news/decks may carry url/venue).
+    bib_meta = book_meta if book_meta else next(
+        (v for k, v in global_digest.items()
+         if k.endswith("_meta") and isinstance(v, dict)),
+        {},
+    )
+    bib_authors = bib_meta.get("authors", []) if isinstance(bib_meta, dict) else []
+    if not isinstance(bib_authors, list):
+        bib_authors = [bib_authors] if bib_authors else []
+    bib_year = bib_meta.get("year", "") if isinstance(bib_meta, dict) else ""
+    bib_url = bib_meta.get("url", "") if isinstance(bib_meta, dict) else ""
+    # NashSU has no `publisher` field; fold a book's publisher into `venue`.
+    bib_venue = (bib_meta.get("venue", "") or bib_meta.get("publisher", "")) if isinstance(bib_meta, dict) else ""
+
+    authors_yaml = "[" + ", ".join(f'"{a}"' for a in bib_authors) + "]" if bib_authors else "[]"
+    year_yaml = str(bib_year) if bib_year not in ("", None) else '""'
+    url_yaml = f'"{bib_url}"' if bib_url else '""'
+    venue_yaml = f'"{bib_venue}"' if bib_venue else '""'
 
     digest_str = json.dumps(global_digest, ensure_ascii=False, indent=2)
     if len(digest_str) > 8000:
@@ -274,6 +292,10 @@ updated: {time.strftime('%Y-%m-%d')}
 tags: [tag1, tag2, tag3]
 related: []
 sources: ["raw/{source_rel}{file_path.suffix}"]
+authors: {authors_yaml}
+year: {year_yaml}
+url: {url_yaml}
+venue: {venue_yaml}
 ---
 
 {body_sections}
@@ -286,6 +308,7 @@ sources: ["raw/{source_rel}{file_path.suffix}"]
 - Do NOT add extra sections beyond those listed above. Link to concepts via [[wikilinks]].
 - tags: 3-8 relevant tags (do NOT leave empty)
 - related: 2-5 related wiki page slugs
+- authors/year/url/venue: bibliographic fields for this source (NashSU source-page parity). The template is pre-filled from the digest where available — verify against the "{info_header}" block above and complete any left empty; use `[]` for authors and `""` for url/venue if genuinely unknown. authors is a list, year a number, url/venue strings.
 - Math: $inline$ $$display$$
 """
 

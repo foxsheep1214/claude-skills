@@ -1,116 +1,130 @@
 # Save Chat to Wiki — Conversation → Knowledge
 
-NashSU v0.4.25 parity for `chat-save-to-wiki.ts`: capture any LLM conversation as a structured wiki page and auto-ingest it into the knowledge base.
+参考 NashSU `chat-save-to-wiki.ts` + the `SaveToWikiButton` flow
+(`chat-message.tsx`): capture an assistant answer as a wiki query page and
+auto-ingest it into the knowledge base. **Strict NashSU minimal implementation**
+— no invented frontmatter fields, no body restructuring; the saved page is the
+cleaned assistant content written verbatim, exactly like NashSU.
 
 ## Core Idea
 
-You ask Claude questions all the time. Some answers are throwaway — but some contain real insight: a novel analysis, a comparison you hadn't considered, a connection between two concepts that clicked during the conversation. Without save-to-wiki, that insight disappears into chat history.
-
-With save-to-wiki, any conversation turn (or series of turns) can be captured as a wiki page and auto-ingested — extracting entities, concepts, and cross-references just like a source document.
+You ask Claude questions all the time. Some answers are throwaway — but some
+contain real insight. Without save-to-wiki, that insight disappears into chat
+history. With save-to-wiki, an assistant answer is captured as a `wiki/queries/`
+page and auto-ingested — extracting entities, concepts, and cross-references just
+like a source document.
 
 ```
-User asks a question → Claude answers → User: "save this to wiki"
-  → Claude extracts the valuable content
-  → Writes wiki/queries/<slug>.md
-  → Auto-ingests → generates entity/concept pages
-  → Knowledge permanently integrated
+Claude answers → User: "save this to wiki"
+  → clean the assistant content (NashSU cleanAssistantContentForWikiSave)
+  → write wiki/queries/<slug>-<YYYY-MM-DD>-<HHMMSS>.md (frontmatter + verbatim body)
+  → update index.md (## Queries) + log.md
+  → auto-ingest → entity/concept pages
+  → knowledge permanently integrated
 ```
 
 ## NashSU Alignment
 
-| NashSU | improved-wiki (Claude Code) |
+| NashSU (`chat-save-to-wiki.ts` / `chat-message.tsx`) | improved-wiki (Claude Code) |
 |--------|---------------------------|
-| UI button "Save to Wiki" | User says "保存到 wiki" / "save to wiki" / "记住这个" |
-| `cleanAssistantContentForWikiSave()` — strips thinking blocks | Claude strips `<think>` blocks before saving |
-| `titleFromCleanAssistantContent()` — extracts title from first heading | Claude generates a descriptive slug from the content |
-| Saves to `wiki/queries/<slug>.md` with frontmatter | Same format: `type: query`, `origin: chat-save` |
-| Auto-ingest triggers on the saved page | `ingest.py wiki/queries/<slug>.md` |
+| UI button "Save to Wiki" on an assistant message | User says "保存到 wiki" / "save to wiki" / "记住这个" |
+| `cleanAssistantContentForWikiSave()` — strips `<!-- save-worthy: -->` / `<!-- sources: -->` comments + `<think>` blocks, trims | Same cleaning rules (see Step 1), nothing more |
+| `titleFromCleanAssistantContent()` — first non-empty line, strip leading `#`, cap 60 chars, fallback `"Saved Query"` | Same title rule (Step 2) |
+| `makeQueryFileName()` — NFKC slug, 50-char cap, `+ -YYYY-MM-DD-HHMMSS` (UTC) | Same filename rule (Step 3) |
+| Frontmatter: `type / title / created / tags` only | Same 4 fields — **no** `origin`, **no** `sources` |
+| Body = cleaned assistant content appended verbatim | Same — no `# Title`, no Context/Analysis sections |
+| Update `index.md` `## Queries` + append `log.md` | Same (Step 4) |
+| `autoIngest()` on the saved page | `ingest.py wiki/queries/<file>.md` (Step 5) |
 
 ## Workflow
 
-### Step 1: User Triggers Save
+### Step 1: Clean the Assistant Content
 
-After any Claude response that contains knowledge worth keeping:
+The unit of saving is **one assistant answer** (the message the button is attached
+to in NashSU). Apply exactly NashSU's `cleanAssistantContentForWikiSave`:
 
+1. Remove `<!-- save-worthy: ... -->` and `<!-- sources: ... -->` HTML comments.
+2. Remove `<think>` / `<thinking>` blocks (closed, and an unclosed `<think>` that
+   runs to the end).
+3. Strip leading whitespace; trim trailing whitespace.
+
+Do **NOT** strip tool-use artifacts, do **NOT** remove "How can I help" / "Let me
+know" boilerplate, do **NOT** rewrite or inject `[[wikilinks]]`, do **NOT** pull in
+the user's question. NashSU keeps the answer verbatim apart from the three rules
+above — the downstream auto-ingest is what extracts structure.
+
+### Step 2: Derive the Title
+
+Port of `titleFromCleanAssistantContent`:
+
+- Take the **first non-empty line** of the cleaned content.
+- Strip a leading `#`/`##`/… and the following space.
+- Truncate to **60 characters**.
+- If the content is empty, the title is the literal string `Saved Query`.
+
+The title is the human-readable string only. The filename slug is derived
+separately in Step 3 — do not conflate them.
+
+### Step 3: Write the Page
+
+Filename (port of `makeQueryFileName`):
+
+```bash
+# slug: NFKC-normalize the title, lowercase, spaces → hyphens, keep only
+# letters/digits + hyphen, collapse repeats, cap 50 chars (fallback "query").
+# Then append a UTC timestamp so repeated saves never collide:
+TS=$(date -u +%Y-%m-%d-%H%M%S)
+# path: wiki/queries/<slug>-<TS>.md
 ```
-User: 保存到 HardwareWiki
-User: save this to wiki
-User: 记住这个
-User: add this to the wiki
-```
 
-### Step 2: Claude Extracts the Valuable Content
-
-Claude identifies the knowledge-bearing part of the conversation:
-- The user's question (provides context for why this matters)
-- Claude's substantive answer (the knowledge)
-- Exclude: pleasantries, meta-discussion, tool call results
-
-Claude cleans the content:
-1. Remove `<think>` / `<thinking>` blocks
-2. Remove tool use artifacts
-3. Remove "How can I help you?" / "Let me know if..." boilerplate
-4. Preserve: headings, lists, tables, code blocks, [[wikilinks]]
-
-If the conversation is long, Claude can ask: "要保存整个讨论还是只保存最后的回答？"
-
-### Step 3: Claude Generates the Wiki Page
+Page content (frontmatter + blank line + verbatim cleaned body):
 
 ```
 ---
 type: query
-title: "<descriptive title>"
-created: <today>
-origin: chat-save
-tags: [<auto-detected tags>]
-sources: []
+title: "<title, with any \" escaped as \\\">"
+created: <today, UTC>
+tags: []
 ---
 
-# <Title>
-
-## Context (用户提问)
-<User's question that prompted this>
-
-## Analysis
-<Claude's substantive response, cleaned>
-
-## Follow-up Questions
-<Any open questions identified in the conversation>
+<cleaned assistant content, verbatim from Step 1>
 ```
 
-Key formatting rules:
-- Replace any existing `[[wikilinks]]` with correct wiki paths
-- Add new `[[wikilinks]]` where the content mentions known wiki pages
-- Use the wiki's output language
-- Preserve code blocks with language markers
+Rules:
+- Frontmatter is exactly these four keys. **No** `origin`, **no** `sources`,
+  **no** injected `# Title` heading, **no** Context/Analysis/Follow-up sections.
+- Escape any `"` in the title as `\"` (otherwise the YAML is invalid).
+- The body is the cleaned content from Step 1, written as-is.
 
-### Step 4: Write to Wiki
+### Step 4: Update Index + Log
 
-```bash
-# Write the page
-# Path: wiki/queries/<slug>.md
-```
+NashSU updates two aggregate files on every save — do the same:
 
-If a page with the same title exists, append as a new section or version the filename.
+- `wiki/index.md`: under a `## Queries` heading (create it if missing), insert
+  `- [[queries/<filename-without-.md>|<title>]]`.
+- `wiki/log.md`: append `- <today>: Saved query page \`<filename>\``.
 
 ### Step 5: Auto-Ingest
 
 ```bash
-python3 scripts/ingest.py wiki/queries/<slug>.md
+python3 scripts/ingest.py wiki/queries/<filename>.md
 ```
 
-This extracts entities/concepts from the saved conversation, creating new wiki pages and cross-references. Without this step, the saved page is just a static note — with it, the knowledge is decomposed and integrated.
+This bridges the query page into `raw/queries/` and ingests it (NashSU `autoIngest`
+parity), extracting entities/concepts and creating cross-references. Without this,
+the saved page is a static note; with it, the knowledge is decomposed and
+integrated. (NashSU gates auto-ingest on having a usable LLM; in Claude Code the
+calling agent is always the LLM, so it always runs.)
 
 ### Step 6: Confirm
 
 ```
 ## ✅ 已保存到 HardwareWiki
 
-**页面**: wiki/queries/gan-vs-sic-驱动电路对比.md
+**页面**: wiki/queries/gan-vs-sic-2026-06-30-142210.md
 **消化产出**:
 - wiki/entities/GaN-Systems.md (新增)
 - wiki/concepts/enhancement-mode-gan.md (合并更新)
-- wiki/comparisons/GaN-vs-SiC-驱动.md (新增)
 
 **Review**: 1 个建议 — "补充 EPC 与 Navitas 的最新产品对比"
 ```
@@ -125,73 +139,28 @@ This extracts entities/concepts from the saved conversation, creating new wiki p
 
 ## When Claude Should Proactively Suggest Saving
 
-Claude should suggest save-to-wiki when:
-
-1. **The response is in-depth** (>500 words of substantive analysis)
-2. **Novel connections are made** between concepts not previously linked
-3. **Comparative analysis** that would be useful for future reference
-4. **A question the wiki couldn't answer** was just answered from external knowledge
-5. **User explicitly asked for research or analysis**
+NashSU's trigger is a manual button — there is no proactive prompting upstream.
+The trigger phrases above are the CLI equivalent of the button. As a light CLI
+convenience (not NashSU behavior), Claude *may* offer to save after an in-depth,
+novel answer, but the default is to wait for an explicit trigger.
 
 ```
 Claude: [详细回答后]
-💡 这个分析涉及了几个 wiki 里没有的概念。要我保存到 HardwareWiki 并消化吗？
+💡 要把这个回答保存到 HardwareWiki 并消化吗？
 ```
 
-## Variants
+## Notes on Fidelity
 
-### Variant A: Save Full Conversation
-
-```
-User: 把整个讨论保存到 wiki
-Claude: [extracts all substantive exchanges, organizes into a single query page]
-```
-
-### Variant B: Save Only The Last Response
-
-```
-User: 只保存刚才那个对比分析
-Claude: [extracts only the last substantive response]
-```
-
-### Variant C: Save with Custom Title
-
-```
-User: 保存到 RadarWiki，标题叫"雷达信号分选方法对比 2025"
-Claude: [uses the specified title for the page slug and frontmatter]
-```
-
-### Variant D: Save as Source (not Query)
-
-If the conversation is about analyzing a specific external article or paper that was discussed:
-
-```
-User: 把这段分析保存为 source 页面
-Claude: [saves to wiki/sources/ instead of wiki/queries/]
-```
-
-## Edge Cases
-
-### Duplicate Save
-If the user accidentally triggers save twice, Claude should detect the existing page and either skip or append.
-
-### Empty/Trivial Content
-If the conversation is just chitchat, Claude should decline: "这段对话似乎没有需要保存到 wiki 的知识内容。"
-
-### Very Long Conversation
-If the conversation is >10K words, Claude should summarize rather than save verbatim. Ask the user what to focus on.
-
-### Multi-Turn Discussion
-If the insight developed over multiple turns, Claude should include the full context chain, not just the last response.
+- Each save always produces a **new** file (the `-HHMMSS` suffix guarantees no
+  collision) — NashSU does not deduplicate, decline trivial content, or summarize
+  long answers, and neither do we.
+- There is **no** "save as source" variant — NashSU always writes `type: query`
+  to `wiki/queries/`.
+- Saving captures the assistant answer only; it does not embed the user's question
+  or restructure the text.
 
 ## Integration with Deep Research
 
-Save-to-wiki and deep research form a natural pair:
-
-```
-User asks a question → Claude answers from knowledge → save to wiki
-  → page has open questions → deep research those questions
-  → new knowledge → save again → loop
-```
-
-This is the "conversation as knowledge driver" pattern — every good question expands the wiki, and the expanded wiki enables better questions.
+Save-to-wiki and deep research form a natural pair: a saved answer with open
+questions can seed a deep-research round, whose result is saved again — every good
+question expands the wiki, and the expanded wiki enables better questions.
