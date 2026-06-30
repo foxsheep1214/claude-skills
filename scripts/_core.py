@@ -1364,8 +1364,14 @@ def call_with_retry(fn, max_retries: int = 3, base_wait: float = 1.0, label: str
         except Exception as e:
             last_err = e
             if _is_retryable_exception(e) and attempt < max_retries - 1:
-                _retry_jitter(attempt, label)
-                time.sleep(base_wait ** (attempt + 1))
+                # _retry_jitter(base_wait, attempt) RETURNS the jittered
+                # exponential backoff (base_wait * 2**attempt * jitter); sleep on
+                # it. (Was buggy: called as _retry_jitter(attempt, label) — wrong
+                # arg order, a str where an int was expected (TypeError on the
+                # first retry), and the return value discarded; the actual sleep
+                # used base_wait ** (attempt+1), which with the default
+                # base_wait=1.0 is always 1.0 — no backoff.)
+                time.sleep(_retry_jitter(base_wait, attempt))
                 continue
             raise
     raise last_err  # unreachable but satisfies type checker
