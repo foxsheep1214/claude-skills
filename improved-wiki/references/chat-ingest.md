@@ -1,6 +1,6 @@
 # Chat Ingest — Interactive Human-Guided Ingestion
 
-NashSU v0.4.25 parity for `startIngest()` + `executeIngestWrites()` two-step interactive ingest.
+CLI re-creation of the interactive human-guided ingest NashSU offered in earlier versions. **NashSU later removed the interactive entry point** — re-ingest now routes through the auto-ingest queue (`enqueueSourceIngest`), and `executeIngestWrites` survives only as the chat-panel write path with its `userGuidance` argument unused. This skill keeps the guided two-step as a deliberate CLI feature: a revival, not current parity. The richer digest / guidance-first / confirm contract described below is a **skill enhancement** layered on the same FILE-block write path, not behavior `executeIngestWrites` implements.
 
 ## Why Chat Ingest
 

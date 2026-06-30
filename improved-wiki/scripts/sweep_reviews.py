@@ -2,7 +2,7 @@
 """
 sweep_reviews.py — Auto-resolve review items satisfied by subsequent ingests.
 
-NashSU 0.5.3 parity for sweep-reviews.ts: scans pending review items, applies
+参考 NashSU sweep-reviews.ts: scans pending review items, applies
 rule-based matching (Stage 1: missing-page now exists, duplicate's affected
 page gone), then an optional LLM semantic judge (Stage 2) over what's left.
 
@@ -87,7 +87,10 @@ def _build_wiki_index(wiki_dir: Path) -> Dict[str, Set[str]]:
     by_id: Set[str] = set()
     by_title: Set[str] = set()
     for f in wiki_dir.rglob("*.md"):
-        # Skip review pages themselves (mirror NashSU: index is wiki pages only).
+        # Skip the REVIEW/ subtree. NOTE: this DIVERGES from NashSU's
+        # buildWikiIndex, which indexes every .md (REVIEW included). We exclude
+        # review pages on purpose so a review's own stem/title cannot false-match
+        # a missing-page candidate and self-resolve. Deliberate, conservative.
         parts = {p.lower() for p in f.relative_to(wiki_dir).parts[:-1]}
         if "review" in parts:
             continue
@@ -424,23 +427,6 @@ def _resolve_review(review: Dict, reason: str, dry_run: bool = True) -> bool:
     return False
 
 
-def _cleanup_resolved_reviews(wiki_dir: Path, dry_run: bool) -> int:
-    """Delete review pages whose frontmatter has `resolved: true`."""
-    reviews_dir = wiki_dir / "REVIEW"
-    if not reviews_dir.exists():
-        return 0
-    removed = 0
-    for f in sorted(reviews_dir.rglob("*.md")):
-        content = f.read_text(encoding="utf-8")
-        if re.search(r'^resolved:\s*true\s*$', content, re.MULTILINE):
-            if not dry_run:
-                f.unlink()
-            removed += 1
-            tag = "" if not dry_run else " [DRY RUN]"
-            print(f"  [del]{tag} {f.name}")
-    return removed
-
-
 def _apply_rule_stage(reviews: List[Dict],
                       index: Dict[str, Set[str]]) -> Tuple[List[Dict], List[Dict]]:
     """Stage 1 (rule-based) dispatch — NashSU sweep-reviews.ts conservative rules.
@@ -469,9 +455,10 @@ def _apply_rule_stage(reviews: List[Dict],
             if names and any(_page_exists(n, index) for n in names):
                 reason = "missing page now exists"
         elif rtype == "duplicate":
-            # NashSU: resolve when not every affected page still exists. The
-            # empty/all-deleted case also resolves (NashSU treats an affected
-            # page whose basename is absent as no-longer-existing).
+            # NashSU: resolve when not every affected page still exists (a listed
+            # page was merged/deleted). An EMPTY affected list is guarded out
+            # below and stays PENDING — only a non-empty list with at least one
+            # now-missing page resolves.
             affected = review.get("affected_pages") or []
             if affected:
                 def _still(p: str) -> bool:
@@ -580,11 +567,9 @@ def sweep_reviews(wiki_root: Path, dry_run: bool = True, use_llm: bool = True) -
     else:
         by_type_pending = {}
 
-    # Cleanup: delete pages already marked resolved: true
-    print(f"\n[cleanup] Removing resolved review pages...")
-    cleaned = _cleanup_resolved_reviews(wiki_dir, dry_run=dry_run)
-    if cleaned == 0:
-        print("  (none)")
+    # NashSU parity: resolved review pages are KEPT (marked `resolved: true`),
+    # never deleted. The resolved twin on disk is what lets normalize_review_items
+    # apply "resolved wins" so the item stays resolved across re-ingest.
 
     return {
         "total": len(reviews),
@@ -592,7 +577,6 @@ def sweep_reviews(wiki_root: Path, dry_run: bool = True, use_llm: bool = True) -
         "rule_resolved": len(rule_resolved),
         "llm_resolved": len(llm_resolved),
         "pending": len(still_pending),
-        "cleaned": cleaned,
         "details": {
             "resolved": [{"title": r["title"], "reason": r["reason"]} for r in applied],
             "pending_types": by_type_pending,

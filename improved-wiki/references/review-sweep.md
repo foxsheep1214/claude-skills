@@ -1,6 +1,6 @@
 # Review Sweep — Auto-Resolution of Review Items
 
-NashSU v0.5.3 parity for `sweep-reviews.ts`: automatically resolve pending review items when subsequent ingests address their underlying condition. Two stages: deterministic rule-based resolution (exact page-match; conservative — only `missing-page`/`duplicate` auto-resolve by rule, `contradiction`/`suggestion`/`confirm` stay pending for human judgment), then a conversation-mode LLM semantic judge for still-pending items (`--no-llm` skips it). Reviews carry a content-stable FNV-1a `review_id` (port of `reviewIdFor`) + `normalizeReviewTitle` so dedup/resolution survives re-ingest.
+参考 NashSU `sweep-reviews.ts`: automatically resolve pending review items when subsequent ingests address their underlying condition. Two stages: deterministic rule-based resolution (exact page-match; conservative — only `missing-page`/`duplicate` auto-resolve by rule, `contradiction`/`suggestion`/`confirm` stay pending for human judgment), then a conversation-mode LLM semantic judge for still-pending items (`--no-llm` skips it). Reviews carry a content-stable FNV-1a `review_id` (port of `reviewIdFor`) + `normalizeReviewTitle` so dedup/resolution survives re-ingest.
 
 ## Core Idea
 
@@ -24,7 +24,7 @@ New source ingested → sweep pending reviews →
 | `buildWikiIndex()` — scans wiki/ for all page IDs + titles | `scripts/sweep_reviews.py` or Claude-direct scan |
 | Rule matching: filename / frontmatter title / affectedPages | Same: page path match, title match, affected page existence |
 | LLM semantic judgment for remaining items | Claude reads review item + wiki context → judges |
-| Auto-resolve + update review store | Update `resolved: true` + `resolved_at` in REIVEW .md files |
+| Auto-resolve + mark `resolved` in the in-memory store (never deleted) | Set `resolved: true` + `resolved_at` + `resolved_reason` in REVIEW .md files — **kept on disk** as an audit trail; the content-stable `review_id` + resolved-wins dedup keeps them resolved across re-ingest |
 
 ## Workflow
 
@@ -42,9 +42,10 @@ New source ingested → sweep pending reviews →
 Claude (or the sweep script) scans `wiki/` to build an index of:
 - All page IDs (filename without `.md`)
 - All page titles (from frontmatter `title:`)
-- All wikilinks per page
 
 This is the "what exists now" snapshot against which review items are checked.
+(The `wiki/REVIEW/` subtree is excluded so a review's own title/stem can't
+self-match a missing-page candidate.)
 
 ### Step 2: Rule-Based Matching (Fast Path)
 
@@ -63,11 +64,7 @@ Review: "[[GaN-driver]] 疑似与 [[GaN-驱动]] 重复"
 Check: Both pages still exist? → NO (one was deleted/merged) → auto-resolve
 ```
 
-**Affected pages check**: For any review with `affected_pages`, check if ALL listed pages still exist and have been updated since the review was created.
-```
-Review: contradiction about [[concepts/emi-filter]]
-Check: page modified time > review created time? → YES → escalate to LLM judge
-```
+**Conservative rule stage**: Only `missing-page` and `duplicate` auto-resolve by rule. `contradiction` / `suggestion` / `confirm` are NOT rule-resolvable — they fall through to the LLM semantic judge (Step 3). The rule stage is purely existence-based; there is **no** page-modified-time check (neither NashSU nor the script implements one).
 
 ### Step 3: LLM Semantic Judgment (Slow Path)
 
@@ -150,7 +147,7 @@ title: "缺少 GaN HEMT 驱动电路设计页面"
 created: 2025-06-15
 resolved: false
 resolved_at: null
-resolved_by: null
+resolved_reason: null
 affected_pages:
   - wiki/concepts/gan-hemt.md
   - wiki/entities/gan-systems.md
@@ -171,5 +168,7 @@ When resolved, the sweep updates:
 ```markdown
 resolved: true
 resolved_at: 2025-06-20
-resolved_by: "auto-sweep: page created by ingest of 《Power GaN》"
+resolved_reason: "auto-sweep: page created by ingest of 《Power GaN》"
 ```
+(Resolved review pages are kept on disk — never deleted — so the resolved state
+survives re-ingest via the content-stable `review_id` + resolved-wins dedup.)

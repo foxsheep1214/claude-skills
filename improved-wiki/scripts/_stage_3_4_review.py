@@ -46,7 +46,7 @@ source_ingest: "{source_stem}"
 {affected_links}
 {search_section}
 ## Resolution
-_待审核。处理完成后将 frontmatter 中 `resolved: false` 改为 `resolved: true`，下次 ingest 时自动清理。_
+_待审核。处理完成后将 frontmatter 中 `resolved: false` 改为 `resolved: true`（已解决项会保留为审计记录，不会被删除）。_
 """
 
 
@@ -66,7 +66,8 @@ def stage_3_4_review_suggestions(file_blocks: list[tuple[str, str]], raw_file: P
 
     Output: wiki/REVIEW/<type>/<date>-<source>-<short-slug>.md — human-browsable review pages.
     Each page has frontmatter `resolved: false`. When resolved, user changes to true.
-    On next ingest, resolved pages are auto-cleaned.
+    Resolved pages are KEPT (never auto-deleted) — the content-stable review_id +
+    resolved-wins dedup keeps them resolved across re-ingest (NashSU parity).
     Also writes review-suggestions.json to runtime dir for tooling.
     """
     # Generation-volume signal: total chars across the pages generated this pass.
@@ -127,7 +128,7 @@ def stage_3_4_review_suggestions(file_blocks: list[tuple[str, str]], raw_file: P
             break
 
     schema_text = ""
-    # schema.md lives at the project root (NashSU 0.5.2 parity), not in wiki/.
+    # schema.md lives at the project root (NashSU), not in wiki/.
     schema_path = config.wiki_root / "schema.md"
     if not schema_path.exists():
         schema_path = config.wiki_dir / "schema.md"  # back-compat: legacy wiki/ location
