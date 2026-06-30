@@ -45,6 +45,7 @@ from _lint_fixes import (  # noqa: E402
     append_wikilink,
     rewrite_wikilink_target,
     ensure_broken_link_stub,
+    stub_relative_path_from_broken_target,
     build_deleted_keys,
     clean_index_listing,
     extract_frontmatter_title,
@@ -65,7 +66,7 @@ _STATE_FILES = {
     "review.json", "review-suggestions.json", "embed-cache.json",
     "lint-semantic.json", "dedup-report.json",
 }
-_SKIP_DIRS = {"lint", "REVIEW", "media"}
+_SKIP_DIRS = {"lint", "REVIEW", "clusters", "media"}  # clusters/ = graph-generated (match semantic lint + graph.py)
 
 
 def _collect_pages(wiki_dir: Path) -> list[tuple[str, str]]:
@@ -96,7 +97,7 @@ def plan_fixes(findings: list[dict]) -> list[dict]:
 
     Action shapes:
       {kind: "rewrite", page, broken, suggested}
-      {kind: "stub", broken}
+      {kind: "stub", broken, page}     # create stub AND rewrite [[broken]] in `page`
       {kind: "append", page, target}   # append [[target]] to `page`
     """
     actions: list[dict] = []
@@ -112,7 +113,10 @@ def plan_fixes(findings: list[dict]) -> list[dict]:
                 actions.append({"kind": "rewrite", "page": page,
                                 "broken": broken, "suggested": suggested})
             else:
-                actions.append({"kind": "stub", "broken": broken})
+                # Carry `page` so apply_fixes can repoint [[broken]] at the new
+                # stub — otherwise the link stays dangling and the next lint run
+                # re-reports it (non-idempotent). NashSU handleFix does both.
+                actions.append({"kind": "stub", "broken": broken, "page": page})
         elif kind == "orphan":
             source = fnd.get("suggested_source")
             page = fnd.get("page")
@@ -135,6 +139,16 @@ def apply_fixes(
     dry_run: bool,
 ) -> dict:
     """Apply actions. Returns a summary counter."""
+    # Order matters: a 'rewrite' (typo [[broken]] -> [[canonical]]) or 'stub'
+    # can create the very link an 'append' wants to add to the same page. If the
+    # append runs first it checks the still-broken content, its dedup
+    # (has_wikilink_to_target) misses, and it appends a duplicate of the link the
+    # rewrite then produces. Process link-FIXING actions (rewrite/stub) before
+    # link-ADDING ones (append) so append sees the final canonical link and
+    # correctly skips. Stable sort preserves original order within each group.
+    _KIND_ORDER = {"rewrite": 0, "stub": 0, "append": 1}
+    actions = sorted(actions, key=lambda a: _KIND_ORDER.get(a.get("kind"), 0))
+
     cache: dict[str, str] = {}
     dirty: set[str] = set()
     summary = {"rewrite": 0, "stub": 0, "append": 0, "skipped": 0}
@@ -154,12 +168,28 @@ def apply_fixes(
     for act in actions:
         kind = act["kind"]
         if kind == "stub":
+            page_rel = act.get("page")
             if dry_run:
-                print(f"  [stub]      create stub for [[{act['broken']}]]")
-            else:
-                _, rel, created = ensure_broken_link_stub(project_root, act["broken"])
-                if created:
-                    print(f"  [stub]      created {rel}")
+                stub_rel = stub_relative_path_from_broken_target(act["broken"])
+                print(f"  [stub]      create stub {stub_rel} for [[{act['broken']}]]")
+                if page_rel:
+                    print(f"  [stub]      + rewrite [[{act['broken']}]] -> stub in {page_rel}")
+                summary["stub"] += 1
+                continue
+            _, rel, created = ensure_broken_link_stub(project_root, act["broken"])
+            if created:
+                print(f"  [stub]      created {rel}")
+            # Repoint the source page's [[broken]] at the freshly-created stub so
+            # the link resolves and a re-lint finds nothing (idempotent). NashSU
+            # handleFix parity: ensureBrokenLinkStub THEN rewriteWikilinkTarget.
+            if page_rel:
+                content = load(page_rel)
+                if content is not None:
+                    new = rewrite_wikilink_target(content, act["broken"], rel)
+                    if new != content:
+                        cache[page_rel] = new
+                        dirty.add(page_rel)
+                        print(f"  [stub]      rewrote [[{act['broken']}]] in {page_rel}")
             summary["stub"] += 1
             continue
 

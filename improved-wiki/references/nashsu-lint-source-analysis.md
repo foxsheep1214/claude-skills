@@ -83,7 +83,11 @@ This means:
 - `[[transformer]]` resolves to the same file (case-insensitive)
 - `[[TRANSFORMER]]` resolves to the same file (case-insensitive)
 
-**Improved-wiki**: ports `buildSlugMap` 1:1. The Python `slug_map` uses lowercase keys + `setdefault` ordering to ensure relative-stem takes priority over basename on collision.
+**Improved-wiki**: ports `buildSlugMap` 1:1 (`_lint_suggest.py::_build_slug_map`)
+with plain lowercase-keyed assignment — on a cross-file basename collision the
+last-scanned page wins, exactly like NashSU's `map.set` (last-write-wins). (An
+earlier draft of this doc claimed a `setdefault` relative-stem priority; the code
+does **not** do that — re-verified 2026-06-30.)
 
 ### 2.2 In-link computation with case-insensitive lookup (lint.ts L101-112)
 
@@ -127,11 +131,12 @@ Detail strings (verbatim, used in both `lint.json` files for app-interop):
 - `no-outlinks`: `"This page has no [[wikilink]] references to other pages."`
 - `broken-link`: `` `Broken link: [[${link}]] — target page not found.` ``
 
-**Improved-wiki**: matches all three strings exactly. The `frontmatter` filter on
-orphan / no-outlinks (only emit for pages with YAML frontmatter containing `type:`)
-is an improved-wiki extension — the app does NOT filter by frontmatter, so any
-file (including readme, etc.) would be reported. We added the filter to avoid
-spam from sub-pages that aren't proper wiki entries.
+**Improved-wiki**: matches all three strings exactly, and emits orphan /
+no-outlinks for **every** content page — no frontmatter filter, no stub-length
+filter — identical to the app. (An earlier draft claimed a `type:`-frontmatter
+filter; that filter is **not** in the code — re-verified against
+`_lint_suggest.run_structural_lint`, 2026-06-30. The only exclusions are
+`ANCHOR_FILES` and the `AGGREGATE_FILES` finding-exemption; see §2.4.)
 
 ### 2.4 Excluded from orphan check (lint.ts L80-82)
 
@@ -141,11 +146,24 @@ const contentFiles = wikiFiles.filter(
 )
 ```
 
-**Improved-wiki equivalent**: `ANCHOR_FILES = {"schema.md", "index.md", "log.md", "overview.md"}` — slightly broader (4 files instead of 2), because improved-wiki's anchor set includes `schema.md` and `overview.md` which NashSU doesn't exclude at the same level.
+**Improved-wiki equivalent**: the *exclusion* set is exactly NashSU's two files —
+`ANCHOR_FILES = {"index.md", "log.md"}` (`_lint_suggest.py:43`), dropped from the
+scan entirely. A **separate** `AGGREGATE_FILES = {"index.md", "log.md",
+"overview.md", "schema.md"}` is still *scanned* (so `overview.md`/`schema.md`
+outlinks count toward inbound, preventing false orphans on pages only the overview
+links to) but is *exempt from emitted findings*, so the headless auto-fixer never
+mutates a generated aggregate. (An earlier draft wrongly described this as a single
+4-file anchor set — re-verified 2026-06-30.)
 
-### 2.5 No `len(text) < 200` short-stub filter in the app
+### 2.5 No short-stub / frontmatter filter (parity, re-verified 2026-06-30)
 
-The app emits `no-outlinks` and `orphan` for **all** pages with frontmatter, including short stubs. Improved-wiki's `< 200` chars filter is a UX-driven filter to reduce noise during partial ingests; the app would emit ~500 `no-outlinks` findings on a fresh wiki where every page is just a stub from a single ingest.
+The app emits `no-outlinks` and `orphan` for **all** content pages, including
+short stubs. Improved-wiki now matches this exactly:
+`_lint_suggest.run_structural_lint` applies **no** `len(text) < 200` filter and
+**no** frontmatter filter. (Both filters existed in an early port and were removed
+for parity; earlier drafts of this doc still described them as present. The cost is
+that a fresh single-ingest wiki will emit many `no-outlinks`/`orphan` findings —
+that is the intended NashSU-aligned behavior.)
 
 ---
 

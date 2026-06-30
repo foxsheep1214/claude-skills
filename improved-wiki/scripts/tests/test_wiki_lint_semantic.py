@@ -193,5 +193,32 @@ class TestSemanticLintBatchedE2E(unittest.TestCase):
                     os.environ["IMPROVED_WIKI_ROOT"] = old_root
 
 
+class TestCollectSummariesDirExclusion(unittest.TestCase):
+    """Regression: derived-artifact dirs (REVIEW/, clusters/, media/, lint/)
+    must NOT be fed to the semantic-lint LLM — they are diagnostics this port
+    writes under wiki/, not source knowledge. Mirrors the structural lint."""
+
+    def test_skips_derived_artifact_dirs(self):
+        wls = _load_module()
+        with tempfile.TemporaryDirectory() as td:
+            wiki = Path(td) / "wiki"
+            (wiki / "concepts").mkdir(parents=True)
+            (wiki / "REVIEW").mkdir()
+            (wiki / "clusters").mkdir()
+            (wiki / "lint").mkdir()
+            (wiki / "concepts" / "a.md").write_text(
+                _page("type: concept\ntitle: A", "# A\nbody"), encoding="utf-8")
+            (wiki / "REVIEW" / "r1.md").write_text(
+                _page("type: review", "# review item"), encoding="utf-8")
+            (wiki / "clusters" / "c1.md").write_text(
+                _page("type: cluster", "# cluster hub"), encoding="utf-8")
+            (wiki / "lint" / "l1.md").write_text(
+                _page("type: lint", "# lint finding"), encoding="utf-8")
+
+            summaries = wls.collect_summaries(wiki)
+            paths = {p for p, _ in summaries}
+            self.assertEqual(paths, {"concepts/a.md"})
+
+
 if __name__ == "__main__":
     unittest.main()

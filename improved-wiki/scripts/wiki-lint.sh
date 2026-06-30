@@ -153,24 +153,34 @@ if [ ! -d "$WIKI_DIR" ]; then
   exit 2
 fi
 
-# Acquire lock to avoid concurrent runs
+# Acquire lock to avoid concurrent runs. PID-in-lockfile + `kill -0` liveness:
+# the old `pgrep -f wiki-lint.sh` matched THIS process (and its launching shell),
+# so the stale-lock recovery branch was unreachable — a crashed/OOM-killed run
+# left the wiki permanently un-lintable until someone deleted the lock by hand.
+# Storing the PID and probing it detects a genuinely live instance and otherwise
+# reclaims the stale lock.
 if [ -e "$LINT_LOCK" ]; then
-  if pgrep -f "wiki-lint.sh" >/dev/null; then
-    echo "[lint] Another instance running, exiting." >&2
+  oldpid=$(cat "$LINT_LOCK" 2>/dev/null)
+  if [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null; then
+    echo "[lint] Another instance (pid $oldpid) running, exiting." >&2
     exit 0
-  else
-    rm -f "$LINT_LOCK"
   fi
+  rm -f "$LINT_LOCK"
 fi
+# NOTE: this EXIT trap is intentionally re-set below (the LINT_SCRIPT trap) to
+# ALSO remove $LINT_LOCK — bash replaces traps, it does not append, so the lock
+# must be listed in whichever EXIT trap is installed last or it leaks.
 trap 'rm -f "$LINT_LOCK"' EXIT
-touch "$LINT_LOCK"
+echo $$ > "$LINT_LOCK"
 
 # ---------- Run the python linter ----------
 # All the heavy lifting is in Python for clean CJK handling.
 # Use a temp .py file rather than heredoc for maximum compatibility with
 # bash 3.x and to avoid heredoc/redirection ordering bugs.
 LINT_SCRIPT=$(mktemp -t wiki-lint-XXXXXX.py)
-trap "rm -f '$LINT_SCRIPT' '$LINT_CACHE.tmp' '$LINT_CACHE.tmp.err'" EXIT
+# Re-installs the EXIT trap (replacing the lock-only one above), so it must keep
+# removing $LINT_LOCK too — otherwise the lock leaks on every normal exit.
+trap "rm -f '$LINT_SCRIPT' '$LINT_CACHE.tmp' '$LINT_CACHE.tmp.err' '$LINT_LOCK'" EXIT
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export SCRIPT_DIR
@@ -197,7 +207,7 @@ now_ms = int(time.time() * 1000)
 STATE_SKIP = {"lint-cache.json", "ingest-cache.json", "ingest-queue.json", "ingest-lock"}
 ANCHOR_FILES = {"index.md", "log.md"}  # NashSU parity: only these 2 excluded from structural lint
 
-SKIP_DIRS = {"lint", "REVIEW", "media"}
+SKIP_DIRS = {"lint", "REVIEW", "clusters", "media"}  # clusters/ = graph-generated, not source knowledge (match semantic lint + graph.py)
 pages: dict[str, Path] = {}          # original stem -> Path
 for path in sorted(wiki_dir.rglob("*.md")):
     rel = path.relative_to(wiki_dir)
@@ -323,7 +333,7 @@ from collections import Counter
 findings = json.load(open('$LINT_CACHE', 'r', encoding='utf-8'))
 c = Counter(f['type'] for f in findings)
 total = sum(c.values())
-parts = [f'{total} findings', f'broken-link: {c.get(\"broken-link\", 0)}', f'orphan: {c.get(\"orphan\", 0)}', f'no-outlinks: {c.get(\"no-outlinks\", 0)}', f'missing-frontmatter: {c.get(\"missing-frontmatter\", 0)}', f'invalid-role: {c.get(\"invalid-role\", 0)}']
+parts = [f'{total} findings', f'broken-link: {c.get(\"broken-link\", 0)}', f'orphan: {c.get(\"orphan\", 0)}', f'no-outlinks: {c.get(\"no-outlinks\", 0)}', f'missing-frontmatter: {c.get(\"missing-frontmatter\", 0)}', f'invalid-role: {c.get(\"invalid-role\", 0)}', f'read-error: {c.get(\"read-error\", 0)}']
 print(' | '.join(parts))
 ")
 
@@ -476,6 +486,7 @@ parts = [f'{total} findings',
          f'no-outlinks: {c.get(\"no-outlinks\", 0)}',
          f'missing-frontmatter: {c.get(\"missing-frontmatter\", 0)}',
          f'invalid-role: {c.get(\"invalid-role\", 0)}',
+         f'read-error: {c.get(\"read-error\", 0)}',
          f'semantic: {c.get(\"semantic\", 0)}']
 print(' | '.join(parts))
 ")
@@ -529,10 +540,17 @@ for f in items:
         continue
     t = f.get('type', '')
     if t == 'missing-frontmatter':
-        text = path.read_text()
+        text = path.read_text(encoding='utf-8')
         if not text.startswith('---'):
-            fm = f'---\ntype: concept\ntitle: "{path.stem}"\ncreated: ${TIMESTAMP}\nupdated: ${TIMESTAMP}\ntags: []\nrelated: []\n---\n\n'
-            path.write_text(fm + text)
+            # Derive type from the top-level directory (NashSU WIKI_TYPE_DIRS),
+            # not a hard-coded 'concept': an entities/sources/queries/... page
+            # given type: concept breaks type<->directory schema routing and
+            # trips the invalid-role check in this same lint run. 'concept' stays
+            # the genuine fallback for pages outside a recognized type dir.
+            DIR_TYPE = {'entities':'entity','concepts':'concept','sources':'source','queries':'query','comparisons':'comparison','synthesis':'synthesis','findings':'finding','thesis':'thesis','methodology':'methodology'}
+            ptype = DIR_TYPE.get(page_rel.split('/')[0], 'concept')
+            fm = f'---\ntype: {ptype}\ntitle: "{path.stem}"\ncreated: ${TIMESTAMP}\nupdated: ${TIMESTAMP}\ntags: []\nrelated: []\n---\n\n'
+            path.write_text(fm + text, encoding='utf-8')
             fixed += 1
             print(f"  fixed missing-frontmatter: {page_rel}")
 print(fixed)
