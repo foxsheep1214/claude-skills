@@ -143,8 +143,16 @@ def write_frontmatter_array(content: str, field_name: str, values: list[str]) ->
         rf"^{escaped}:\s*\n((?:[ \t]+-\s+.+\n?)+)",
         re.MULTILINE,
     )
-    if block_re.search(fm_body):
-        rewritten = block_re.sub(lambda _m: new_line, fm_body, count=1)
+    m_block = block_re.search(fm_body)
+    if m_block:
+        # The block regex's trailing `\n?` swallows the newline that separates
+        # the last list item from the NEXT frontmatter field; the inline
+        # replacement carries no trailing newline, so without restoring it the
+        # following field collapses onto the same line (corrupt YAML). Restore it
+        # only when the matched span actually ended in a newline (i.e. a field
+        # follows; when this is the last field, close_delim supplies the break).
+        tail = "\n" if m_block.group(0).endswith("\n") else ""
+        rewritten = block_re.sub(lambda _m: new_line + tail, fm_body, count=1)
         return f"{open_delim}{rewritten}{close_delim}{rest}"
 
     # Field absent — append at end of frontmatter.

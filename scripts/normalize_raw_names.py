@@ -29,11 +29,19 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 # ── Lightweight YAML block parser (no PyYAML dependency) ────────
 
 def _stage_0_1_parse_yaml_block(text: str) -> dict:
-    """Parse the ```yaml rules``` block from NAMING.md."""
-    m = re.search(r'```yaml\s*\n(.*?)\n```', text, re.DOTALL)
-    if not m:
-        return {}
-    return _stage_0_1_parse_simple_yaml(m.group(1))
+    """Parse the naming-rules ```yaml block from schema.md / NAMING.md.
+
+    schema.md contains several ```yaml fences (e.g. the frontmatter example);
+    pick the one that actually holds the rules — identified by a top-level
+    ``rules:`` or ``forbidden_chars:`` key — not merely the first fence (which
+    used to silently parse the frontmatter block, leaving rules empty and making
+    the whole checker a no-op).
+    """
+    blocks = re.findall(r'```yaml\s*\n(.*?)\n```', text, re.DOTALL)
+    for b in blocks:
+        if re.search(r'^(rules|forbidden_chars):', b, re.MULTILINE):
+            return _stage_0_1_parse_simple_yaml(b)
+    return _stage_0_1_parse_simple_yaml(blocks[0]) if blocks else {}
 
 
 def _stage_0_1_parse_simple_yaml(text: str) -> dict:
@@ -294,6 +302,11 @@ def stage_0_1_scan_raw(raw_root: Path, rules: dict, check: bool = True, fix: boo
     vendors = rules.get('vendors', [])
     prefix_map = _stage_0_1_flatten_prefixes(rules.get('vendor_prefixes', {}))
     folder_rules = rules.get('rules', {})
+    # Global forbidden chars (schema-driven, default to commas): a comma in a raw
+    # filename gets split by the source-citation renderer → broken [[sources/...]].
+    forbidden_chars = rules.get('forbidden_chars') or [',', '，']
+    if isinstance(forbidden_chars, str):
+        forbidden_chars = [forbidden_chars]
 
     for folder_name, _rule_def in folder_rules.items():
         folder = raw_root / folder_name
@@ -322,6 +335,10 @@ def stage_0_1_scan_raw(raw_root: Path, rules: dict, check: bool = True, fix: boo
 
             rel = filepath.relative_to(raw_root)
             issues = _stage_0_1_check_rule(filepath, rule, vendors, prefix_map)
+            for ch in forbidden_chars:
+                if ch and ch in filepath.stem:
+                    issues.append(("error",
+                        f"文件名含禁用字符「{ch}」（逗号会被来源引用按逗号切分书名→断链），改用 ' - '"))
             errors = [m for s, m in issues if s == "error"]
             warns = [m for s, m in issues if s == "warn"]
 

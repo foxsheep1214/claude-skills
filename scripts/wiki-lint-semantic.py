@@ -70,6 +70,16 @@ STATE_FILES = {
     "lint-lock", "lint.lock",
     "lint-semantic.json",  # don't lint our own output
 }
+# Derived-artifact directories that are NOT source knowledge and must never be
+# fed to the semantic-lint LLM. The literal NashSU port (`f.name !== "log.md"`)
+# is faithless in THIS port's environment: unlike NashSU (which routes review to
+# a Zustand store and has no clusters/), this port WRITES ingest review items to
+# wiki/REVIEW/ and graph cluster-hub pages to wiki/clusters/. Without this guard
+# those diagnostics leak into the LLM analysis as if they were wiki content,
+# risking self-referential findings and an ingest feedback loop. Mirrors the
+# structural lint (wiki-lint.sh) + graph.py + _core.py, the other sibling
+# consumers, all of which already skip these dirs.
+SKIP_DIRS = {"lint", "REVIEW", "clusters", "media"}
 
 # Per-page summary size (NashSU: 500 chars)
 SUMMARY_CHARS = 500
@@ -100,6 +110,8 @@ def collect_summaries(wiki_dir: Path, limit: Optional[int] = None) -> list[tuple
     for path in sorted(wiki_dir.rglob("*.md")):
         rel = path.relative_to(wiki_dir)
         if rel.name in STATE_FILES or rel.name in ANCHOR_FILES:
+            continue
+        if rel.parts and rel.parts[0] in SKIP_DIRS:
             continue
         try:
             text = path.read_text(encoding="utf-8")
@@ -218,7 +230,10 @@ def dedup_findings(findings: list[dict]) -> list[dict]:
     for f in findings:
         detail = f.get("detail", "")
         raw_type = ""
-        m = re.match(r"\[(\w+)\]", detail)
+        # [\w-] not \w: types can be hyphenated (missing-page, term-ambiguity).
+        # A bare \w+ requires `]` right after, so on a hyphen the match fails
+        # entirely and raw_type drops to "" — weakening the dedup key.
+        m = re.match(r"\[([\w-]+)\]", detail)
         if m:
             raw_type = m.group(1)
         key = (f.get("page", "").lower(), raw_type, detail[:80])
@@ -332,7 +347,9 @@ def main() -> int:
     for f in findings:
         detail = f.get("detail", "")
         raw_type = ""
-        m = re.match(r"\[(\w+)\]\s*", detail)
+        # [\w-] not \w: capture hyphenated types (missing-page, term-ambiguity)
+        # whole, so the emitted lint page's raw_type/heading/filename match the body.
+        m = re.match(r"\[([\w-]+)\]\s*", detail)
         if m:
             raw_type = m.group(1)
         sev = f.get("severity", "info")

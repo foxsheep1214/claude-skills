@@ -111,7 +111,16 @@ def tokenize_for_suggestion(text: str) -> set[str]:
     return tokens
 
 
-def levenshtein(a: str, b: str) -> int:
+def levenshtein(a: str, b: str, max_dist: int | None = None) -> int:
+    """Levenshtein edit distance.
+
+    When ``max_dist`` is given, the DP early-aborts as soon as an entire row's
+    minimum exceeds it, returning ``max_dist + 1`` (a "> max_dist" sentinel).
+    Callers that only care whether the distance is within a budget (the link
+    suggester) get a large speedup on dissimilar pairs with no change to any
+    in-budget result. The inner step avoids the 3-arg ``min()`` builtin (a
+    measured hot spot) and rows are swapped instead of copied.
+    """
     if a == b:
         return 0
     if not a:
@@ -120,16 +129,30 @@ def levenshtein(a: str, b: str) -> int:
         return len(a)
     previous = list(range(len(b) + 1))
     current = [0] * (len(b) + 1)
+    lb = len(b)
     for i in range(1, len(a) + 1):
         current[0] = i
-        for j in range(1, len(b) + 1):
-            cost = 0 if a[i - 1] == b[j - 1] else 1
-            current[j] = min(current[j - 1] + 1, previous[j] + 1, previous[j - 1] + cost)
-        previous = current[:]
-    return previous[len(b)]
+        row_min = i
+        ai = a[i - 1]
+        for j in range(1, lb + 1):
+            cost = 0 if ai == b[j - 1] else 1
+            d = current[j - 1] + 1
+            u = previous[j] + 1
+            if u < d:
+                d = u
+            dl = previous[j - 1] + cost
+            if dl < d:
+                d = dl
+            current[j] = d
+            if d < row_min:
+                row_min = d
+        if max_dist is not None and row_min > max_dist:
+            return max_dist + 1
+        previous, current = current, previous
+    return previous[lb]
 
 
-def string_similarity(a: str, b: str) -> float:
+def string_similarity(a: str, b: str, min_score: float = 0.0) -> float:
     left = normalize_link_target(a)
     right = normalize_link_target(b)
     if not left or not right:
@@ -147,6 +170,19 @@ def string_similarity(a: str, b: str) -> float:
     max_len = max(len(left_base), len(right_base))
     if max_len == 0:
         return 0.0
+    if min_score > 0.0:
+        # ratio = 1 - lev/max_len >= min_score  <=>  lev <= (1-min_score)*max_len.
+        # Cheap length prune first (lev >= |Δlen|), then a bounded Levenshtein
+        # that early-aborts past the budget. Pure speedup: result-identical for
+        # any score >= min_score (all the broken-link suggester acts on). Default
+        # min_score=0 keeps exact behavior for other callers / exact-ratio tests.
+        budget = int((1 - min_score) * max_len)
+        if abs(len(left_base) - len(right_base)) > budget:
+            return 0.0
+        dist = levenshtein(left_base, right_base, max_dist=budget)
+        if dist > budget:
+            return 0.0
+        return 1 - dist / max_len
     return 1 - levenshtein(left_base, right_base) / max_len
 
 
@@ -226,16 +262,33 @@ def run_structural_lint(pages: list[tuple[str, str]], with_suggestions: bool = T
                 clean_short = slug_map[clean_base]
                 return next((p for p in data if p.short_name == clean_short), None)
 
+        _MIN = BROKEN_LINK_SUGGESTION_MIN_SCORE
         best: tuple[_PageData, float] | None = None
+        best_ties = 0  # how many candidates share the current top score
         for candidate in data:
             score = max(
-                string_similarity(target, candidate.slug),
-                string_similarity(target, candidate.short_name),
-                string_similarity(target, candidate.title),
+                string_similarity(target, candidate.slug, _MIN),
+                string_similarity(target, candidate.short_name, _MIN),
+                string_similarity(target, candidate.title, _MIN),
             )
             if best is None or score > best[1]:
                 best = (candidate, score)
-        if best and best[1] >= BROKEN_LINK_SUGGESTION_MIN_SCORE:
+                best_ties = 1
+            elif abs(score - best[1]) <= 1e-9:
+                best_ties += 1
+        if best and best[1] >= _MIN:
+            # Headless-apply safety (port-only; NashSU's fix is human-gated, so
+            # an arbitrary tie-winner is always vetted before any write). When the
+            # win came from the FUZZY tier (contains/Levenshtein, i.e.
+            # score <= CONTAINS_TARGET_SCORE) and more than one page ties the top
+            # score, the pick is arbitrary — e.g. [[sources/book/Microwave and RF
+            # Design]] is a substring of all 5 volume pages (0.82 tie). Refuse to
+            # suggest so --fix-links routes to a disambiguation stub instead of
+            # silently rewriting to a wrong target. Exact (1.0) and basename (0.96)
+            # wins are above CONTAINS_TARGET_SCORE and stay unaffected. (Ties are
+            # counted in the single scan above — no second O(n) pass.)
+            if best[1] <= CONTAINS_TARGET_SCORE and best_ties > 1:
+                return None
             return best[0]
         return None
 
@@ -244,6 +297,12 @@ def run_structural_lint(pages: list[tuple[str, str]], with_suggestions: bool = T
         best: tuple[_PageData, float] | None = None
         for candidate in data:
             if candidate.short_name == page.short_name:
+                continue
+            # Never suggest an aggregate file as a link source/target — the
+            # headless auto-fixer would then append a [[wikilink]] INTO a
+            # generated aggregate (overview.md/schema.md), violating the
+            # AGGREGATE_FILES write-guard that exempts them from findings.
+            if _get_file_name(candidate.short_name) in AGGREGATE_FILES:
                 continue
             if direction == "target":
                 candidate_keys = [
@@ -286,6 +345,18 @@ def run_structural_lint(pages: list[tuple[str, str]], with_suggestions: bool = T
                 target = lookup
             inbound_counts[target] = inbound_counts.get(target, 0) + 1
 
+    # Memoize broken-target suggestions: suggest_broken_target depends only on
+    # the target string and the (fixed) candidate set, so the same broken link
+    # repeated across many pages is scanned once. On a wiki with lots of dangling
+    # links this is a big win (e.g. 1856 broken links → 773 distinct targets).
+    _broken_cache: dict[str, "_PageData | None"] = {}
+
+    def _cached_broken_target(target: str) -> "_PageData | None":
+        key = target.lower()
+        if key not in _broken_cache:
+            _broken_cache[key] = suggest_broken_target(target)
+        return _broken_cache[key]
+
     results: list[dict] = []
     for p in data:
         short_name = p.short_name
@@ -323,7 +394,7 @@ def run_structural_lint(pages: list[tuple[str, str]], with_suggestions: bool = T
             basename = re.sub(r"\.md$", "", _get_file_name(link)).lower()
             if lookup in slug_map or basename in slug_map:
                 continue
-            suggested_target = suggest_broken_target(link) if with_suggestions else None
+            suggested_target = _cached_broken_target(link) if with_suggestions else None
             results.append({
                 "type": "broken-link",
                 "severity": "warning",

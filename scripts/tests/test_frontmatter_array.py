@@ -69,6 +69,18 @@ class TestWriteFrontmatterArray(unittest.TestCase):
         self.assertEqual(fa.parse_frontmatter_array(out, "tags"), ["x"])
         self.assertIn("type: entity", out)
 
+    def test_block_form_rewrite_preserves_following_field(self):
+        # Regression: rewriting a block-form related: that is FOLLOWED by another
+        # field must not collapse the next field onto the same line (corrupt YAML).
+        content = "---\ntitle: X\nrelated:\n  - keep\n  - drop\ntags: [a, b]\n---\n\nbody\n"
+        out = fa.write_frontmatter_array(content, "related", ["keep"])
+        self.assertIn('\nrelated: ["keep"]\n', out)
+        self.assertIn("\ntags: [a, b]\n", out)
+        self.assertNotIn("]tags:", out)
+        # round-trips cleanly
+        self.assertEqual(fa.parse_frontmatter_array(out, "related"), ["keep"])
+        self.assertEqual(fa.parse_frontmatter_array(out, "tags"), ["a", "b"])
+
     def test_no_frontmatter_unchanged(self):
         text = "# just body"
         self.assertEqual(fa.write_frontmatter_array(text, "tags", ["x"]), text)

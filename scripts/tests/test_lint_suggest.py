@@ -142,5 +142,41 @@ class TestRunStructuralLint(unittest.TestCase):
         self.assertIsNone(finding(results, type="orphan", page="transformer.md"))
 
 
+class TestHeadlessApplySafety(unittest.TestCase):
+    """The headless --fix-links applier must never auto-write a guessed/aggregate
+    target. These guard the suggestion engine that feeds it."""
+
+    def test_no_suggestion_on_fuzzy_tier_tie(self):
+        # [[sources/book/Microwave and RF Design]] is a substring of all 5 volume
+        # pages → 0.82 tie. Must suggest None so --fix-links routes to a stub
+        # instead of rewriting to an arbitrary volume.
+        pages = [("concepts/cite.md",
+                  "---\ntype: concept\n---\n# Cite\nSee [[sources/book/Microwave and RF Design]].\n")]
+        for v in range(1, 6):
+            pages.append((f"sources/Book/Microwave and RF Design, Volume {v} - 2019 - Steer.md",
+                          "---\ntype: source\n---\n# vol\n"))
+        bl = finding(ls.run_structural_lint(pages), type="broken-link")
+        self.assertIsNotNone(bl)
+        self.assertIsNone(bl.get("suggested_target"))
+
+    def test_unique_fuzzy_match_still_suggested(self):
+        # A single close typo at a sub-0.82 fuzzy score (transfromer->transformer
+        # = 0.818) with no competitor must STILL get its suggestion — the guard
+        # only suppresses on a tie, not on a lone fuzzy winner.
+        pages = [("concepts/usage.md", "---\ntype: concept\n---\n# Usage\nSee [[concepts/transfromer]].\n"),
+                 ("concepts/transformer.md", "---\ntype: concept\n---\n# Transformer\n")]
+        bl = finding(ls.run_structural_lint(pages), type="broken-link")
+        self.assertEqual(bl.get("suggested_target"), "concepts/transformer.md")
+
+    def test_aggregate_never_suggested_as_source(self):
+        # An orphan whose only related page is overview.md must NOT get
+        # suggested_source=overview.md — the fixer would write into the aggregate.
+        pages = [("overview.md", "---\ntype: overview\n---\n# Overview\nbuck boost converter\n"),
+                 ("concepts/lonely.md", "---\ntype: concept\n---\n# Lonely\nbuck boost converter topology\n")]
+        orph = finding(ls.run_structural_lint(pages), type="orphan", page="concepts/lonely.md")
+        self.assertIsNotNone(orph)
+        self.assertIsNone(orph.get("suggested_source"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
