@@ -106,11 +106,21 @@ def _stage_2_1_pick_boundary(text, lo, hi, heading_positions, protected) -> int:
 
 def _stage_2_1_snap_out(start: int, end: int, protected) -> int:
     """If ``end`` lands inside a protected block, move it to a safe edge: before
-    the block (block leads the next chunk) when possible, else after it."""
+    the block (block leads the next chunk) when possible, else after it.
+
+    Guard against a large block (e.g. a multi-thousand-char OCR table) that
+    starts early in the window: snapping back to its start would collapse the
+    chunk to a tiny pre-table slice, wasting a generation round-trip on near-
+    empty text. Only snap back when it leaves at least half the attempted
+    window; otherwise snap forward past the block (let the chunk overflow to
+    include the whole table)."""
     r = _stage_2_1_range_at(end, protected)
     if r is None:
         return end
-    return r[0] if r[0] > start else r[1]
+    attempted = end - start
+    if r[0] > start and (r[0] - start) >= attempted // 2:
+        return r[0]
+    return r[1]
 
 
 def _stage_2_1_chunk_text(text: str, target_chars: int, overlap_chars: int,
@@ -444,6 +454,25 @@ You are analyzing content from: **{heading_path}**
 """
 
     language_directive = build_language_directive(chunk_text)
+
+    # Extraction-density guideline (2026-06-30): scale the expected concept count
+    # with chunk size so large, multi-chapter chunks (e.g. ~768K chars under a
+    # 1M-context model) are not under-extracted at the same ~12-concept rate as a
+    # small chunk. Heuristic ~1 page-worthy concept per 20K chars of substantive
+    # text, floored at 8. This is a NON-BINDING target with an explicit anti-
+    # padding guard — quality over count.
+    _approx_concepts = max(8, round(len(chunk_text) / 20000))
+    density_hint = (
+        f"This chunk is ~{len(chunk_text):,} characters"
+        + (f" spanning **{heading_path}**" if heading_path else "")
+        + f". A chunk this size typically yields on the order of **{_approx_concepts} "
+        "distinct page-worthy concepts** — enumerate section by section so a large, "
+        "multi-chapter chunk is not under-extracted. Treat this as a guideline, not a "
+        "quota: list every genuine concept the source defines or materially uses, and "
+        "do NOT pad with trivial mentions or split one concept into several to hit a "
+        "number."
+    )
+
     return f"""{language_directive}
 
 # Role
@@ -475,6 +504,8 @@ downstream (Stage 2.3/2.4), not here. When in doubt, LIST the concept.
 - Existing wiki pages: {', '.join(existing_slugs[:200])}
 
 # Task
+{density_hint}
+
 Analyze THIS CHUNK of the book. Extract:
 
 1. Every concept this chunk defines, derives, or materially relies on — INCLUDING

@@ -49,6 +49,39 @@ done
 ls "$EXTRACT_DIR"/p*.txt | wc -l
 ```
 
+## Large-chunk Stage 2.2/2.4: scale extraction density + ground formulas (2026-06-30)
+
+Under a large-context model the chunker emits a few very large chunks (e.g. ~768K
+chars ≈ a 1M-context model's 192K-token cap, spanning several book chapters). Two
+practices keep these from being under-extracted or formula-drifted:
+
+1. **Scale extraction density with chunk size.** The Stage 2.2 prompt now embeds a
+   size-proportional guideline (~1 page-worthy concept per ~20K chars; 768K ≈ 38,
+   264K ≈ 13). Honour it: enumerate the chunk **section by section** and produce
+   ~30–40 concepts for a multi-chapter chunk, not the ~12 a small chunk warrants.
+   It is a guideline, not a quota — list every genuine concept, never pad.
+
+2. **Ground every formula by targeted grep back to source.** Don't transcribe
+   formulas from memory. For each formula you cite, locate it in the chunk text or
+   the per-page extract and copy the LaTeX verbatim:
+   ```bash
+   EXTRACT_DIR=".llm-wiki/extract-tmp/<book-stem>"
+   grep -n "frac\|tag{2-\|sigma\|lambda" "$EXTRACT_DIR"/p0NNN.txt   # find the eqn
+   ```
+
+**Parallel per-chapter extraction (recommended for big chunks).** Because the
+conversation handoff is serial (one prompt at a time) but a single chunk spans
+several chapters, dispatch one read-only sub-agent per chapter range to deep-read
+its pages and return a structured concept inventory (name / importance / definition
+/ key_details with verbatim LaTeX / entities), then synthesize the chunk's Stage
+2.2 YAML yourself (you control format + dedup vs prior chunks). This both raises
+density and keeps formula transcription faithful. Select only the most significant
+named systems as entity pages — do not make a page for every model number a survey
+handbook mentions (over-extraction). Stage 2.4 generation of the (often 30–40)
+pages can likewise be delegated to one sub-agent per chunk, given the chunk's exact
+slug list + FILE-block format; verify block-count == requested slugs (minus the
+`foo-bar` placeholder) before advancing.
+
 ## Re-ingest (comparison or correction)
 
 ```bash
