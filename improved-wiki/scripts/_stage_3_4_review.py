@@ -144,7 +144,7 @@ def stage_3_4_review_suggestions(file_blocks: list[tuple[str, str]], raw_file: P
 {chr(10).join(existing_pages[:40])}
 """
 
-    system_prompt = """你是 HardwareWiki 的 review agent。审阅当前 wiki 内容，找出 5 类可疑项：
+    system_prompt = f"""你是 {config.wiki_root.name} 的 review agent。审阅当前 wiki 内容，找出 5 类可疑项：
 1. confirm（需要人工确认）：数字、术语、矛盾点
 2. suggestion（改进建议）：内容不完整、应补充、可加链接
 3. missing-page（缺页）：[[wikilink]] 指向不存在的页面

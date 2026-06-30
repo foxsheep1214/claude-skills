@@ -79,10 +79,20 @@ def stage_3_7_embed_new_pages(config: Config, files_written: list[str]) -> None:
         )
 
     skip_files = {"index.md", "log.md", "overview.md", "schema.md"}
-    new_files = [
-        str(config.wiki_dir / f) for f in files_written
-        if Path(f).name not in skip_files and (config.wiki_dir / f).exists()
-    ]
+    # files_written paths are relative to wiki_root and already carry the
+    # leading "wiki/" segment (e.g. "wiki/concepts/foo.md"). Resolve against
+    # wiki_root; joining wiki_dir would double the "wiki/" prefix and the
+    # existence check would silently fail, skipping embeddings entirely.
+    # Fall back to wiki_dir for any caller that passes wiki-dir-relative paths.
+    new_files = []
+    for f in files_written:
+        if Path(f).name in skip_files:
+            continue
+        p = config.wiki_root / f
+        if not p.exists():
+            p = config.wiki_dir / f
+        if p.exists():
+            new_files.append(str(p))
     if not new_files:
         return
 
