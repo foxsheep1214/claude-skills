@@ -520,7 +520,12 @@ Analyze THIS CHUNK of the book. Extract:
    collapse several distinct concepts into one page, and do NOT skip a concept merely
    because it is "well known" or already named in the digest — downstream dedup
    (Stage 2.3/2.4) will link it to an existing page if one already exists.
-2. All entities (people, organizations, systems, models, standards) mentioned
+2. All **entities** — specific *named* things identified by their name, not by a
+   definition: people, organizations, products/systems, standards. (Tie-breaker:
+   a named *theoretical or statistical model*, *method*, or *technique* — e.g. the
+   Swerling model, chi-square fluctuation model, matched filter — is a CONCEPT, not
+   an entity. Reserve "entity" for named people, organizations, products/systems,
+   and standards.)
 3. Key claims, formulas, data points
 4. Connections to existing wiki pages (if any)
 5. An **Updated Global Digest** — merge this chunk's key discoveries into the
