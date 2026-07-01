@@ -3,6 +3,61 @@ from __future__ import annotations
 from _stage_2_base import *
 from _language import build_language_directive
 
+
+def _normalize_source_frontmatter(
+    response: str, authors_yaml: str, year_yaml: str, url_yaml: str, venue_yaml: str,
+    related_fallback: list[str] | None = None,
+) -> str:
+    """Normalize the source-page FILE block's frontmatter when the agent's
+    Stage 2.6 response ignored the pre-filled template, in two ways:
+
+    1. Inject any missing NashSU-parity bibliographic fields
+       (authors/year/url/venue) using the values already computed from the
+       digest — root cause of the Strauss/Witte pages lacking them.
+    2. Fill an empty ``related: []`` with up to five of this ingest's own
+       generated concept/entity slugs, matching the 18 conforming source
+       pages (the template asks for 2-5 related slugs, never empty).
+
+    The pipeline writes the FILE block verbatim, so a dropped field or empty
+    ``related`` would otherwise persist to disk. A well-formed, already-complete
+    block is left untouched (no-op on parse failure or nothing to fill).
+    """
+    lines = response.split("\n")
+    # Locate the FILE block's frontmatter: the `---FILE:...---` line, then the
+    # opening `---`, then the next standalone `---` closes the frontmatter.
+    file_idx = next((i for i, ln in enumerate(lines) if ln.startswith("---FILE:")), None)
+    if file_idx is None or file_idx + 1 >= len(lines) or lines[file_idx + 1].strip() != "---":
+        return response
+    fm_open = file_idx + 1
+    fm_close = next((i for i in range(fm_open + 1, len(lines)) if lines[i].strip() == "---"), None)
+    if fm_close is None:
+        return response
+
+    fm = lines[fm_open + 1:fm_close]
+    present = {ln.split(":", 1)[0].strip() for ln in fm if ":" in ln}
+
+    # (2) Fill an empty related: [] with generated slugs (concepts first).
+    if related_fallback:
+        for i in range(fm_open + 1, fm_close):
+            if lines[i].startswith("related:"):
+                if lines[i].split(":", 1)[1].strip() in ("", "[]"):
+                    picks = related_fallback[:5]
+                    lines[i] = "related: [" + ", ".join(f'"{s}"' for s in picks) + "]"
+                break
+
+    # (1) Inject missing bibliographic fields before the frontmatter close.
+    additions = [
+        f"{key}: {val}"
+        for key, val in (("authors", authors_yaml), ("year", year_yaml),
+                         ("url", url_yaml), ("venue", venue_yaml))
+        if key not in present
+    ]
+    if additions:
+        lines[fm_close:fm_close] = additions
+
+    return "\n".join(lines)
+
+
 def stage_2_6_source_page(
     global_digest: dict,
     file_path: Path,
@@ -314,6 +369,10 @@ venue: {venue_yaml}
 
     gen_tokens = config.compute_max_tokens(8192)
     response, stop_reason = call_anthropic_protocol(prompt, config, max_tokens=gen_tokens, label="source page")
+    response = _normalize_source_frontmatter(
+        response, authors_yaml, year_yaml, url_yaml, venue_yaml,
+        related_fallback=(_gen_c + _gen_e),
+    )
     if verbose:
         print(f"[stage 2.6] Source page generated ({len(response):,} chars, stop={stop_reason})")
     else:
