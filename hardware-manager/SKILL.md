@@ -1,10 +1,12 @@
 ---
 name: hardware-manager
 description: Use when 胡杨（塞防大硬件总负责人，统管 数字硬件/结构/天线射频/测试硬件）处理硬件管理工作——实验室规划、团队与人力、产品/项目与 TR 节点跟进、供应商与器件选型采购、部门 OKR、汇报文档与 PPT、林总/王鹏等管理思想记录。不含知识库/datasheet/元器件库建设（那是 hardware-designer）。
-version: 2.2.0
+version: 2.2.2
 metadata:
   related_skills: [hardware-designer]
   changelog:
+    - "2026-07-01: v2.2.2 — 收编 interceptor-acceleration-validation.md（截击机加速度指标物理校验方法），原误放在 tracker-ii/radar-assistant 技能里（内容与 Tracker II 雷达无关），迁入本技能与其他截击机参考文件归为一类。"
+    - "2026-07-01: v2.2.1 — 同步 tracker-ii 技能 2026-05-17 权威更正：references/tracker-ii-antenna-hierarchy.md 与 tracker-ii-rf-architecture.md 中过时的固定'16子阵'层级（2026-05-16版）标注废弃，改为子阵数量/波控组件划分待定。"
     - "2026-06-30: v2.2 — 身份升级为大硬件总负责人并校正人力数据；供应商主数据指向真实目录 供应商对接记录/；§3 补任务标准列/WIP/评审门禁/例会节奏，§4 补器件选型铁律；问题表升级为风险登记册；新建 references/组内互审SOP.md。"
     - "2026-06-30: v2.1 — 迁出 hermes，精简正文：行为规则全文与供应商操作细节下沉至 references；删除 43 个知识库建设类参考文件（归 hardware-designer）。"
     - "2026-05-29: v2.0 — 知识库建设拆分为独立技能 hardware-designer，本技能聚焦管理职能。"
@@ -134,7 +136,7 @@ metadata:
 
 **项目知识（仅用户主动关联时调用）**
 - `tracker-ii-antenna-hierarchy.md`、`tracker-ii-rf-architecture.md`、`tracker-ii-competitiveness.md`、`tracker-ii-toolchain.md`、`tile-vs-brick-antenna.md` — Tracker II 二代雷达
-- `截击机-设计任务与系统分解.md`、`截击机-TR3人员与节点规范.md`、`截击机供应商-无人机机巢.md` — Thunder 截击机
+- `截击机-设计任务与系统分解.md`、`截击机-TR3人员与节点规范.md`、`截击机供应商-无人机机巢.md`、`interceptor-acceleration-validation.md`（截击机加速度指标物理校验方法） — Thunder 截击机
 - `fpv-飞控选型参考.md` — FPV 飞控选型
 
 **工具/通道**
