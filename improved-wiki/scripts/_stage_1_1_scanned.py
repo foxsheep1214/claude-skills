@@ -210,6 +210,54 @@ def _convert_html_tables_to_markdown(markdown: str) -> str:
     )
 
 
+# Degenerate-table-row thresholds: minerU OCR occasionally emits a single table
+# line tens of thousands of chars long whose cells are almost all empty
+# (observed live 2026-07-02: a 49,412-char line whose separator row carried
+# 8,179 empty `---` cells; a sibling book had a 24K-char one). Only lines this
+# pathological are rewritten; real tables — even wide ones — pass through.
+DEGENERATE_ROW_MIN_LINE_LEN = 2000
+DEGENERATE_ROW_EMPTY_RATIO = 0.95
+
+
+def _collapse_degenerate_table_rows(text: str) -> str:
+    """Collapse pathological minerU markdown table rows to their non-empty cells.
+
+    A line is degenerate when it (a) is longer than DEGENERATE_ROW_MIN_LINE_LEN
+    chars, (b) is a markdown table row/separator (starts and ends with '|'),
+    and (c) has >= DEGENERATE_ROW_EMPTY_RATIO of its cells empty ('' or only
+    '-'/':' after strip). Such lines carry zero content but bloat chunks and
+    break Read-tool line granularity for downstream agents. The rewrite keeps
+    the non-empty cells and appends a trailing marker cell noting how many
+    empty cells were removed. Anything under the thresholds passes through
+    byte-identical. Applied at extraction/assembly time only, so cached OCR
+    artifacts already on disk are untouched — only future extractions change.
+    """
+    if len(text) <= DEGENERATE_ROW_MIN_LINE_LEN:
+        return text
+
+    def _is_empty_cell(cell: str) -> bool:
+        s = cell.strip()
+        return not s or not s.strip("-:")
+
+    lines = text.split("\n")
+    changed = False
+    for i, line in enumerate(lines):
+        if len(line) <= DEGENERATE_ROW_MIN_LINE_LEN:
+            continue
+        stripped = line.strip()
+        if len(stripped) < 2 or not (stripped.startswith("|") and stripped.endswith("|")):
+            continue
+        cells = stripped[1:-1].split("|")
+        n_empty = sum(1 for c in cells if _is_empty_cell(c))
+        if not cells or n_empty / len(cells) < DEGENERATE_ROW_EMPTY_RATIO:
+            continue
+        kept = [c.strip() for c in cells if not _is_empty_cell(c)]
+        kept.append(f"…[degenerate row: {n_empty} empty cells removed]")
+        lines[i] = "| " + " | ".join(kept) + " |"
+        changed = True
+    return "\n".join(lines) if changed else text
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # minerU file lock
 # ══════════════════════════════════════════════════════════════════════════════
@@ -281,7 +329,8 @@ def _stage_1_1_extract_text_scanned_locked(file_path: Path, config: Config) -> s
     try:
         text = _stage_1_1_extract_text_scanned_impl(file_path, config)
         text = _clean_mineru_latex(text)
-        return _convert_html_tables_to_markdown(text)
+        text = _convert_html_tables_to_markdown(text)
+        return _collapse_degenerate_table_rows(text)
     finally:
         _stage_1_1_release_mineru_lock(lock_fd)
 
