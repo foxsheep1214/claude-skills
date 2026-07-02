@@ -160,11 +160,15 @@ Papers are not books — do NOT impose a chapter-by-chapter outline. Write flowi
 List **EVERY entity page from the "Generated pages" block above** (do NOT omit any), one bullet per entity, each with:
 - **Name + type** — briefly, what kind of thing it is.
 - **Role in this paper** — central vs. peripheral, one sentence.
-- **Exists in wiki** — use the status shown in the Generated pages block. Wikilink each to its slug.
+
+Wikilink each entity to its slug.
 
 ## Main Arguments & Findings
 
-The paper's core claims. For EACH:
+The paper's core claims — the wiki's claim ledger for this source (feeds
+overview Strong/Weak claims, contradiction review, query grounding). Density
+norm: **3-8 claims** covering the paper's problem, method, main results and
+limits; every entry a real, evidenced assertion — no padding. For EACH:
 - **Claim:** the assertion (one sentence).
 - **Evidence:** which figure / table / section supports it.
 - **Strength:** high / medium / low.
@@ -199,18 +203,29 @@ Example:
 Then list **EVERY concept page from the "Generated pages" block above** (this ingest created a page for each — do NOT omit any), one bullet per concept, each with:
 - **Name + brief definition** — the concept's definition as stated in the book.
 - **Why it matters in this book** — one sentence.
-- **Exists in wiki** — use the status shown in the Generated pages block ("new" or "exists (merged)"). Wikilink each to its slug.
+
+Wikilink each concept to its slug.
 
 ## Key Entities
 
 List **EVERY entity page from the "Generated pages" block above** (do NOT omit any), one bullet per entity, each with:
 - **Name + type** — briefly, what kind of thing it is.
 - **Role in this book** — central vs. peripheral, one sentence.
-- **Exists in wiki** — use the status shown in the Generated pages block. Wikilink each to its slug.
+
+Wikilink each entity to its slug.
 
 ## Main Arguments & Findings
 
-The book's core claims, results, or design rules. For EACH:
+The book's core claims, results, or design rules — this section is the wiki's
+claim ledger (it feeds overview Strong/Weak claims, contradiction review, and
+query grounding), so coverage is MANDATORY, density is bounded:
+- **≥1 claim per chapter** that carries a substantive assertion (skip only
+  genuinely claim-free chapters like pure front matter — never skip a technical
+  chapter silently);
+- **≤3 claims per chapter**; **15-35 total** for a typical book;
+- draw primarily from the full-book per-chunk claims above; NO padding — every
+  entry must be a real, evidenced assertion from the source.
+For EACH:
 - **Claim:** the assertion (one sentence).
 - **Evidence:** which chapter / case / equation supports it.
 - **Strength:** high / medium / low.
@@ -268,7 +283,9 @@ Which wiki pages should be created or updated based on this source? What should 
 
     # NashSU parity: Stage 2.3 association already answered "does this concept/
     # entity already exist in the wiki?" — feed those FACTS into the prompt so
-    # the LLM fills the "exists in wiki" field truthfully instead of guessing.
+    # the LLM wikilinks to the correct existing slug instead of guessing or
+    # duplicating (NashSU feeds the same facts internally; it does not surface
+    # them as a per-item output field).
     # associations = {name: [existing_slug, ...]} (only names that matched).
     assoc = associations or {}
     existing_lines: list[str] = []
@@ -293,8 +310,8 @@ Which wiki pages should be created or updated based on this source? What should 
             new_lines.append(f"- {name} (new)")
     if existing_lines or new_lines:
         assoc_section = (
-            "\n# Existing-wiki associations (Stage 2.3 FACTS — use for the "
-            "\"exists in wiki\" field, do NOT guess)\n"
+            "\n# Existing-wiki associations (Stage 2.3 FACTS — wikilink to the "
+            "correct existing slug, do NOT guess or duplicate)\n"
             "Already exist in wiki (wikilink to the listed slug; do NOT create new):\n"
             + "\n".join(existing_lines or ["(none)"]) + "\n"
             "New (not yet in wiki — new pages created this ingest):\n"
