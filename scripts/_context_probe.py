@@ -290,6 +290,16 @@ def resolve_context(config) -> int:
     """Return the live context for the current model: cache hit or one-shot probe."""
     cached = load_cached(config)
     if cached is not None:
-        print(f"[context-probe] cached: model={config.llm_model} context={cached:,} (reuse)")
+        if not config.llm_model:
+            # ANTHROPIC_MODEL is unset, so the cache key cannot distinguish
+            # conversation models: a session-model switch (e.g. Opus → Fable)
+            # is INVISIBLE here and the cached window may belong to the old
+            # model (2026-07-02). Reuse anyway (blocking would stall every
+            # handoff — see load_cached docstring), but say so loudly.
+            print(f"[context-probe] cached: context={cached:,} (reuse) "
+                  f"⚠️  ANTHROPIC_MODEL unset — a conversation-model switch is "
+                  f"NOT auto-detected; clear_probe_cache() to force a re-probe")
+        else:
+            print(f"[context-probe] cached: model={config.llm_model} context={cached:,} (reuse)")
         return cached
     return probe_context(config)
