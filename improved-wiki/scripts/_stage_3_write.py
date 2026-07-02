@@ -448,6 +448,65 @@ _ANCHOR_STEMS = {"index", "log", "overview", "schema"}
 _LISTING_BASENAMES = {"index.md", "log.md", "overview.md", "schema.md"}
 _WARN_LIST_CAP = 6  # max offending entries shown per warn line
 
+# Same-stem twin policy (fix 2026-07-02): a bare stem living in exactly
+# concepts/ AND entities/ resolves to concepts/ — the concept page is the
+# richer target (entity twins are typically chip stubs). Any OTHER ≥2-dir
+# set is true ambiguity and keeps the leave-as-is warning.
+_CONCEPT_ENTITY_PAIR = frozenset({"concepts", "entities"})
+
+# D4 figure-ref backstop (fix 2026-07-02): the D4 prompt rule asked models to
+# wrap bare 图X.X/表X.X/Fig X-X/Table X-X refs as source-page links but they
+# applied it inconsistently — a pure deterministic transform, so enforce it
+# here. Masked spans (existing wikilinks, markdown links/images whose media
+# paths may embed 图X-X, inline code, math) pass through untouched; that also
+# makes the transform idempotent — a wrapped ref sits inside [[...]] and is
+# masked on the next pass.
+_FIGREF_RE = re.compile(
+    r"(?:图|表)\s?\d+[.．-]\d+"
+    r"|\bFig\.?\s?\d+[-.]\d+"
+    r"|\bTable\s?\d+[-.]\d+")
+_FIGREF_MASK_RE = re.compile(
+    r"\[\[[^\[\]]+\]\]"             # existing wikilinks (incl. |alias)
+    r"|!?\[[^\]]*\]\([^)]*\)"       # markdown links/images
+    r"|`[^`]+`"                     # inline code spans
+    r"|\$\$[^$]+\$\$|\$[^$]+\$")    # math spans
+_HEADING_LINE_RE = re.compile(r"^#{1,6}[ \t]")
+_CODE_FENCE_RE = re.compile(r"^\s{0,3}(```|~~~)")
+
+
+def _stage_3_1_wrap_figure_refs(body: str, source_page_slug: str) -> tuple[str, int]:
+    """Wrap bare figure/table refs as ``[[<source-page>|据<ref>]]`` (D4 backstop).
+
+    Line-by-line: heading lines and fenced code blocks are skipped whole;
+    within a line, _FIGREF_MASK_RE spans pass through unchanged and only the
+    gaps are transformed. Returns (new_body, wrap_count)."""
+    count = 0
+
+    def _wrap(m: re.Match) -> str:
+        nonlocal count
+        count += 1
+        return f"[[{source_page_slug}|据{m.group(0)}]]"
+
+    out_lines: list[str] = []
+    in_fence = False
+    for line in body.split("\n"):
+        if _CODE_FENCE_RE.match(line):
+            in_fence = not in_fence
+            out_lines.append(line)
+            continue
+        if in_fence or _HEADING_LINE_RE.match(line):
+            out_lines.append(line)
+            continue
+        pieces: list[str] = []
+        pos = 0
+        for m in _FIGREF_MASK_RE.finditer(line):
+            pieces.append(_FIGREF_RE.sub(_wrap, line[pos:m.start()]))
+            pieces.append(m.group(0))
+            pos = m.end()
+        pieces.append(_FIGREF_RE.sub(_wrap, line[pos:]))
+        out_lines.append("".join(pieces))
+    return "\n".join(out_lines), count
+
 
 def _stage_3_1_normalize_link_target(raw: str) -> str:
     """Reduce one link target to a bare (possibly dir-prefixed) slug.
@@ -527,6 +586,7 @@ def stage_3_1_build_slug_dirs(
 
 def stage_3_1_normalize_page_links(
     rel_path: str, content: str, slug_dirs: dict[str, set[str]],
+    source_page_slug: str | None = None,
 ) -> str:
     """A5 write-time link normalizer — one pass over a FILE block before write.
 
@@ -540,10 +600,18 @@ def stage_3_1_normalize_page_links(
          de-linked automatically.
       3. H1 heading lines: embedded wikilinks stripped to plain text.
       4. Self-links (own slug in body or related) de-linked/removed.
+      5. D4 backstop (when ``source_page_slug`` is given): bare figure/table
+         refs (图X.X / 表X.X / Fig X-X / Table X-X) in body text wrapped as
+         ``[[<source_page_slug>|据<ref>]]``. Skips headings, code/math spans,
+         and refs already inside any ``[[..]]``; the source page itself
+         (own slug == source_page_slug) is excluded. Idempotent.
 
     Ambiguous related stems (≥2 dirs, claimed prefix wrong or absent) are kept
     as the BARE stem + warned — usually a dedup failure (H1) where guessing a
     dir would pick the wrong twin; the entry becomes valid once the twins merge.
+    Exception (fix 2026-07-02): the exact concepts/+entities/ pair resolves
+    deterministically to concepts/ (see _CONCEPT_ENTITY_PAIR) — in related:
+    AND in body links.
 
     Already-clean pages pass through byte-identical. All fixes print loud
     per-page ``[normalize]`` lines — never silent."""
@@ -569,6 +637,7 @@ def stage_3_1_normalize_page_links(
         kept: list[str] = []
         dropped: list[str] = []
         ambiguous: list[str] = []
+        twins: list[str] = []
         self_removed: list[str] = []
         seen: set[str] = set()
         for entry in orig_entries:
@@ -582,10 +651,14 @@ def stage_3_1_normalize_page_links(
                 dropped.append(entry)
                 continue
             is_ambiguous = False
+            is_twin = False
             if claimed_dir and claimed_dir in dirs:
                 resolved = t
             elif len(dirs) == 1:
                 resolved = f"{next(iter(dirs))}/{stem}"
+            elif dirs == _CONCEPT_ENTITY_PAIR:
+                is_twin = True  # concepts/+entities/ pair — concepts wins
+                resolved = f"concepts/{stem}"
             else:
                 is_ambiguous = True  # ≥2 dirs, no (valid) claimed prefix — don't guess
                 resolved = stem
@@ -594,6 +667,8 @@ def stage_3_1_normalize_page_links(
                 continue
             if is_ambiguous:
                 ambiguous.append(entry)
+            if is_twin:
+                twins.append(entry)
             if resolved in seen:
                 continue
             seen.add(resolved)
@@ -602,10 +677,12 @@ def stage_3_1_normalize_page_links(
             _warn(f"related: dropped {len(dropped)} unresolvable — {_fmt_list(dropped)}")
         if self_removed:
             _warn(f"related: removed {len(self_removed)} self-link(s) — {_fmt_list(self_removed)}")
+        if twins:
+            _warn(f"related: resolved {len(twins)} same-stem ambiguity → concepts/ — {_fmt_list(twins)}")
         if ambiguous:
             _warn(f"related: ⚠️ {len(ambiguous)} ambiguous, kept bare — {_fmt_list(ambiguous)}")
         if kept != orig_entries:
-            if not (dropped or self_removed or ambiguous):
+            if not (dropped or self_removed or ambiguous or twins):
                 _warn(f"related: normalized {len(kept)} entry(ies) to prefixed bare slugs")
             content = write_frontmatter_array(content, "related", kept)
             has_fm = content.startswith("---") and content.find("\n---", 3) != -1
@@ -614,7 +691,7 @@ def stage_3_1_normalize_page_links(
     # ── Rules 2 + 3 + 4b: body wikilinks ──
     body_start = fm_end + 4 if has_fm else 0
     head, body = content[:body_start], content[body_start:]
-    counts = {"h1": 0, "self": 0, "prefixed": 0}
+    counts = {"h1": 0, "self": 0, "prefixed": 0, "twin": 0}
     unresolved: list[str] = []
     changed = False
 
@@ -653,7 +730,12 @@ def stage_3_1_normalize_page_links(
             d = next(iter(dirs))
             rebuilt = f"{d}/{t}" + (f"#{anchor}" if anchor else "") + (f"|{alias}" if alias else "")
             return f"[[{rebuilt}]]"
-        unresolved.append(m.group(0))  # missing or ambiguous — never de-link (rule 2)
+        if dirs == _CONCEPT_ENTITY_PAIR:
+            counts["twin"] += 1  # concepts/+entities/ pair — concepts wins
+            changed = True
+            rebuilt = f"concepts/{t}" + (f"#{anchor}" if anchor else "") + (f"|{alias}" if alias else "")
+            return f"[[{rebuilt}]]"
+        unresolved.append(m.group(0))  # missing or truly ambiguous — never de-link (rule 2)
         return m.group(0)
 
     new_lines: list[str] = []
@@ -664,8 +746,16 @@ def stage_3_1_normalize_page_links(
             new_lines.append(_WIKILINK_RE.sub(_delink_h1, line))
         else:
             new_lines.append(_WIKILINK_RE.sub(_fix_link, line))
+    new_body = "\n".join(new_lines)
+
+    # ── Rule 5: D4 figure-ref backstop (source page itself excluded) ──
+    fig_count = 0
+    if source_page_slug and own_prefixed != source_page_slug:
+        new_body, fig_count = _stage_3_1_wrap_figure_refs(new_body, source_page_slug)
+        if fig_count:
+            changed = True
     if changed:
-        content = head + "\n".join(new_lines)
+        content = head + new_body
 
     if counts["h1"]:
         _warn(f"H1: de-linked {counts['h1']} embedded wikilink(s)")
@@ -673,6 +763,10 @@ def stage_3_1_normalize_page_links(
         _warn(f"body: de-linked {counts['self']} self-link(s)")
     if counts["prefixed"]:
         _warn(f"body: prefixed {counts['prefixed']} bare wikilink(s)")
+    if counts["twin"]:
+        _warn(f"body: resolved {counts['twin']} same-stem ambiguity → concepts/")
+    if fig_count:
+        _warn(f"body: wrapped {fig_count} figure/table ref(s) → [[{source_page_slug}]]")
     if unresolved:
         uniq = list(dict.fromkeys(unresolved))
         _warn(f"body: ⚠️ {len(unresolved)} bare wikilink(s) left as-is "

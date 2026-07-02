@@ -238,6 +238,10 @@ def _do_write(prepared: dict, verbose: bool = False) -> dict:
     # (the loop below is skipped, so the universe is unused).
     _slug_dirs = (stage_3_1_build_slug_dirs(_write_blocks, config, _VALID_SUBDIRS, _routing)
                   if _write_blocks else {})
+    # D4 figure-ref backstop: wiki-relative slug of this book's source page —
+    # the normalizer wraps bare 图X.X/表X.X/Fig X-X/Table X-X body refs as
+    # [[<slug>|据<ref>]] and skips the source page itself (own slug match).
+    _source_page_slug = source_path.relative_to(config.wiki_dir).with_suffix("").as_posix()
 
     for rel_path, content in _write_blocks:
         if ".." in rel_path or rel_path.startswith("/"):
@@ -293,9 +297,11 @@ def _do_write(prepared: dict, verbose: bool = False) -> dict:
         # A5 (audit M6): single write-time normalization pass — related →
         # prefixed bare slugs (unresolvable dropped), bare body wikilinks
         # prefixed when uniquely resolvable, H1 wikilinks de-linked,
-        # self-links removed. Loud per-page prints, never silent.
+        # self-links removed, bare figure/table refs wrapped as source-page
+        # links (D4 backstop). Loud per-page prints, never silent.
         if basename not in _LISTING_PAGES:
-            content = stage_3_1_normalize_page_links(rel_path, content, _slug_dirs)
+            content = stage_3_1_normalize_page_links(
+                rel_path, content, _slug_dirs, source_page_slug=_source_page_slug)
 
         full_path = config.wiki_dir / rel_path
         is_listing = basename in _LISTING_PAGES

@@ -4,9 +4,10 @@ For each generated query, find related existing wiki pages via an embedding
 (cosine) semantic prefilter — NOT title word-Jaccard — so a natural-language
 question ("什么是傅里叶变换") actually matches a noun-titled concept page
 ("Fourier Transform") it shares few literal words with. An LLM judge then
-decides: closed (answer already exists) or kept (still open). Defaults to
-"kept" on any uncertainty or LLM failure — never auto-deletes a query without
-explicit LLM confirmation.
+decides: closed (answer already exists) or kept (still open) — ALL queries are
+judged in ONE batched handoff (one verdict line per query), not N sequential
+calls. Defaults to "kept" on any uncertainty or LLM failure — never
+auto-deletes a query without explicit LLM confirmation.
 
 no-fallback: if the embedding stack is unavailable the prefilter RAISES (pauses
 ingest) rather than degrading to Jaccard. Empty wiki (nothing to resolve
@@ -113,48 +114,91 @@ def _stage_2_8_find_related_wiki_pages(query, existing_pages, embeddings, top_k=
     return [(pid, title, sim) for sim, pid, title in scored[:top_k]]
 
 
-def _stage_2_8_judge_prompt(query, related):
-    pages = "\n".join("- [[{}]]: {}".format(pid, title) for pid, title, _sim in related[:8])
-    if not pages:
-        pages = "(none found)"
-    return """You are judging whether an open question from a newly-ingested source is already answered by existing wiki pages.
+def _stage_2_8_batch_judge_prompt(judged):
+    """ONE prompt covering every query that has candidate pages (2026-07-02:
+    N queries previously meant N sequential single-line judge handoffs, but the
+    resolve step knows all queries upfront). One verdict line per query in a
+    fixed parseable format. A single-query book produces the same batch prompt
+    with one entry — no special case."""
+    entries = []
+    for query, related in judged:
+        pages = "\n".join("- [[{}]]: {}".format(pid, title) for pid, title, _sim in related[:8])
+        entries.append(
+            "### Query slug: {slug}\nTitle: {title}\nBody:\n{body}\n"
+            "Existing wiki pages that may relate:\n{pages}".format(
+                slug=query["slug"], title=query["title"],
+                body=query["body"], pages=pages))
+    return """You are judging whether open questions from a newly-ingested source are already answered by existing wiki pages.
 
-Query title: {title}
-Query body:
-{body}
-
-Existing wiki pages that may relate:
-{pages}
-
-Decide:
+For EACH query below, decide:
 - "closed": the existing pages fully answer this question -> the query can be removed.
 - "kept": the existing pages do NOT (or only partially) answer it -> keep as an open query.
 
 When unsure, choose "kept" — never close a question without clear evidence.
 
-Reply with exactly one line: STATUS: <closed|kept> | REASON: <one sentence>
-""".format(title=query["title"], body=query["body"], pages=pages)
+{entries}
+
+Reply with EXACTLY one line per query, in the same order, no other text.
+Line format (slug first, verbatim from "Query slug:"):
+<slug>: STATUS: <closed|kept> | REASON: <one sentence>
+""".format(entries="\n\n".join(entries))
 
 
-def _stage_2_8_judge_query_resolution(query, related, config):
-    if not related:
-        return "kept", "no related wiki pages"
-    prompt = _stage_2_8_judge_prompt(query, related)
+_STAGE_2_8_VERDICT_RE = re.compile(
+    r"^\s*(?:[-*]\s*)?(?P<slug>\S+?)\s*[:：]\s*STATUS\s*[:：]?\s*(?P<status>closed|kept)\b"
+    r"(?:\s*\|\s*REASON\s*[:：]?\s*(?P<reason>.*\S))?",
+    re.IGNORECASE)
+
+
+def _stage_2_8_parse_batch_verdicts(response, expected_slugs):
+    """Parse per-query verdict lines from the single batch response into
+    {slug: (status, reason)}. Lenient on decoration (bullets, backticks,
+    [[ ]], a queries/ prefix) but strict on the STATUS keyword; unknown slugs
+    are ignored and the first verdict per slug wins. Missing slugs are the
+    caller's job (default kept, loud warn)."""
+    verdicts = {}
+    expected = set(expected_slugs)
+    for line in response.splitlines():
+        m = _STAGE_2_8_VERDICT_RE.match(line)
+        if not m:
+            continue
+        slug = m.group("slug").strip("`[]").rsplit("/", 1)[-1]
+        if slug not in expected or slug in verdicts:
+            continue
+        verdicts[slug] = (m.group("status").lower(),
+                          (m.group("reason") or "").strip())
+    return verdicts
+
+
+def _stage_2_8_judge_queries_batch(judged, config):
+    """Judge all candidate-bearing queries in ONE conversation handoff.
+
+    Returns {slug: (status, reason)} covering every judged query. Defaults to
+    "kept" on any failure — whole-call LLM error, or a missing/unparseable
+    verdict line (loud warn) — never closes a query without explicit LLM
+    confirmation."""
+    if not judged:
+        return {}
+    slugs = [query["slug"] for query, _related in judged]
+    prompt = _stage_2_8_batch_judge_prompt(judged)
     try:
-        response, _ = call_anthropic_protocol(prompt, config, max_tokens=200, label="query-resolve")
+        response, _ = call_anthropic_protocol(
+            prompt, config, max_tokens=max(400, 120 * len(judged)),
+            label="query-resolve")
     except Exception as e:
-        print("  [stage 2.7] LLM judge failed for '{}': {} — defaulting to kept".format(query["slug"], e))
-        return "kept", "llm-unavailable"
-    m = re.search(r"STATUS:\s*(closed|kept)", response, re.IGNORECASE)
-    if not m:
-        print("  [stage 2.7] Could not parse judge response for '{}' — defaulting to kept".format(query["slug"]))
-        return "kept", "unparseable"
-    status = m.group(1).lower()
-    reason = ""
-    rm = re.search(r"REASON:\s*(.+)", response)
-    if rm:
-        reason = rm.group(1).strip()
-    return status, reason
+        print("  [stage 2.7] LLM batch judge failed ({} queries): {} — "
+              "defaulting ALL to kept".format(len(judged), e))
+        return {slug: ("kept", "llm-unavailable") for slug in slugs}
+    verdicts = _stage_2_8_parse_batch_verdicts(response, slugs)
+    results = {}
+    for slug in slugs:
+        if slug in verdicts:
+            results[slug] = verdicts[slug]
+        else:
+            print("  [stage 2.7][WARN] batch judge response has no parseable "
+                  "verdict for '{}' — defaulting to kept".format(slug))
+            results[slug] = ("kept", "unparseable")
+    return results
 
 
 def stage_2_8_resolve_queries(file_blocks, wiki_root, config, *, embeddings=None):
@@ -176,9 +220,23 @@ def stage_2_8_resolve_queries(file_blocks, wiki_root, config, *, embeddings=None
     if embeddings is None:
         embeddings = _stage_2_8_embed_existing_and_queries(existing_pages, queries)
 
+    # Batch judge (2026-07-02): every candidate-bearing query goes into ONE
+    # handoff instead of N sequential single-line judge calls. Queries with no
+    # candidates (failed embed) keep the kept short-circuit — nothing to judge.
+    judged = []
     for query in queries:
         related = _stage_2_8_find_related_wiki_pages(query, existing_pages, embeddings)
-        status, reason = _stage_2_8_judge_query_resolution(query, related, config)
+        if related:
+            judged.append((query, related))
+        else:
+            resolutions[query["slug"]] = {
+                "status": "kept", "resolution_pages": [],
+                "reason": "no related wiki pages"}
+            print("  [stage 2.7] query '{}' -> kept (no related wiki pages)".format(
+                query["slug"]))
+    verdicts = _stage_2_8_judge_queries_batch(judged, config)
+    for query, related in judged:
+        status, reason = verdicts[query["slug"]]
         resolutions[query["slug"]] = {
             "status": status,
             # Top-k candidates ALL go to the judge; only >=threshold ones are
