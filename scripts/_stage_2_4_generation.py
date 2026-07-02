@@ -18,6 +18,48 @@ GENERATED_DISPLAY_MAX = 50
 # kept; only the background fill of other existing wiki pages is bounded by this.
 _LINKABLE_TOTAL_CAP = 400
 
+
+def _linkable_relevance_tokens(text: str) -> set:
+    """Token set for linkable-fill relevance ranking: ASCII content words ∪ CJK
+    character bigrams (reuses the Stage 2.3 tokenizers). Folder prefixes are
+    dropped and -/_ split into words so a slug ("concepts/matched-filter") and
+    a title ("Matched Filter") tokenize alike."""
+    stem = text.rsplit("/", 1)[-1].replace("-", " ").replace("_", " ")
+    return _stage_2_title_words(stem) | _stage_2_title_cjk_bigrams(stem)
+
+
+def _rank_linkable_fill(candidates: list[str], reference_texts: list[str]) -> list[str]:
+    """Rank background-fill slugs by relevance to THIS book, best first.
+
+    When the fill candidate set exceeds its cap, an ALPHABETICAL cut
+    systematically drops late-sorting slugs — CJK sorts after ASCII, so Chinese
+    pages vanish first as the wiki grows (observed live 2026-07-02 on the 2.6
+    [:1500] cap; same disease as the fixed [:200]/[:300] caps). Instead, score
+    each candidate by its best token/CJK-bigram Jaccard overlap against the
+    book's own generated slugs/titles and keep the most relevant.
+
+    Deterministic and cheap (pure token math, no LLM/network): order is
+    (score desc, slug asc). Determinism matters for prompt-hash stability
+    within one ingest — the existing_slugs snapshot is stable during a book's
+    run, so the ranked prefix (and hence the conversation-handoff cache key)
+    never thrashes between resumes.
+    """
+    ref_sets: list[frozenset] = []
+    seen: set[frozenset] = set()
+    for ref in reference_texts:
+        toks = frozenset(_linkable_relevance_tokens(ref))
+        if toks and toks not in seen:
+            seen.add(toks)
+            ref_sets.append(toks)
+
+    def _score(slug: str) -> float:
+        cand = _linkable_relevance_tokens(slug)
+        if not cand or not ref_sets:
+            return 0.0
+        return max(len(cand & ref) / len(cand | ref) for ref in ref_sets)
+
+    return sorted(candidates, key=lambda s: (-_score(s), s))
+
 # ── Audit 2026-07-02 三/B prompt-text additions (injected into BOTH the
 # per-chunk and single-shot generation prompts) ─────────────────────────────
 
@@ -369,10 +411,18 @@ def _stage_2_4_build_prompt(
         if slug:
             must_link.add(slug)
     # Background fill: other existing wiki pages, bounded so the prompt stays a
-    # reasonable size. Never displaces a must-link target.
-    fill = sorted(s for s in set(existing_slugs[:200]) if s not in must_link)
+    # reasonable size. Never displaces a must-link target. When candidates
+    # exceed the room, keep the most RELEVANT to this book (token/CJK-bigram
+    # overlap with this chunk's names + prior generated slugs) instead of an
+    # alphabetical prefix, which systematically dropped late-sorting (CJK)
+    # slugs — see _rank_linkable_fill (deterministic, prompt-hash stable).
+    fill = sorted(s for s in set(existing_slugs) if s not in must_link)
     room = max(0, _LINKABLE_TOTAL_CAP - len(must_link))
-    linkable_list = sorted(must_link) + fill[:room]
+    if len(fill) > room:
+        refs = ([n for n, _s in concept_slugs] + [n for n, _s in entity_slugs]
+                + [n for n, _s in schema_candidate_slugs] + list(generated_slugs))
+        fill = sorted(_rank_linkable_fill(fill, refs)[:room])
+    linkable_list = sorted(must_link) + fill
     linkable_str = "\n".join(f"  - {s}" for s in linkable_list) if linkable_list else "(none)"
 
     template_section = ""
@@ -957,21 +1007,29 @@ def _stage_2_4_build_all_prompt(
     concept_str = "\n".join(concept_lines[:800]) if concept_lines else "(none)"
     entity_str = "\n".join(entity_lines[:200]) if entity_lines else "(none)"
 
-    linkable = set()
+    # Must-link targets (this book's slugs, Stage 2.3 existing_refs, related
+    # pages) are always kept; the background fill of other existing wiki pages
+    # is bounded — ranked by relevance to this book when over the room, not
+    # cut alphabetically (which systematically dropped late-sorting CJK slugs;
+    # see _rank_linkable_fill — deterministic, prompt-hash stable).
+    must_link = set()
     for _, s in concept_slugs:
-        linkable.add(s)
+        must_link.add(s)
     for _, s in entity_slugs:
-        linkable.add(s)
-    for s in existing_slugs[:200]:
-        linkable.add(s)
+        must_link.add(s)
     for slugs in existing_refs.values():
         for s in slugs:
-            linkable.add(s)
+            must_link.add(s)
     for rp in (related_pages or []):
         slug = rp.get("slug") if isinstance(rp, dict) else None
         if slug:
-            linkable.add(slug)
-    linkable_list = sorted(linkable)[:300]
+            must_link.add(slug)
+    fill = sorted(s for s in set(existing_slugs) if s not in must_link)
+    room = max(0, 300 - len(must_link))
+    if len(fill) > room:
+        refs = [n for n, _s in concept_slugs] + [n for n, _s in entity_slugs]
+        fill = sorted(_rank_linkable_fill(fill, refs)[:room])
+    linkable_list = sorted(must_link) + fill
     linkable_str = "\n".join(f"  - {s}" for s in linkable_list) if linkable_list else "(none)"
 
     template_section = ""

@@ -4,9 +4,10 @@ Covers the embedding-prefilter swap (title-Jaccard → cosine), the A3 revive
 (top-k candidates reach the judge even below RESOLVE_COSINE_THRESHOLD;
 threshold only marks resolve conclusions; cross_refs written back into kept
 query frontmatter), the empty-wiki short-circuit (no embed, no raise), the
-no-fallback raise on embed failure, and the unchanged LLM-judge
-default-to-kept + closed-query drop. Embeddings/embed calls are injected or
-spied (no network).
+no-fallback raise on embed failure, the BATCHED judge (all queries in ONE
+handoff, one verdict line per query; missing/unparseable lines default to
+kept), and the unchanged LLM-judge default-to-kept + closed-query drop.
+Embeddings/embed calls are injected or spied (no network).
 
 Run:  python3 scripts/tests/test_stage_2_8_query_resolve.py
 """
@@ -130,7 +131,7 @@ class TestResolveQueriesFlow(unittest.TestCase):
 
         def _spy(prompt, config, max_tokens=None, label=None):
             judge_calls.append(prompt)
-            return "STATUS: kept | REASON: only partially answered", "end_turn"
+            return "q1: STATUS: kept | REASON: only partially answered", "end_turn"
 
         embeddings = {
             "concepts/fourier": [0.5, 0.8660254],  # cosine 0.5 vs query — below 0.70
@@ -160,7 +161,7 @@ class TestResolveQueriesFlow(unittest.TestCase):
             "__query__q1": [1.0, 0.0],
         }
         orig = q.call_anthropic_protocol
-        q.call_anthropic_protocol = lambda *a, **k: ("STATUS: kept | REASON: r", "end_turn")
+        q.call_anthropic_protocol = lambda *a, **k: ("q1: STATUS: kept | REASON: r", "end_turn")
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 wiki = Path(tmp)
@@ -174,25 +175,98 @@ class TestResolveQueriesFlow(unittest.TestCase):
         self.assertEqual(res["q1"]["resolution_pages"], ["concepts/high"])
 
 
-class TestJudgeUnchangedBehavior(unittest.TestCase):
-    def test_judge_defaults_to_kept_on_llm_failure(self):
-        def _boom(*a, **k):
-            raise RuntimeError("llm down")
+class TestBatchJudge(unittest.TestCase):
+    """The resolve judge runs as ONE batched handoff for all queries (was N
+    sequential single-line calls). One verdict line per query, format
+    `<slug>: STATUS: <closed|kept> | REASON: ...`; missing or unparseable
+    lines default to kept."""
+
+    _EMBEDDINGS = {
+        "concepts/fourier": [1.0, 0.0],
+        "__query__q1": [1.0, 0.0],
+        "__query__q2": [0.9, 0.4358899],
+    }
+
+    def _resolve(self, blocks, llm):
         orig = q.call_anthropic_protocol
-        q.call_anthropic_protocol = _boom
+        q.call_anthropic_protocol = llm
         try:
-            status, reason = q._stage_2_8_judge_query_resolution(
-                {"slug": "q1", "title": "T", "body": "b"},
-                [("concepts/fourier", "Fourier Transform", 0.75)], object())
+            with tempfile.TemporaryDirectory() as tmp:
+                wiki = Path(tmp)
+                _write_page(wiki, "concepts", "fourier", "Fourier Transform")
+                return q.stage_2_8_resolve_queries(
+                    blocks, wiki, object(), embeddings=self._EMBEDDINGS)
         finally:
             q.call_anthropic_protocol = orig
-        self.assertEqual(status, "kept")
 
-    def test_no_related_short_circuits_to_kept(self):
-        status, _ = q._stage_2_8_judge_query_resolution(
-            {"slug": "q1", "title": "T", "body": "b"}, [], object())
-        self.assertEqual(status, "kept")
+    def test_multiple_queries_one_handoff_mixed_verdicts(self):
+        calls = []
 
+        def _spy(prompt, config, max_tokens=None, label=None):
+            calls.append(prompt)
+            return ("q1: STATUS: closed | REASON: already answered\n"
+                    "q2: STATUS: kept | REASON: still open"), "end_turn"
+
+        res = self._resolve(
+            [_query_block("q1", "What is FT?"), _query_block("q2", "Open one?")],
+            _spy)
+        self.assertEqual(len(calls), 1, "all queries must share ONE judge handoff")
+        # Both queries (title + candidates) present in the single prompt.
+        self.assertIn("Query slug: q1", calls[0])
+        self.assertIn("Query slug: q2", calls[0])
+        self.assertIn("[[concepts/fourier]]", calls[0])
+        self.assertEqual(res["q1"]["status"], "closed")
+        self.assertEqual(res["q2"]["status"], "kept")
+
+    def test_missing_verdict_line_defaults_to_kept(self):
+        # Response covers q1 only — q2's verdict is missing → kept, loud warn.
+        llm = lambda *a, **k: ("q1: STATUS: closed | REASON: covered", "end_turn")
+        res = self._resolve(
+            [_query_block("q1", "A?"), _query_block("q2", "B?")], llm)
+        self.assertEqual(res["q1"]["status"], "closed")
+        self.assertEqual(res["q2"]["status"], "kept")
+        self.assertEqual(res["q2"]["reason"], "unparseable")
+
+    def test_unparseable_response_defaults_all_to_kept(self):
+        llm = lambda *a, **k: ("I think these are all fine.", "end_turn")
+        res = self._resolve(
+            [_query_block("q1", "A?"), _query_block("q2", "B?")], llm)
+        self.assertEqual(res["q1"]["status"], "kept")
+        self.assertEqual(res["q2"]["status"], "kept")
+
+    def test_batch_judge_defaults_to_kept_on_llm_failure(self):
+        def _boom(*a, **k):
+            raise RuntimeError("llm down")
+        res = self._resolve([_query_block("q1", "A?")], _boom)
+        self.assertEqual(res["q1"]["status"], "kept")
+        self.assertEqual(res["q1"]["reason"], "llm-unavailable")
+
+    def test_decorated_verdict_lines_still_parse(self):
+        # Bullets / [[ ]] / queries/ prefix tolerated; unknown slug ignored.
+        llm = lambda *a, **k: (
+            "- [[queries/q1]]: STATUS: closed | REASON: covered\n"
+            "ghost: STATUS: closed | REASON: not a real query", "end_turn")
+        res = self._resolve([_query_block("q1", "A?")], llm)
+        self.assertEqual(res["q1"]["status"], "closed")
+        self.assertNotIn("ghost", res)
+
+    def test_no_candidates_query_kept_without_judge(self):
+        # q9 has no embedding vector → no candidates → kept, never sent to LLM.
+        calls = []
+
+        def _spy(prompt, config, max_tokens=None, label=None):
+            calls.append(prompt)
+            return "q1: STATUS: kept | REASON: r", "end_turn"
+
+        res = self._resolve(
+            [_query_block("q1", "A?"), _query_block("q9", "No embed")], _spy)
+        self.assertEqual(res["q9"]["status"], "kept")
+        self.assertEqual(res["q9"]["reason"], "no related wiki pages")
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("q9", calls[0])
+
+
+class TestJudgeUnchangedBehavior(unittest.TestCase):
     def test_closed_query_block_dropped(self):
         file_blocks = [
             ("queries/q1.md", "---\ntitle: Q1\n---\nopen"),

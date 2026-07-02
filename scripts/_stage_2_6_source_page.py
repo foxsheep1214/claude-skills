@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from _stage_2_base import *
 from _language import build_language_directive
+from _stage_2_4_generation import _rank_linkable_fill
 
 
 def _normalize_source_frontmatter(
@@ -331,8 +332,21 @@ Which wiki pages should be created or updated based on this source? What should 
     # 300 cut the sorted list mid-alphabet (observed live 2026-07-02: entities/*
     # never made it into a source-page prompt's Linkable list). 1500 covers the
     # current wiki scale; slugs are ~30 chars each so this stays <50K chars.
+    # Above the cap, an ALPHABETICAL cut has the same disease at the tail: CJK
+    # sorts last, so Chinese pages systematically vanish as the wiki grows
+    # (observed live: 4 valid CJK slugs fell outside the cap). Rank by
+    # relevance to THIS book instead (token/CJK-bigram overlap with the book's
+    # own generated slugs + digest concept/entity names). Ranking is
+    # deterministic (score desc, slug asc) so the prompt hash stays stable
+    # within one ingest — the linkable snapshot is stable during a book's run.
     if len(linkable) > 1500:
-        linkable = linkable[:1500]
+        _ref_names = [
+            (x.get("name", "") if isinstance(x, dict) else str(x)).strip()
+            for x in list(key_concepts) + list(key_entities)
+        ]
+        _refs = (list(generated_concepts or []) + list(generated_entities or [])
+                 + [n for n in _ref_names if n])
+        linkable = sorted(_rank_linkable_fill(linkable, _refs)[:1500])
     linkable_str = "\n".join(f"  - [[{s}]]" for s in linkable) if linkable else "(none — write concepts as plain text, do NOT invent [[wikilinks]])"
     linkable_rule = (
         "\n# Wikilink Rule — STRICT\n"

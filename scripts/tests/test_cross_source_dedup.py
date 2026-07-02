@@ -7,12 +7,15 @@ Run:  python3 scripts/tests/test_cross_source_dedup.py
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 if str(_SCRIPTS_DIR) not in sys.path:
@@ -240,18 +243,21 @@ class TestPrefilterThresholdOverride(unittest.TestCase):
                  ("wiki/entities/b.md", _page("type: entity\ntitle: b", "FULL BODY B"))]
         captured = {}
 
-        def fake_candidate_pairs(emb_pages, *, threshold):
+        def fake_candidate_pairs(emb_pages, *, threshold, embeddings=None):
             captured["threshold"] = threshold
             captured["bodies"] = {p["id"]: p["body"] for p in emb_pages}
             return []  # no pairs → small wiki falls back to full scan
 
         orig = ds.candidate_pairs
+        orig_embed = ds._embed_pages_bounded
         ds.candidate_pairs = fake_candidate_pairs
+        ds._embed_pages_bounded = lambda emb_pages: {p["id"]: [1.0] for p in emb_pages}
         try:
             ds._detect_groups(summaries, pages, lambda s, u: '{"groups": []}',
                               [], embedding_prefilter=True)
         finally:
             ds.candidate_pairs = orig
+            ds._embed_pages_bounded = orig_embed
 
         self.assertEqual(captured["threshold"], ds.DEDUP_PREFILTER_THRESHOLD)
         self.assertEqual(captured["threshold"], 0.68)
@@ -322,14 +328,17 @@ class TestEmptyPrefilterLimit(unittest.TestCase):
 
         orig_cp = ds.candidate_pairs
         orig_dd = ds._dedup.detect_duplicate_groups
-        ds.candidate_pairs = lambda emb, *, threshold: candidate_return
+        orig_embed = ds._embed_pages_bounded
+        ds.candidate_pairs = lambda emb, *, threshold, embeddings=None: candidate_return
         ds._dedup.detect_duplicate_groups = fake_detect
+        ds._embed_pages_bounded = lambda emb_pages: {p["id"]: [1.0] for p in emb_pages}
         try:
             ds._detect_groups(summaries, pages, lambda s, u: "", [],
                               embedding_prefilter=True)
         finally:
             ds.candidate_pairs = orig_cp
             ds._dedup.detect_duplicate_groups = orig_dd
+            ds._embed_pages_bounded = orig_embed
         return called["full_scan"]
 
     def test_small_wiki_empty_pairs_falls_back_to_full_scan(self):
@@ -346,7 +355,7 @@ class TestEmptyPrefilterLimit(unittest.TestCase):
                  for i in range(251)]
         called = {"full_scan": 0}
 
-        def boom(emb, *, threshold):
+        def boom(emb, *, threshold, embeddings=None):
             raise ds.DuplicatePrefilterError("embedded only 3/251 pages")
 
         def fake_detect(subset, llm, *, not_duplicates):
@@ -354,13 +363,16 @@ class TestEmptyPrefilterLimit(unittest.TestCase):
             return []
 
         orig_cp, orig_dd = ds.candidate_pairs, ds._dedup.detect_duplicate_groups
+        orig_embed = ds._embed_pages_bounded
         ds.candidate_pairs = boom
         ds._dedup.detect_duplicate_groups = fake_detect
+        ds._embed_pages_bounded = lambda emb_pages: {p["id"]: [1.0] for p in emb_pages}
         try:
             out = ds._detect_groups(summaries, pages, lambda s, u: "", [],
                                     embedding_prefilter=True)
         finally:
             ds.candidate_pairs, ds._dedup.detect_duplicate_groups = orig_cp, orig_dd
+            ds._embed_pages_bounded = orig_embed
         self.assertEqual(out, [])
         self.assertEqual(called["full_scan"], 0)  # large wiki skipped
 
@@ -386,7 +398,7 @@ class TestWhitelistPairPrefilter(unittest.TestCase):
                   _page(f"type: entity\ntitle: {s.slug}", "b")) for s in summaries]
         detector_batches = []
 
-        def fake_cp(emb, *, threshold):
+        def fake_cp(emb, *, threshold, embeddings=None):
             return [("paos", "聚磷菌")]  # only the whitelisted pair
 
         def fake_detect(subset, llm, *, not_duplicates):
@@ -394,13 +406,16 @@ class TestWhitelistPairPrefilter(unittest.TestCase):
             return []
 
         orig_cp, orig_dd = ds.candidate_pairs, ds._dedup.detect_duplicate_groups
+        orig_embed = ds._embed_pages_bounded
         ds.candidate_pairs = fake_cp
         ds._dedup.detect_duplicate_groups = fake_detect
+        ds._embed_pages_bounded = lambda emb_pages: {p["id"]: [1.0] for p in emb_pages}
         try:
             ds._detect_groups(summaries, pages, lambda s, u: "",
                               [["paos", "聚磷菌"]], embedding_prefilter=True)
         finally:
             ds.candidate_pairs, ds._dedup.detect_duplicate_groups = orig_cp, orig_dd
+            ds._embed_pages_bounded = orig_embed
         # All pairs filtered out → no clusters → detector never called.
         self.assertEqual(detector_batches, [])
 
@@ -435,7 +450,11 @@ class TestWhitelistWritePath(unittest.TestCase):
             loaded = dstore.load_not_duplicates(rt)
             self.assertEqual(len(loaded), 1)
             # run_phase2 picks it up as a whitelist pair → suppresses the group.
-            report = ds.run_phase2(root, _mock_llm(), apply=False, today=FIXED_TODAY)
+            # Embedder stubbed to all-None → coverage error → small-wiki full
+            # scan with the mock LLM (no real network in tests).
+            with mock.patch.object(ds, "_embed_pages_bounded",
+                                   lambda emb_pages: {p["id"]: None for p in emb_pages}):
+                report = ds.run_phase2(root, _mock_llm(), apply=False, today=FIXED_TODAY)
             self.assertEqual(report["groups"], [])
 
 
@@ -472,11 +491,11 @@ class TestEmbeddingPrefilterDefault(unittest.TestCase):
     default IS the only behavior most users get — it must bound the detector."""
 
     def _capture_prefilter(self, argv):
-        from unittest import mock
         with tempfile.TemporaryDirectory() as t:
             root = Path(t)
             _make_wiki(root)
-            with mock.patch.object(ds, "run_phase2", return_value={"groups": [], "applied": []}) as m:
+            with mock.patch.object(ds, "check_embedding_endpoint", return_value=None), \
+                 mock.patch.object(ds, "run_phase2", return_value={"groups": [], "applied": []}) as m:
                 ds.main(["--project", str(root), "--dry-run", *argv])
             return m.call_args.kwargs["embedding_prefilter"]
 
@@ -485,6 +504,195 @@ class TestEmbeddingPrefilterDefault(unittest.TestCase):
 
     def test_opt_out_flag_disables(self):
         self.assertFalse(self._capture_prefilter(["--no-embedding-prefilter"]))
+
+
+class _FakeResp:
+    """Minimal urlopen response stub: JSON body with n embedding vectors."""
+
+    def __init__(self, n):
+        self._n = n
+
+    def read(self):
+        return json.dumps(
+            {"data": [{"embedding": [1.0, 0.0]}] * self._n}).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class TestBoundedEmbedding(unittest.TestCase):
+    """Fix 4: hard per-request timeout, per-batch skip-with-warning, and the
+    consecutive-failure circuit breaker — all with mocked urlopen (no real
+    network in tests)."""
+
+    def _pages(self, n):
+        return [{"id": f"p{i}", "title": f"t{i}", "tags": [], "body": "b"}
+                for i in range(n)]
+
+    def test_timeout_forwarded_and_vectors_returned(self):
+        seen = {}
+
+        def fake_urlopen(req, timeout=None):
+            seen["timeout"] = timeout
+            body = json.loads(req.data.decode("utf-8"))
+            return _FakeResp(len(body["input"]))
+
+        with mock.patch.object(ds.urllib.request, "urlopen", fake_urlopen):
+            out = ds._embed_pages_bounded(self._pages(3))
+        self.assertEqual(seen["timeout"], ds.EMBED_TIMEOUT_S)
+        self.assertEqual(len(out), 3)
+        self.assertTrue(all(v == [1.0, 0.0] for v in out.values()))
+
+    def test_failed_batch_skipped_run_continues(self):
+        calls = {"n": 0}
+
+        def fake_urlopen(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise TimeoutError("read timed out")
+            body = json.loads(req.data.decode("utf-8"))
+            return _FakeResp(len(body["input"]))
+
+        with mock.patch.object(ds.urllib.request, "urlopen", fake_urlopen):
+            out = ds._embed_pages_bounded(self._pages(32))  # 2 batches of 16
+        # Timed-out batch → None members, run continues to the next batch.
+        self.assertTrue(all(out[f"p{i}"] is None for i in range(16)))
+        self.assertTrue(all(out[f"p{i}"] == [1.0, 0.0] for i in range(16, 32)))
+
+    def test_circuit_breaker_aborts_after_consecutive_failures(self):
+        calls = {"n": 0}
+
+        def always_fail(req, timeout=None):
+            calls["n"] += 1
+            raise ConnectionRefusedError("refused")
+
+        with mock.patch.object(ds.urllib.request, "urlopen", always_fail):
+            out = ds._embed_pages_bounded(self._pages(160))  # 10 batches
+        # Stops issuing requests after N consecutive failures; every page is
+        # still accounted for (None) so coverage handling can kick in.
+        self.assertEqual(calls["n"], ds.EMBED_MAX_CONSECUTIVE_FAILURES)
+        self.assertEqual(len(out), 160)
+        self.assertTrue(all(v is None for v in out.values()))
+
+
+class TestEmbedderProbe(unittest.TestCase):
+    """Fix 4: fail fast (<15s) at startup when Ollama is unreachable, with a
+    message naming the fallback flag."""
+
+    def test_unreachable_returns_error_string(self):
+        def refuse(url, timeout=None):
+            raise ds.urllib.error.URLError("connection refused")
+
+        with mock.patch.object(ds.urllib.request, "urlopen", refuse):
+            err = ds.check_embedding_endpoint(timeout=0.1)
+        self.assertIsNotNone(err)
+        self.assertIn("refused", err)
+
+    def test_http_error_counts_as_reachable(self):
+        def http404(url, timeout=None):
+            raise ds.urllib.error.HTTPError(url, 404, "not found", None, None)
+
+        with mock.patch.object(ds.urllib.request, "urlopen", http404):
+            self.assertIsNone(ds.check_embedding_endpoint(timeout=0.1))
+
+    def test_main_fails_fast_with_fallback_hint(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            _make_wiki(root)
+            buf = io.StringIO()
+            with mock.patch.object(ds, "check_embedding_endpoint",
+                                   return_value="connection refused"):
+                with contextlib.redirect_stderr(buf):
+                    rc = ds.main(["--project", str(root), "--dry-run"])
+            self.assertEqual(rc, 2)
+            self.assertIn("--token-only", buf.getvalue())
+
+    def test_token_only_skips_probe(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            _make_wiki(root)
+
+            def probe_must_not_run(*a, **k):
+                raise AssertionError("probe must not run with --token-only")
+
+            with mock.patch.object(ds, "check_embedding_endpoint",
+                                   probe_must_not_run):
+                rc = ds.main(["--project", str(root), "--dry-run",
+                              "--token-only", "--no-llm"])
+            self.assertEqual(rc, 0)
+
+
+class TestTokenOnlyCandidates(unittest.TestCase):
+    """Fix 4: deterministic --token-only prefilter (Stage 2.3 matchers)."""
+
+    def test_cjk_bigram_overlap_pairs(self):
+        summaries = [_summ("匹配滤波器", title="匹配滤波器"),
+                     _summ("匹配滤波器理论", title="匹配滤波器理论"),
+                     _summ("多普勒效应", title="多普勒效应")]
+        pairs = ds._token_candidate_pairs(summaries)
+        self.assertEqual(pairs, [("匹配滤波器", "匹配滤波器理论")])
+
+    def test_ascii_word_overlap_pairs(self):
+        summaries = [_summ("matched-filter", title="Matched Filter"),
+                     _summ("matched-filter-theory", title="Matched Filter Theory"),
+                     _summ("kalman", title="Kalman Filter Basics")]
+        pairs = ds._token_candidate_pairs(summaries)
+        self.assertEqual(pairs, [("matched-filter", "matched-filter-theory")])
+
+    def test_no_overlap_no_pairs(self):
+        summaries = [_summ("radar", title="Radar"), _summ("sonar", title="Sonar")]
+        self.assertEqual(ds._token_candidate_pairs(summaries), [])
+
+
+class TestNoLLM(unittest.TestCase):
+    """Fix 4: --no-llm reports prefilter clusters without any LLM call and
+    never merges."""
+
+    def test_returns_candidate_clusters_without_detector(self):
+        summaries = [_summ("paos", "d"), _summ("聚磷菌", "d"), _summ("vfa", "d")]
+        pages = [(f"wiki/entities/{s.slug}.md",
+                  _page(f"type: entity\ntitle: {s.slug}", "b")) for s in summaries]
+
+        def detector_must_not_run(*a, **k):
+            raise AssertionError("LLM detector must not run with no_llm")
+
+        with mock.patch.object(ds, "candidate_pairs",
+                               lambda emb, *, threshold, embeddings=None: [("paos", "聚磷菌")]), \
+             mock.patch.object(ds, "_embed_pages_bounded",
+                               lambda emb_pages: {p["id"]: [1.0] for p in emb_pages}), \
+             mock.patch.object(ds._dedup, "detect_duplicate_groups",
+                               detector_must_not_run):
+            groups = ds._detect_groups(summaries, pages, lambda s, u: "", [],
+                                       embedding_prefilter=True, no_llm=True)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(sorted(groups[0]["slugs"]), ["paos", "聚磷菌"])
+        self.assertEqual(groups[0]["confidence"], "candidate")
+
+    def test_no_llm_forces_preview_no_merges(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            _make_wiki(root)
+            with mock.patch.object(ds, "candidate_pairs",
+                                   lambda emb, *, threshold, embeddings=None: [("paos", "聚磷菌")]), \
+                 mock.patch.object(ds, "_embed_pages_bounded",
+                                   lambda emb_pages: {p["id"]: [1.0] for p in emb_pages}):
+                report = ds.run_phase2(root, _mock_llm(), apply=True,
+                                       today=FIXED_TODAY, no_llm=True)
+            self.assertEqual(len(report["groups"]), 1)
+            self.assertEqual(report["applied"], [])
+            # No mutations despite apply=True.
+            self.assertTrue((root / "wiki/entities/聚磷菌.md").exists())
+
+    def test_main_rejects_no_llm_without_candidate_source(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            _make_wiki(root)
+            rc = ds.main(["--project", str(root), "--dry-run", "--no-llm",
+                          "--no-embedding-prefilter"])
+            self.assertEqual(rc, 2)
 
 
 if __name__ == "__main__":

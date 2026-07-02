@@ -6,8 +6,13 @@ stage_3_1_write_wiki_file:
      prefix against batch ∪ on-disk universe, drop unresolvable with a warn).
   2. Bare body wikilinks [[foo]] → prefixed when uniquely resolvable;
      ambiguous/missing left as-is + warned (never de-linked automatically).
+     Exception (fix 2026-07-02): the exact concepts/+entities/ twin pair
+     resolves to concepts/ — in body links AND related:.
   3. H1 heading lines: embedded wikilinks stripped to plain text.
   4. Self-links (own slug in body or related) de-linked/removed.
+  5. D4 backstop (fix 2026-07-02): bare figure/table refs (图X.X / 表X.X /
+     Fig X-X / Table X-X) wrapped as [[<source-page>|据<ref>]] — idempotent,
+     skips headings/code/math/existing links and the source page itself.
 
 Also locks in: already-clean pages pass through byte-identical, and every fix
 prints a loud per-page [normalize] line (never silent).
@@ -38,13 +43,16 @@ from _stage_3_write import (  # noqa: E402
 SLUG_DIRS: dict[str, set[str]] = {
     "matched-filter": {"concepts"},
     "bell-labs": {"entities"},
-    "both-ways": {"concepts", "entities"},          # ambiguous stem
+    "both-ways": {"concepts", "entities"},          # twin pair → concepts/ wins
+    "tri-ways": {"concepts", "entities", "sources/Book"},  # truly ambiguous
+    "dup-doc": {"sources/A", "sources/B"},          # truly ambiguous (2 sources)
     "radar-handbook": {"sources/Book"},
     "pulse-compression": {"concepts"},              # "own page" in most tests
     "marcum": {"entities"},
 }
 
 OWN = "concepts/pulse-compression.md"
+SOURCE_SLUG = "sources/Book/雷达系统分析与建模 - 2007 - Barton"
 
 
 def _page(related_line: str = 'related: []', body: str = "\n# Title\n\nBody.\n") -> str:
@@ -98,11 +106,12 @@ class TestRelatedNormalization(unittest.TestCase):
         self.assertIn('related: ["concepts/matched-filter"]', out)
 
     def test_ambiguous_stem_kept_bare_with_warn(self):
-        content = _page('related: ["both-ways"]')
+        # 3-way ambiguity (NOT the concepts+entities pair) — don't guess.
+        content = _page('related: ["tri-ways"]')
         out, printed = _run(OWN, content)
-        self.assertIn('related: ["both-ways"]', out)
+        self.assertIn('related: ["tri-ways"]', out)
         self.assertIn("ambiguous", printed)
-        self.assertIn("both-ways", printed)
+        self.assertIn("tri-ways", printed)
 
     def test_duplicates_collapse_after_normalization(self):
         content = _page('related: ["matched-filter", "concepts/matched-filter", "[[matched-filter]]"]')
@@ -173,11 +182,12 @@ class TestBodyWikilinks(unittest.TestCase):
         self.assertIn("[[concepts/matched-filter#定义]]", out)
 
     def test_ambiguous_left_as_is_with_warn(self):
-        content = _page(body="\n# Title\n\nSee [[both-ways]].\n")
+        # 3-way ambiguity (NOT the concepts+entities pair) — don't guess.
+        content = _page(body="\n# Title\n\nSee [[tri-ways]].\n")
         out, printed = _run(OWN, content)
-        self.assertIn("[[both-ways]]", out)  # NOT de-linked, NOT prefixed
+        self.assertIn("[[tri-ways]]", out)  # NOT de-linked, NOT prefixed
         self.assertIn("left as-is", printed)
-        self.assertIn("[[both-ways]]", printed)
+        self.assertIn("[[tri-ways]]", printed)
 
     def test_missing_left_as_is_with_warn(self):
         content = _page(body="\n# Title\n\nSee [[no-such-page]].\n")
@@ -237,6 +247,132 @@ class TestSelfLinks(unittest.TestCase):
         content = _page(body="\n# Title\n\nSee [[concepts/marcum]].\n")
         out, _ = _run("entities/marcum.md", content, slug_dirs)
         self.assertIn("[[concepts/marcum]]", out)
+
+
+class TestSameStemTwinPolicy(unittest.TestCase):
+    """concepts/+entities/ twin pair resolves to concepts/ (fix 2026-07-02)."""
+
+    def test_related_twin_pair_resolves_to_concepts(self):
+        content = _page('related: ["both-ways"]')
+        out, printed = _run(OWN, content)
+        self.assertIn('related: ["concepts/both-ways"]', out)
+        self.assertIn("resolved 1 same-stem ambiguity → concepts/", printed)
+        self.assertNotIn("ambiguous, kept bare", printed)
+
+    def test_body_twin_pair_resolves_to_concepts(self):
+        content = _page(body="\n# Title\n\nSee [[both-ways]].\n")
+        out, printed = _run(OWN, content)
+        self.assertIn("[[concepts/both-ways]]", out)
+        self.assertIn("resolved 1 same-stem ambiguity → concepts/", printed)
+        self.assertNotIn("left as-is", printed)
+
+    def test_body_twin_alias_and_anchor_preserved(self):
+        content = _page(body="\n# Title\n\n见 [[both-ways#用法|时基电路]]。\n")
+        out, _ = _run(OWN, content)
+        self.assertIn("[[concepts/both-ways#用法|时基电路]]", out)
+
+    def test_twin_resolution_then_self_link_removed(self):
+        # concepts/both-ways listing bare "both-ways" resolves to itself.
+        content = _page('related: ["both-ways", "entities/bell-labs"]')
+        out, printed = _run("concepts/both-ways.md", content)
+        self.assertIn('related: ["entities/bell-labs"]', out)
+        self.assertIn("self-link", printed)
+
+    def test_two_sources_pair_is_true_ambiguity(self):
+        # ≥2 dirs that are NOT the concepts+entities pair keep the old policy.
+        content = _page('related: ["dup-doc"]', body="\n# Title\n\nSee [[dup-doc]].\n")
+        out, printed = _run(OWN, content)
+        self.assertIn('related: ["dup-doc"]', out)
+        self.assertIn("[[dup-doc]]", out)
+        self.assertIn("ambiguous, kept bare", printed)
+        self.assertIn("left as-is", printed)
+
+
+class TestFigureRefWrapping(unittest.TestCase):
+    """D4 backstop: bare 图/表/Fig/Table refs → [[<source-page>|据<ref>]]."""
+
+    def _run_fig(self, content, rel_path=OWN, slug=SOURCE_SLUG):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            out = stage_3_1_normalize_page_links(
+                rel_path, content, SLUG_DIRS, source_page_slug=slug)
+        return out, buf.getvalue()
+
+    def test_chinese_figure_ref_wrapped(self):
+        content = _page(body="\n# Title\n\n如图9.1所示，脉压比可达 30 dB。\n")
+        out, printed = self._run_fig(content)
+        self.assertIn(f"如[[{SOURCE_SLUG}|据图9.1]]所示", out)
+        self.assertIn("wrapped 1 figure/table ref(s)", printed)
+
+    def test_table_fig_and_table_variants_wrapped(self):
+        content = _page(body="\n# Title\n\n见表2.6；参 Fig. 3-1 与 Table 4-2。\n")
+        out, printed = self._run_fig(content)
+        self.assertIn(f"[[{SOURCE_SLUG}|据表2.6]]", out)
+        self.assertIn(f"[[{SOURCE_SLUG}|据Fig. 3-1]]", out)
+        self.assertIn(f"[[{SOURCE_SLUG}|据Table 4-2]]", out)
+        self.assertIn("wrapped 3 figure/table ref(s)", printed)
+
+    def test_fullwidth_dot_and_hyphen_separators(self):
+        content = _page(body="\n# Title\n\n对比图2．6 与图3-1。\n")
+        out, _ = self._run_fig(content)
+        self.assertIn(f"[[{SOURCE_SLUG}|据图2．6]]", out)
+        self.assertIn(f"[[{SOURCE_SLUG}|据图3-1]]", out)
+
+    def test_idempotent_second_pass_no_change(self):
+        content = _page(body="\n# Title\n\n如图9.1所示，另见表2.6。\n")
+        once, _ = self._run_fig(content)
+        twice, printed = self._run_fig(once)
+        self.assertEqual(twice, once)
+        self.assertEqual(printed, "")
+
+    def test_ref_inside_existing_wikilink_untouched(self):
+        content = _page(body="\n# Title\n\n[[concepts/matched-filter|见图2.6详解]]。\n")
+        out, printed = self._run_fig(content)
+        self.assertIn("[[concepts/matched-filter|见图2.6详解]]", out)
+        self.assertEqual(printed, "")
+
+    def test_headings_excluded(self):
+        content = _page(body="\n# Title\n\n## 图3.1 的讨论\n\n### 表2.6 数据\n")
+        out, printed = self._run_fig(content)
+        self.assertIn("## 图3.1 的讨论", out)
+        self.assertIn("### 表2.6 数据", out)
+        self.assertEqual(printed, "")
+
+    def test_code_and_math_spans_excluded(self):
+        content = _page(body=(
+            "\n# Title\n\n代码 `plot(图3.1)` 与公式 $图3.2$ 不动。\n"
+            "```\n图4.1 在代码块里\n```\n"))
+        out, printed = self._run_fig(content)
+        self.assertIn("`plot(图3.1)`", out)
+        self.assertIn("$图3.2$", out)
+        self.assertIn("图4.1 在代码块里", out)
+        self.assertEqual(printed, "")
+
+    def test_markdown_image_path_untouched(self):
+        content = _page(body="\n# Title\n\n![标注](media/图3-1.png)\n")
+        out, printed = self._run_fig(content)
+        self.assertIn("![标注](media/图3-1.png)", out)
+        self.assertEqual(printed, "")
+
+    def test_source_page_itself_excluded(self):
+        content = _page(body="\n# Title\n\n如图9.1所示。\n")
+        out, printed = self._run_fig(content, rel_path=f"{SOURCE_SLUG}.md")
+        self.assertIn("如图9.1所示。", out)
+        self.assertNotIn("据图", out)
+        self.assertEqual(printed, "")
+
+    def test_no_slug_param_no_wrap(self):
+        content = _page(body="\n# Title\n\n如图9.1所示。\n")
+        out, printed = _run(OWN, content)  # source_page_slug omitted
+        self.assertIn("如图9.1所示。", out)
+        self.assertEqual(printed, "")
+
+    def test_frontmatter_untouched(self):
+        content = _page('related: []', body="\n# Title\n\n见图1.2。\n").replace(
+            'title: "Pulse Compression"', 'title: "图1.1 解析"')
+        out, _ = self._run_fig(content)
+        self.assertIn('title: "图1.1 解析"', out)  # frontmatter ref not wrapped
+        self.assertIn(f"[[{SOURCE_SLUG}|据图1.2]]", out)
 
 
 class TestPassThrough(unittest.TestCase):
