@@ -15,7 +15,7 @@ from pathlib import Path
 _script_dir = Path(__file__).resolve().parent
 if str(_script_dir) not in sys.path:
     sys.path.insert(0, str(_script_dir))
-from _paths import atomic_write
+from _paths import atomic_write, WIKI_ARTIFACT_DIRS
 from _core import (
     Config,
     heartbeat as _heartbeat, file_tag as _file_tag,
@@ -27,11 +27,13 @@ from _core import (
     source_slug_from_raw_path, schema_route_dir,
 )
 from _llm_api import call_anthropic_protocol
-from _frontmatter_array import parse_frontmatter_array
+from _frontmatter_array import parse_frontmatter_array, write_frontmatter_array
 
 __all__ = [
-    "stage_3_1_write_wiki_file",  # Stage 3.1
-    "stage_3_5_aggregate_repair", # Stage 3.5
+    "stage_3_1_write_wiki_file",       # Stage 3.1
+    "stage_3_1_build_slug_dirs",       # Stage 3.1 link normalizer (universe)
+    "stage_3_1_normalize_page_links",  # Stage 3.1 link normalizer (per page)
+    "stage_3_5_aggregate_repair",      # Stage 3.5
 ]
 
 # Per-side cap on body text shown to the LLM page-merge prompt. Was a hardcoded
@@ -86,7 +88,8 @@ def _stage_3_1_make_cjk_slug(title: str) -> str:
     return slug if slug else ""
 
 
-def _stage_3_1_auto_correct_wiki_path(rel_path: str, content: str, config: Config | None = None) -> str | None:
+def _stage_3_1_auto_correct_wiki_path(rel_path: str, content: str, config: Config | None = None,
+                                      quiet: bool = False) -> str | None:
     """Auto-correct malformed wiki paths from LLM output.
 
     LLM sometimes outputs:
@@ -121,7 +124,8 @@ def _stage_3_1_auto_correct_wiki_path(rel_path: str, content: str, config: Confi
     if fm_title and _stage_3_1_contains_cjk(fm_title) and not _stage_3_1_contains_cjk(slug):
         cjk_slug = _stage_3_1_make_cjk_slug(fm_title)
         if cjk_slug and _stage_3_1_contains_cjk(cjk_slug):
-            print(f"  ⚠️  [cjk] Slug '{slug}' → '{cjk_slug}' (CJK title detected)")
+            if not quiet:
+                print(f"  ⚠️  [cjk] Slug '{slug}' → '{cjk_slug}' (CJK title detected)")
             slug = cjk_slug
 
     # Case: bare filename (no path prefix) — LLM forgot wiki/concepts/ prefix
@@ -428,6 +432,252 @@ def _stage_3_1_stamp_frontmatter_dates(content: str, today: str) -> str:
     if not has_updated:
         new_lines.append(f"updated: {today}")
     return "---\n" + "\n".join(new_lines) + "\n---" + body
+
+
+# ---------- Stage 3.1 write-time link normalizer (audit 2026-07-02, A5/M6) ----------
+# The generation prompts state link-format rules (related as prefixed bare
+# slugs, STRICT [[dir/slug]] body links, no self-links) but nothing enforced
+# them in code — three format diseases spread across page types (audit M6).
+# This is the code backstop: ONE normalization pass applied to every
+# non-listing FILE block right before stage_3_1_write_wiki_file. Loud
+# per-page prints, never silent.
+
+_WIKILINK_RE = re.compile(r"\[\[([^\[\]]+)\]\]")
+_H1_LINE_RE = re.compile(r"^#[ \t]")
+_ANCHOR_STEMS = {"index", "log", "overview", "schema"}
+_LISTING_BASENAMES = {"index.md", "log.md", "overview.md", "schema.md"}
+_WARN_LIST_CAP = 6  # max offending entries shown per warn line
+
+
+def _stage_3_1_normalize_link_target(raw: str) -> str:
+    """Reduce one link target to a bare (possibly dir-prefixed) slug.
+
+    Strips ``[[..]]`` wrapping (incl. stray single brackets — a
+    ``related: [[concepts/foo]]`` line parses to ``[concepts/foo]``),
+    ``|alias`` and ``#anchor`` parts, a leading ``wiki/`` prefix, and a
+    trailing ``.md`` suffix. Quotes are already stripped by
+    parse_frontmatter_array for related entries. Slugs never contain
+    brackets, so the bracket strip is lossless."""
+    t = raw.strip().strip("[]").strip()
+    t = t.split("|")[0].split("#")[0].strip()
+    if t.startswith("wiki/"):
+        t = t[len("wiki/"):]
+    if t.endswith(".md"):
+        t = t[:-3]
+    return t.strip().strip("/")
+
+
+def _stage_3_1_scan_wiki_slug_dirs(config: Config) -> dict[str, set[str]]:
+    """stem → {wiki_dir-relative parent dir} for every knowledge page on disk.
+
+    Mirrors list_existing_slugs' exclusions (artifact dirs, ``_``-prefixed
+    stems, aggregate anchors) but keeps the parent dir — the normalizer needs
+    to know WHICH folder a stem lives in, not just that it exists."""
+    out: dict[str, set[str]] = {}
+    if not config.wiki_dir.exists():
+        return out
+    for f in config.wiki_dir.rglob("*.md"):
+        if WIKI_ARTIFACT_DIRS.intersection(f.parts):
+            continue
+        stem = f.stem
+        if stem.startswith("_") or stem in _ANCHOR_STEMS:
+            continue
+        if f.parent == config.wiki_dir:
+            continue  # root-level files are anchors/system pages, not link targets
+        rel_dir = f.parent.relative_to(config.wiki_dir).as_posix()
+        out.setdefault(stem, set()).add(rel_dir)
+    return out
+
+
+def stage_3_1_build_slug_dirs(
+    file_blocks: list[tuple[str, str]],
+    config: Config,
+    valid_subdirs: set[str],
+    routing: dict[str, str],
+) -> dict[str, set[str]]:
+    """Slug→dirs universe for the link normalizer: this batch ∪ on-disk wiki.
+
+    Batch blocks are mapped through the SAME path-resolution chain the write
+    loop applies (top-dir accept-list → auto-correct → ``.md`` suffix → schema
+    route) so a block's universe entry matches where the loop will actually
+    write it. Built once per book, before the write loop."""
+    slug_dirs = _stage_3_1_scan_wiki_slug_dirs(config)
+    for rel_path, content in file_blocks:
+        if ".." in rel_path or rel_path.startswith("/"):
+            continue
+        if not is_safe_ingest_path(rel_path):
+            continue
+        if Path(rel_path).name in _LISTING_BASENAMES:
+            continue
+        top_dir = rel_path.split("/")[0] if "/" in rel_path else ""
+        if top_dir not in valid_subdirs:
+            corrected = _stage_3_1_auto_correct_wiki_path(rel_path, content, quiet=True)
+            if not corrected:
+                continue
+            rel_path = corrected
+        if not rel_path.endswith(".md"):
+            rel_path += ".md"
+        rel_path = _stage_3_1_schema_route(rel_path, content, routing)
+        if "/" not in rel_path:
+            continue
+        rel_dir, name = rel_path.rsplit("/", 1)
+        slug_dirs.setdefault(name[:-3], set()).add(rel_dir)
+    return slug_dirs
+
+
+def stage_3_1_normalize_page_links(
+    rel_path: str, content: str, slug_dirs: dict[str, set[str]],
+) -> str:
+    """A5 write-time link normalizer — one pass over a FILE block before write.
+
+    Rules (audit M6 → fix A5):
+      1. ``related:`` entries → prefixed bare slugs (``concepts/foo``): strips
+         ``[[..]]`` wrapping / quotes / aliases / ``.md``; resolves the prefix
+         by checking which dir the stem exists in (slug_dirs = batch ∪ disk);
+         drops entries that resolve nowhere; collapses duplicates.
+      2. Bare body wikilinks ``[[foo]]``: prefixed when the stem resolves to
+         exactly ONE dir; ambiguous/missing are left as-is but warned — never
+         de-linked automatically.
+      3. H1 heading lines: embedded wikilinks stripped to plain text.
+      4. Self-links (own slug in body or related) de-linked/removed.
+
+    Ambiguous related stems (≥2 dirs, claimed prefix wrong or absent) are kept
+    as the BARE stem + warned — usually a dedup failure (H1) where guessing a
+    dir would pick the wrong twin; the entry becomes valid once the twins merge.
+
+    Already-clean pages pass through byte-identical. All fixes print loud
+    per-page ``[normalize]`` lines — never silent."""
+    content = _stage_3_1_sanitize_ingested_content(content)
+    norm_rel = rel_path[len("wiki/"):] if rel_path.startswith("wiki/") else rel_path
+    own_prefixed = norm_rel[:-3] if norm_rel.endswith(".md") else norm_rel
+    own_stem = own_prefixed.rsplit("/", 1)[-1]
+
+    def _warn(msg: str) -> None:
+        print(f"  [normalize] {norm_rel}: {msg}")
+
+    def _fmt_list(items: list[str]) -> str:
+        shown = ", ".join(items[:_WARN_LIST_CAP])
+        extra = len(items) - _WARN_LIST_CAP
+        return shown + (f" (+{extra} more)" if extra > 0 else "")
+
+    # ── Rule 1 + 4a: related → prefixed bare slugs ──
+    has_fm = content.startswith("---") and content.find("\n---", 3) != -1
+    fm_end = content.find("\n---", 3) if has_fm else -1
+    fm_text = content[4:fm_end] if has_fm else ""
+    if has_fm and re.search(r"^related\s*:", fm_text, re.MULTILINE):
+        orig_entries = parse_frontmatter_array(content, "related")
+        kept: list[str] = []
+        dropped: list[str] = []
+        ambiguous: list[str] = []
+        self_removed: list[str] = []
+        seen: set[str] = set()
+        for entry in orig_entries:
+            t = _stage_3_1_normalize_link_target(entry)
+            if not t:
+                dropped.append(entry)
+                continue
+            claimed_dir, stem = t.rsplit("/", 1) if "/" in t else ("", t)
+            dirs = slug_dirs.get(stem)
+            if not dirs:
+                dropped.append(entry)
+                continue
+            is_ambiguous = False
+            if claimed_dir and claimed_dir in dirs:
+                resolved = t
+            elif len(dirs) == 1:
+                resolved = f"{next(iter(dirs))}/{stem}"
+            else:
+                is_ambiguous = True  # ≥2 dirs, no (valid) claimed prefix — don't guess
+                resolved = stem
+            if resolved in (own_prefixed, own_stem):
+                self_removed.append(entry)
+                continue
+            if is_ambiguous:
+                ambiguous.append(entry)
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            kept.append(resolved)
+        if dropped:
+            _warn(f"related: dropped {len(dropped)} unresolvable — {_fmt_list(dropped)}")
+        if self_removed:
+            _warn(f"related: removed {len(self_removed)} self-link(s) — {_fmt_list(self_removed)}")
+        if ambiguous:
+            _warn(f"related: ⚠️ {len(ambiguous)} ambiguous, kept bare — {_fmt_list(ambiguous)}")
+        if kept != orig_entries:
+            if not (dropped or self_removed or ambiguous):
+                _warn(f"related: normalized {len(kept)} entry(ies) to prefixed bare slugs")
+            content = write_frontmatter_array(content, "related", kept)
+            has_fm = content.startswith("---") and content.find("\n---", 3) != -1
+            fm_end = content.find("\n---", 3) if has_fm else -1
+
+    # ── Rules 2 + 3 + 4b: body wikilinks ──
+    body_start = fm_end + 4 if has_fm else 0
+    head, body = content[:body_start], content[body_start:]
+    counts = {"h1": 0, "self": 0, "prefixed": 0}
+    unresolved: list[str] = []
+    changed = False
+
+    def _display_text(inner: str) -> str:
+        target, _, alias = inner.partition("|")
+        if alias.strip():
+            return alias.strip()
+        t = _stage_3_1_normalize_link_target(target)
+        return t.rsplit("/", 1)[-1] if t else target.strip()
+
+    def _delink_h1(m: re.Match) -> str:
+        nonlocal changed
+        counts["h1"] += 1
+        changed = True
+        return _display_text(m.group(1))
+
+    def _fix_link(m: re.Match) -> str:
+        nonlocal changed
+        inner = m.group(1)
+        target, _, alias = inner.partition("|")
+        alias = alias.strip()
+        anchor = target.split("#", 1)[1].strip() if "#" in target else ""
+        t = _stage_3_1_normalize_link_target(target)
+        if not t:
+            return m.group(0)
+        if t in (own_prefixed, own_stem):
+            counts["self"] += 1
+            changed = True
+            return _display_text(inner)
+        if "/" in t:
+            return m.group(0)  # already prefixed — leave as-is
+        dirs = slug_dirs.get(t)
+        if dirs and len(dirs) == 1:
+            counts["prefixed"] += 1
+            changed = True
+            d = next(iter(dirs))
+            rebuilt = f"{d}/{t}" + (f"#{anchor}" if anchor else "") + (f"|{alias}" if alias else "")
+            return f"[[{rebuilt}]]"
+        unresolved.append(m.group(0))  # missing or ambiguous — never de-link (rule 2)
+        return m.group(0)
+
+    new_lines: list[str] = []
+    for line in body.split("\n"):
+        if "[[" not in line:
+            new_lines.append(line)
+        elif _H1_LINE_RE.match(line):
+            new_lines.append(_WIKILINK_RE.sub(_delink_h1, line))
+        else:
+            new_lines.append(_WIKILINK_RE.sub(_fix_link, line))
+    if changed:
+        content = head + "\n".join(new_lines)
+
+    if counts["h1"]:
+        _warn(f"H1: de-linked {counts['h1']} embedded wikilink(s)")
+    if counts["self"]:
+        _warn(f"body: de-linked {counts['self']} self-link(s)")
+    if counts["prefixed"]:
+        _warn(f"body: prefixed {counts['prefixed']} bare wikilink(s)")
+    if unresolved:
+        uniq = list(dict.fromkeys(unresolved))
+        _warn(f"body: ⚠️ {len(unresolved)} bare wikilink(s) left as-is "
+              f"(unresolved/ambiguous) — {_fmt_list(uniq)}")
+    return content
 
 
 def stage_3_1_write_wiki_file(path: Path, content: str, config: Config | None = None, merge: bool = False) -> None:

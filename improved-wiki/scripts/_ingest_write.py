@@ -26,6 +26,8 @@ from _stage_3_write import (
     _stage_3_1_schema_route,
     _stage_3_1_canonicalize_sources_field,
     _stage_3_1_stamp_frontmatter_dates,
+    stage_3_1_build_slug_dirs,
+    stage_3_1_normalize_page_links,
     stage_3_1_write_wiki_file,
     stage_3_5_aggregate_repair,
 )
@@ -231,6 +233,12 @@ def _do_write(prepared: dict, verbose: bool = False) -> dict:
             files_written_paths, config.wiki_dir, _LISTING_PAGES)
     _write_blocks = [] if (write_phase_done or write_loop_done) else file_blocks
 
+    # A5 write-time link normalizer (audit 2026-07-02, M6): slug→dir universe
+    # = this batch ∪ on-disk wiki, built once per book. Empty on resume passes
+    # (the loop below is skipped, so the universe is unused).
+    _slug_dirs = (stage_3_1_build_slug_dirs(_write_blocks, config, _VALID_SUBDIRS, _routing)
+                  if _write_blocks else {})
+
     for rel_path, content in _write_blocks:
         if ".." in rel_path or rel_path.startswith("/"):
             continue
@@ -281,6 +289,13 @@ def _do_write(prepared: dict, verbose: bool = False) -> dict:
 
         content = _stage_3_1_canonicalize_sources_field(content, canonical_source)
         content = _stage_3_1_stamp_frontmatter_dates(content, today_str)
+
+        # A5 (audit M6): single write-time normalization pass — related →
+        # prefixed bare slugs (unresolvable dropped), bare body wikilinks
+        # prefixed when uniquely resolvable, H1 wikilinks de-linked,
+        # self-links removed. Loud per-page prints, never silent.
+        if basename not in _LISTING_PAGES:
+            content = stage_3_1_normalize_page_links(rel_path, content, _slug_dirs)
 
         full_path = config.wiki_dir / rel_path
         is_listing = basename in _LISTING_PAGES
