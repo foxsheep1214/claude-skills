@@ -12,7 +12,9 @@ def _stage_2_9_build_prompt_in_source(
     source_context: str = "",
 ) -> str:
     """Build prompt for Stage 2.9: in-source concept comparisons."""
-    concepts_with_desc = '\n'.join(f"- {c}" for c in concept_titles[:60])
+    # [:60] hid most of a large book's concepts from comparison candidates
+    # (alphabetical cut, 2026-07-02). Titles are cheap; 300 covers real books.
+    concepts_with_desc = '\n'.join(f"- {c}" for c in concept_titles[:300])
     today_str = time.strftime("%Y-%m-%d")
     try:
         raw_rel = str(file_path.relative_to(config.raw_root))

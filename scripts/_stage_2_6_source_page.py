@@ -233,8 +233,11 @@ Which wiki pages should be created or updated based on this source? What should 
     # this, the source page emitted [[concepts/system-concept]] etc. → broken
     # links, because the concept was skipped in Stage 2.4 and no such file exists.
     linkable = sorted(set(linkable_slugs or []))
-    if len(linkable) > 300:
-        linkable = linkable[:300]
+    # 300 cut the sorted list mid-alphabet (observed live 2026-07-02: entities/*
+    # never made it into a source-page prompt's Linkable list). 1500 covers the
+    # current wiki scale; slugs are ~30 chars each so this stays <50K chars.
+    if len(linkable) > 1500:
+        linkable = linkable[:1500]
     linkable_str = "\n".join(f"  - [[{s}]]" for s in linkable) if linkable else "(none — write concepts as plain text, do NOT invent [[wikilinks]])"
     linkable_rule = (
         "\n# Wikilink Rule — STRICT\n"

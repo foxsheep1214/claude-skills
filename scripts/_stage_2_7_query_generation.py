@@ -32,8 +32,12 @@ def _stage_2_7_build_prompt(
     else:
         source_section = ""
 
-    concepts_str = '\n'.join(f"- {c}" for c in concept_titles[:80])
-    entities_str = '\n'.join(f"- {e}" for e in entity_titles[:40])
+    # Generous caps (2026-07-02): [:80]/[:40] silently hid 20% of a mid-size
+    # book's generated pages from the related-link candidate lists (observed
+    # live: "101 declared, 80 listed"). Titles are ~30 chars each — even 600
+    # is <20K chars in the prompt.
+    concepts_str = '\n'.join(f"- {c}" for c in concept_titles[:600])
+    entities_str = '\n'.join(f"- {e}" for e in entity_titles[:300])
     claims_str = '\n'.join(
         f"- {c.get('claim', str(c))}" if isinstance(c, dict)
         else f"- {c}"
@@ -70,7 +74,7 @@ You are maintaining a Karpathy-pattern knowledge base wiki. You have just finish
 {claims_str if claims_str else '(none)'}
 
 # Existing Wiki Pages (avoid referencing non-existent pages)
-{', '.join(existing_slugs[:200])}
+{', '.join(existing_slugs)}
 
 # Task
 Identify **0-5 open questions** this book raises but does NOT fully answer.
