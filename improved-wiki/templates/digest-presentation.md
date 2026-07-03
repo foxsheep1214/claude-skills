@@ -107,8 +107,8 @@ File contents in order:
 ### Append: wiki/log.md
 
 # Constraints
-- Every `[[wikilink]]` MUST use the FULL filename stem (per improved-wiki §6.2)
-- Frontmatter must follow improved-wiki §5
+- Every `[[wikilink]]` MUST use the FULL filename stem (per `references/naming-conventions.md`)
+- Frontmatter must follow `references/naming-conventions.md`
 - The per-slide summary can be a markdown table (slide | type | content)
 - The key_claims are usually on the "conclusion" or "summary" slide
 - Skip "thank you" / "Q&A" / pure title slides in the per-slide summary
@@ -137,5 +137,5 @@ File contents in order:
 
 ## See also
 
-- `SKILL.md` §5, §6
+- `references/naming-conventions.md` — frontmatter schema + wikilink naming
 - `templates/digest-paper.md` — for the published version of the same talk (usually exists alongside)

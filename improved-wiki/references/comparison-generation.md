@@ -37,7 +37,7 @@
 | 书中显式做了对比的概念对 | 源中从未真正并置的无关概念堆砌 |
 | **系统性多方对比（3+ 方）**：源自身在多个维度互相 benchmark 的方案（如 Phased-Array vs MIMO vs Phased-MIMO，跨 SINR/beampattern/sidelobe）。「新方法 vs 既有方案」类论文的**题眼页**，不因 3 方以上而跳过 | |
 
-**至多生成 3 个对比页**（宁缺毋滥）。多方对比时表格加列、title/related/See Also 加项（A vs B vs C）。
+**至多生成 `min(8, 3 + 章节数//8)` 个对比页**（`_stage_2_9_comparison_cap`：基线 3，大部头随章节数放大至上限 8，避免 26 章手册与 5 章小册子同预算；宁缺毋滥）。多方对比时表格加列、title/related/See Also 加项（A vs B vs C）。
 
 ### 输出 schema
 

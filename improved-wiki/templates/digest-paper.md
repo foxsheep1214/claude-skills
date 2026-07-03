@@ -128,8 +128,8 @@ File contents in order:
 ### Append: wiki/log.md
 
 # Constraints
-- Every `[[wikilink]]` MUST use the FULL filename stem (per improved-wiki §6.2)
-- Frontmatter must follow improved-wiki §5
+- Every `[[wikilink]]` MUST use the FULL filename stem (per `references/naming-conventions.md`)
+- Frontmatter must follow `references/naming-conventions.md`
 - Do NOT invent content not in the source text
 - For math, use LaTeX with $...$ inline and $$...$$ display
 - Concept pages must add value beyond what existing wiki already says — don't re-derive things already in other papers
@@ -158,6 +158,6 @@ File contents in order:
 
 ## See also
 
-- `SKILL.md` §5, §6
+- `references/naming-conventions.md` — frontmatter schema + wikilink naming
 - `templates/digest-book.md` — for full-length books
 - `templates/digest-datasheet.md` — for component datasheets (different focus)

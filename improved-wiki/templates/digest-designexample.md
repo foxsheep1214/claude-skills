@@ -156,8 +156,8 @@ File contents in order:
 ### Append: wiki/log.md
 
 # Constraints
-- Every `[[wikilink]]` MUST use the FULL filename stem (per improved-wiki §6.2)
-- Frontmatter must follow improved-wiki §5
+- Every `[[wikilink]]` MUST use the FULL filename stem (per `references/naming-conventions.md`)
+- Frontmatter must follow `references/naming-conventions.md`
 - The specifications table must be accurate — these are engineering claims
 - For each key_component, cross-ref to its datasheet if the datasheet is in the wiki
 - Mark all measured_performance values as "from Fig X" or "from Section Y"
@@ -187,6 +187,6 @@ File contents in order:
 
 ## See also
 
-- `SKILL.md` §5, §6
+- `references/naming-conventions.md` — frontmatter schema + wikilink naming
 - `templates/digest-datasheet.md` — for each key_component's datasheet
 - `templates/digest-applicationnote.md` — for the design rationale of sub-circuits

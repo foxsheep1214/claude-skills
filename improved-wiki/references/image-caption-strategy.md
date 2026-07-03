@@ -121,7 +121,7 @@ captioned = _stage_1_3_caption_images_batch(images, config, media_dir, source_la
 
 | endpoint | 多图支持 | auth header | 适用 |
 |---|---|---|---|
-| `https://api.minimaxi.com/anthropic/v1/messages` | ✅ content blocks 数组（Anthropic 协议原生） | `Authorization: Bearer <key>` 或 `x-api-key: <key>`（均可） | **caption 调用（现行管线用此 endpoint，一图一调用）** |
+| `https://api.minimaxi.com/anthropic/v1/messages` | ✅ content blocks 数组（Anthropic 协议原生） | `x-api-key: <key>`（本管线实际用此 + `anthropic-version: 2023-06-01`；endpoint 两种 header 均接受） | **caption 调用（现行管线用此 endpoint，一图一调用）** |
 | `https://api.minimaxi.com/v1/coding_plan/vlm` | ❌ 单图（`image_url` 必须是单字符串） | `Authorization: Bearer <key>` | mmx CLI 内部用 |
 
 常见错配：`v1/coding_plan/vlm` + `image_url=[多图数组]` → 2013 invalid_params；

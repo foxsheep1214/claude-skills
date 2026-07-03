@@ -142,6 +142,6 @@ companion_documents:
 
 ## See also
 
-- `SKILL.md` §5, §6
+- `references/naming-conventions.md` — frontmatter schema + wikilink naming
 - `templates/digest-applicationnote.md` — vendor app notes (typical companion doc)
 - `templates/digest-designexample.md` — reference designs

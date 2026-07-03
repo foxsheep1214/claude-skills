@@ -135,8 +135,8 @@ File contents in order:
 ### Append: wiki/log.md
 
 # Constraints
-- Every `[[wikilink]]` MUST use the FULL filename stem (per improved-wiki §6.2)
-- Frontmatter must follow improved-wiki §5
+- Every `[[wikilink]]` MUST use the FULL filename stem (per `references/naming-conventions.md`)
+- Frontmatter must follow `references/naming-conventions.md`
 - The design_procedure is the most important part. Preserve the step structure verbatim
 - Use LaTeX for all formulas. Cite the page/section for each key_equation
 - The worked_example should be reproducible — keep all input parameters
@@ -165,6 +165,6 @@ File contents in order:
 
 ## See also
 
-- `SKILL.md` §5, §6
+- `references/naming-conventions.md` — frontmatter schema + wikilink naming
 - `templates/digest-datasheet.md` — the typical companion (datasheet of the part used)
 - `templates/digest-designexample.md` — the typical companion (reference design implementing the procedure)
