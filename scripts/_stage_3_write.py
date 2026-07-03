@@ -957,18 +957,27 @@ Output ONLY the complete new index.md. No commentary.
             _index_append_fallback()
 
     # overview.md — LLM rewrite with improved prompt (topic-synthesis, not
-    # source-dump) + structural validation + failure fallback + compress mode.
-    # NashSU aggregate-repair parity. Unlike the old version: creates overview
-    # on first ingest (no longer skips when absent), validates the 5 required
-    # sections, and keeps the current overview on any failure (no silent stall).
+    # source-dump) + failure fallback. True NashSU aggregate-repair parity
+    # (2026-07-03 correction): NashSU's own spec for overview.md is just "a
+    # comprehensive 2-5 paragraph overview of ALL topics" (ingest.ts
+    # buildGenerationPrompt / buildAggregateRepairPrompt) — it has no
+    # Strong/Weak Claims or Open Questions sections (grep confirms zero
+    # matches in NashSU source) and no forced-compress retry. NashSU's own
+    # size handling is isAggregateRepairSafe: a PRE-check that SKIPS the
+    # repair entirely (leaving the file untouched, just a warning) when
+    # already over cap, rather than asking the LLM to compress it. The
+    # earlier compress-mode design here (5 required sections + forced
+    # tighter-rewrite retry) was an original addition, not NashSU parity —
+    # aligned back to NashSU's simpler skip-if-unsafe behavior below.
     overview_path = config.wiki_dir / "overview.md"
     current_overview = overview_path.read_text(encoding="utf-8") if overview_path.exists() else ""
-    _AGGREGATE_CAP = max(4096, int(config.source_budget * 0.12))
-    OVERVIEW_MAX_CHARS = min(24000, _AGGREGATE_CAP)
-    compress_mode = bool(current_overview) and len(current_overview) > OVERVIEW_MAX_CHARS
-    if compress_mode:
+    # NashSU aggregateRepairSectionCap: proportional to context budget only,
+    # no hard ceiling.
+    OVERVIEW_MAX_CHARS = max(4096, int(config.source_budget * 0.12))
+    if current_overview and len(current_overview) > OVERVIEW_MAX_CHARS:
         print(f"[stage 3.5] Overview too large ({len(current_overview)} > {OVERVIEW_MAX_CHARS}) — "
-              f"compress mode")
+              f"skipping repair (NashSU isAggregateRepairSafe parity), leaving current overview untouched")
+        return files_written
 
     source_content = source_path.read_text(encoding="utf-8") if source_path.exists() else ""
     sources_lines: list[str] = []
@@ -983,33 +992,21 @@ Output ONLY the complete new index.md. No commentary.
                 body = text
             sources_lines.append(f"### {f.stem}\n{body[:800]}")
 
-    required_sections = ["## Where we are", "## Strong Claims", "## Weak Claims",
-                         "## Open Questions", "## Sources"]
-    if compress_mode:
-        size_directive = (
-            f"The current overview has bloated to {len(current_overview)} chars. Produce a "
-            f"TIGHTER rewrite (≤ {OVERVIEW_MAX_CHARS} chars). Compress ## Where we are by "
-            f"synthesizing topics in common — do NOT enumerate every source. Keep all "
-            f"Strong/Weak Claims and Open Questions intact.")
-    else:
-        size_directive = (
-            "Keep ## Where we are concise: 2-5 paragraphs synthesizing topics in common "
-            "across sources, not a per-source walkthrough.")
-
     prompt = f"""You maintain the overview of a knowledge-base wiki. Below is the
 CURRENT overview.md, followed by the newly ingested source page and recent
 source pages for context. Rewrite the COMPLETE overview.md to incorporate the
 new source.
 
 CRITICAL — avoid source-listing dumps:
-- ## Where we are must SYNTHESIZE by knowledge area / topic, NOT enumerate books.
-  Group sources under shared themes; cite a source inline only when it anchors a
-  specific claim. Do NOT write "本次最新重新摄入…" source-inventory paragraphs or
+- Synthesize by knowledge area / topic, NOT enumerate books. Group sources
+  under shared themes; cite a source inline only when it anchors a specific
+  claim. Do NOT write "本次最新重新摄入…" source-inventory paragraphs or
   back-to-back book-by-book summaries.
 - Each paragraph = one theme (e.g. power electronics, high-speed design, RF),
   covering what the wiki knows, key tensions, and gaps — not which books were read.
 
-{size_directive}
+Keep the overview concise: 2-5 paragraphs synthesizing topics in common across
+sources, not a per-source walkthrough.
 
 # Current overview.md
 {current_overview or "(empty)"}
@@ -1021,15 +1018,9 @@ CRITICAL — avoid source-listing dumps:
 {chr(10).join(sources_lines[:8])}
 
 # Task
-Output ONLY the new overview.md (starting with "# Overview"). Preserve structure:
-- ## Where we are (2-5 paragraph topic-synthesized overview of ALL topics)
-- ## Strong Claims (well-supported by multiple sources)
-- ## Weak Claims (single-source or speculative)
-- ## Open Questions
-- ## Sources (keep existing source links, add the new one as `- [[<stem>]]`)
-
-Do NOT remove or weaken existing Strong/Weak Claims or Open Questions unless the
-new source directly contradicts or answers them.
+Output ONLY the new overview.md (starting with "# Overview"): a comprehensive
+2-5 paragraph overview of ALL topics in the wiki, updated to reflect the newly
+ingested source — not just the new source.
 """
     try:
         response, stop_reason = call_anthropic_protocol(prompt, config, max_tokens=4096)
@@ -1037,11 +1028,7 @@ new source directly contradicts or answers them.
             print("[stage 3.5] Overview LLM response contained FILE blocks — keeping current")
         else:
             body = response.strip()
-            body_lower = body.lower()
-            missing = [s for s in required_sections if s.lower() not in body_lower]
-            if missing:
-                print(f"[stage 3.5] Overview LLM response missing sections {missing} — keeping current")
-            elif not body.startswith("#"):
+            if not body.startswith("#"):
                 print("[stage 3.5] Overview LLM response did not start with '#' — keeping current")
             else:
                 stage_3_1_write_wiki_file(overview_path, body + "\n", config)
