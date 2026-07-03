@@ -28,6 +28,7 @@ from _core import (
 )
 from _llm_api import call_anthropic_protocol
 from _frontmatter_array import parse_frontmatter_array, write_frontmatter_array
+from _stage_1_1_scanned import _decode_html_entities
 
 __all__ = [
     "stage_3_1_write_wiki_file",       # Stage 3.1
@@ -249,9 +250,18 @@ def _stage_3_1_sanitize_ingested_content(content: str) -> str:
     Delegates to _ingest_sanitize for the full 4-pattern port: outer ```yaml
     fence strip, ``frontmatter:`` prefix strip, missing opening fence repair,
     and wikilink-list-in-frontmatter repair. See _ingest_sanitize.py.
+
+    Also decodes stray HTML entities (2026-07-04, NOT NashSU parity — NashSU
+    only ever runs decodeHtmlEntities on HTML-table-cell text during OCR
+    conversion, never on LLM-generated page content). Observed pattern: an LLM
+    occasionally writes an inequality/symbol as a literal entity instead of
+    the real character (e.g. "q&lt;3.15 kW/m^2") when drafting a generated
+    page — this repairs it at write time regardless of which stage or which
+    calling agent produced the content.
     """
     from _ingest_sanitize import sanitize_ingested_file_content
-    return sanitize_ingested_file_content(content)
+    content = sanitize_ingested_file_content(content)
+    return _decode_html_entities(content)
 
 
 def _stage_3_1_backup_existing_page(path: Path, config: Config) -> None:

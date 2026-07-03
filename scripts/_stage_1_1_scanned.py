@@ -125,9 +125,37 @@ _HTMLTAB_ALT_RE = re.compile(r"\balt=([\"'])([^\"']*)\1", re.I)
 _HTMLTAB_FENCE_RE = re.compile(r"(```.*?```|~~~.*?~~~)", re.S)
 
 
+# Named entities beyond NashSU's original 6 (nbsp/amp/lt/gt/quot/#39). NashSU's
+# decodeHtmlEntities (mineru.ts) only ever covers these 6 and is only ever
+# applied to HTML-table-cell text during OCR-to-markdown conversion — it is
+# NOT NashSU parity to extend the list or the call sites below; this is an
+# original addition (2026-07-04) after observing engineering-textbook content
+# where an LLM writes an inequality/symbol as a literal HTML entity (e.g.
+# "q&lt;3.15 kW/m^2", "L/W&gt;1.0") instead of the real character. Covers
+# entities plausible in engineering/math prose: typographic punctuation,
+# common math/unit symbols, and the Greek letters routinely used as symbols.
+_EXTRA_NAMED_ENTITIES: dict[str, str] = {
+    "mdash": "—", "ndash": "–", "hellip": "…", "deg": "°",
+    "plusmn": "±", "times": "×", "divide": "÷", "micro": "µ",
+    "middot": "·", "sect": "§", "para": "¶", "copy": "©", "reg": "®",
+    "trade": "™", "infin": "∞", "sum": "∑", "radic": "√", "part": "∂",
+    "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε",
+    "zeta": "ζ", "eta": "η", "theta": "θ", "iota": "ι", "kappa": "κ",
+    "lambda": "λ", "mu": "μ", "nu": "ν", "xi": "ξ", "omicron": "ο",
+    "pi": "π", "rho": "ρ", "sigma": "σ", "tau": "τ", "upsilon": "υ",
+    "phi": "φ", "chi": "χ", "psi": "ψ", "omega": "ω",
+    "Alpha": "Α", "Beta": "Β", "Gamma": "Γ", "Delta": "Δ", "Epsilon": "Ε",
+    "Zeta": "Ζ", "Eta": "Η", "Theta": "Θ", "Iota": "Ι", "Kappa": "Κ",
+    "Lambda": "Λ", "Mu": "Μ", "Nu": "Ν", "Xi": "Ξ", "Omicron": "Ο",
+    "Pi": "Π", "Rho": "Ρ", "Sigma": "Σ", "Tau": "Τ", "Upsilon": "Υ",
+    "Phi": "Φ", "Chi": "Χ", "Psi": "Ψ", "Omega": "Ω",
+}
+
+
 def _decode_html_entities(text: str) -> str:
-    """Port of NashSU decodeHtmlEntities: decode common named entities plus
-    numeric/hex refs, leaving out-of-range refs untouched."""
+    """Port of NashSU decodeHtmlEntities (nbsp/amp/lt/gt/quot/#39 + numeric/hex
+    refs, leaving out-of-range refs untouched), extended with
+    _EXTRA_NAMED_ENTITIES (see comment above — not NashSU parity)."""
     def _safe_codepoint(raw: str, radix: int) -> str:
         fallback = f"&#x{raw};" if radix == 16 else f"&#{raw};"
         try:
@@ -147,6 +175,8 @@ def _decode_html_entities(text: str) -> str:
     text = re.sub(r"&gt;", ">", text, flags=re.I)
     text = re.sub(r"&quot;", '"', text, flags=re.I)
     text = text.replace("&#39;", "'")
+    for name, char in _EXTRA_NAMED_ENTITIES.items():
+        text = text.replace(f"&{name};", char)
     text = re.sub(r"&#(\d+);", lambda m: _safe_codepoint(m.group(1), 10), text)
     text = re.sub(r"&#x([0-9a-f]+);", lambda m: _safe_codepoint(m.group(1), 16),
                   text, flags=re.I)
