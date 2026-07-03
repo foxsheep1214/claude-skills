@@ -1,7 +1,7 @@
 # digest-news.md — Ingest template for web clips and news articles
 
 > **Use this template** when a file lives at `raw/News/<...>/*.md` (or `.pdf` for archived articles).
-> News and web clips are short-lived, low-effort. Output should be 1 source page + 0-2 concept pages. Mark `status: outdated` after 6 months via a periodic Lint pass.
+> News and web clips are short-lived, low-effort. Output should be 1 source page + 0-2 concept pages. (Auto-marking `status: outdated` after 6 months is a **planned** Lint pass — **not yet implemented**; see below.)
 
 ---
 
@@ -101,10 +101,10 @@ File contents in order:
 ### Append: wiki/log.md
 
 # Constraints
-- Every `[[wikilink]]` MUST use the FULL filename stem (per improved-wiki §6.2)
-- Frontmatter must follow improved-wiki §5
+- Every `[[wikilink]]` MUST use the FULL filename stem (per `references/naming-conventions.md`)
+- Frontmatter must follow `references/naming-conventions.md`
 - Quote the source for key_facts (use the original article's wording, not paraphrased)
-- Don't add a `status: outdated` field manually. Lint will mark it automatically after 6 months
+- Don't hand-set a `status: outdated` field. Auto-marking is **not yet implemented** (a planned Lint pass — see below); leave `status` unset
 - The source page should be short (1 page max). News doesn't deserve more
 ```
 
@@ -112,21 +112,26 @@ File contents in order:
 
 ## Type-specific guidance
 
-- **Most news is short-lived**: A product announcement from 6 months ago is history. A market trend from 2 years ago may still be relevant. The `evergreen_value` field drives the `status: outdated` decision.
+- **Most news is short-lived**: A product announcement from 6 months ago is history. A market trend from 2 years ago may still be relevant. The `evergreen_value` field is intended to drive a future `status: outdated` decision (**not yet consumed by any code**).
 - **0-2 concept pages is the norm**: don't try to extract 5 concepts from a 500-word article. The article probably only mentions 1-2 concepts, and they're usually already in the wiki.
 - **The "bigger_picture" field is the value**: this is what makes a news article worth ingesting. "Company X acquired Y" without context is just trivia. With context ("this consolidates the GaN supply chain"), it's knowledge.
 
 ---
 
-## Lint: marking outdated news
+## Lint: marking outdated news (planned — not yet implemented)
 
-Periodically (cron monthly), run a Lint pass that:
+> ⚠️ This describes a **planned** capability. No current code marks news `status: outdated`
+> by date or moves index entries — treat the steps below as a design sketch, not existing
+> behavior. (`wiki-lint-semantic.py` only surfaces a generic "appears outdated" hint via the
+> LLM; it does not apply this date-based rule.)
+
+The intended Lint pass (cron monthly) would:
 - For every `wiki/sources/<Outlet> - <Date> - ...` page where `Date` is > 6 months old
 - Add `status: outdated` to its frontmatter
 - Keep the page in the wiki (don't delete — historical record)
 - In `wiki/index.md`, move it to a `## Sources (outdated)` subsection
 
-This is the only way to keep the wiki's "current knowledge" view clean while preserving the historical record.
+That would keep the wiki's "current knowledge" view clean while preserving the historical record.
 
 ---
 
@@ -142,5 +147,5 @@ This is the only way to keep the wiki's "current knowledge" view clean while pre
 
 ## See also
 
-- `SKILL.md` §5, §6
+- `references/naming-conventions.md` — frontmatter schema + wikilink naming
 - `templates/digest-paper.md` — for the underlying technical paper a news article reports on

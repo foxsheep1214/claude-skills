@@ -267,7 +267,7 @@ wiki/media/<slug>/_manifest.json
 
 记录：图片路径 / 来源页 / 尺寸 / sha256。文件名以下划线开头（`_manifest.json`，不是 `manifest.json`）。
 
-**来源**：`ingest.py:914`。
+**来源**：`_stage_1_2_images.py::_stage_1_2_write_manifest`。
 
 ---
 
@@ -315,7 +315,7 @@ wiki/media/<slug>/_manifest.json
 }
 ```
 
-**来源**：`ingest.py:2630-2647`。
+**来源**：`_core.py::save_cache`（cache schema `{"version": "2", "entries": {...}}`）。
 
 ---
 
@@ -337,7 +337,7 @@ N 为单调递增计数器（`lint.ts` 实现）。improved-wiki 使用更具体
 
 Lint 页面位于运行时目录（不在 `wiki/` 下）——它们是派生诊断产物，非源知识；放在 `.llm-wiki/` 下避免污染 search/graph 扫描，与 NashSU「lint state 属 runtime，非 wiki 内容」的边界一致。首次运行时旧 `wiki/lint/` 会自动迁移到此处。Lint 页面含 frontmatter `resolved: false`，修复后改 `true`，下次 lint 自动清理。
 
-### 7.3 6 种 structural lint 类型
+### 7.3 4 种 structural lint 类型
 
 | type | severity | 说明 |
 |------|----------|------|
@@ -437,7 +437,7 @@ N 为单调递增计数器（`review-store.ts:10`）。
 | 路径安全 | 8 项 `isSafeIngestPath` | 同 NashSU | — |
 | 栅栏感知解析 | CommonMark fence tracking | 同 NashSU | — |
 | CRLF 规范化 | `\r\n` → `\n` | 同 NashSU | — |
-| 内容清理 | `ingest-sanitize.ts` | `sanitize_ingested_content()` | — |
+| 内容清理 | `ingest-sanitize.ts` | `sanitize_ingested_file_content()` | — |
 | 页面历史备份 | `.llm-wiki/page-history/` | 同 NashSU | — |
 | 动态 token 预算 | 4 层缩放 | `compute_max_tokens()` | — |
 | 内联 embedding | Stage 6 auto-run | `_auto_embed_new_pages()` | — |

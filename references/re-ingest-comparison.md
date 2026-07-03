@@ -20,7 +20,7 @@ comparison in Step 4, not for reading during re-generation.
 
 ```bash
 BOOK="从零开始学散热 - 2014 - 陈继良"
-PROJECT="~/Documents/知识库/HardwareWiki"
+PROJECT="$HOME/Documents/知识库/HardwareWiki"
 
 # Backup source page
 cp "$PROJECT/wiki/sources/Book/$BOOK.md" /tmp/wiki-compare-backup/source-old.md

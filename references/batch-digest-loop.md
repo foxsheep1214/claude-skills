@@ -83,8 +83,8 @@ PROJECT_ROOT = RAW_DIR.parent.parent
 
 os.environ["IMPROVED_WIKI_ROOT"] = str(PROJECT_ROOT)
 # Text generation runs in conversation mode (calling agent's model) — no LLM
-# API key needed. MINIMAX_CN_API_KEY is only for image captioning, if used.
-os.environ["MINIMAX_CN_API_KEY"] = os.environ.get("MINIMAX_CN_API_KEY", "")
+# API key needed. CAPTION_API_KEY is only for image captioning, if used.
+os.environ["CAPTION_API_KEY"] = os.environ.get("CAPTION_API_KEY", "")
 
 # Collect pending: books with PDF in raw/ but no source page in wiki/
 pdfs = []
@@ -140,7 +140,7 @@ print(f"DONE: {success} OK, {failed} failed, {total} total")
 - **Timeout**: 3600s per book (1 hour). Most books complete in 10-30 minutes.
 - **LLM model**: Text generation runs in conversation mode — the calling agent
   answers each LLM step with the current model. No `LLM_API_KEY` is needed for
-  text gen. `MINIMAX_CN_API_KEY` is only required for image captioning (Stage 1.3).
+  text gen. `CAPTION_API_KEY` is only required for image captioning (Stage 1.3).
 - **Project root**: `IMPROVED_WIKI_ROOT` must point to the project root
   (e.g., `~/Documents/知识库/HardwareWiki`), not `raw/Book/`.
 

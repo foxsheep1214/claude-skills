@@ -218,11 +218,11 @@ buildLanguageDirective(summarySample)  // auto-detects non-English wikis
 The first 2000 chars of concatenated summaries are used to auto-detect the
 output language. This is the same auto-detection the Ingest pipeline uses.
 
-**Improved-wiki simplified version**: a 30-line CJK vs Latin character count,
-outputting "all LINT block content in Chinese" if CJK density > 0.5× Latin.
-The real NashSU implementation handles 50+ languages. Improved-wiki's
-simplification is good enough for the user's predominantly Chinese wikis;
-upgrade if multilingual support is needed.
+**Improved-wiki implementation**: semantic lint calls the shared
+`_language.build_language_directive` (`scripts/_language.py`) — the **same**
+module the Ingest pipeline uses — which detects 25+ languages via Unicode
+script ranges + Latin diacritic/word patterns, not a CJK-vs-Latin heuristic.
+Set `IMPROVED_WIKI_OUTPUT_LANGUAGE` to force a fixed output language.
 
 ### 3.5 Output: `useLintStore.addItems(results)` (lint.ts L285-290)
 

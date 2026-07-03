@@ -44,7 +44,7 @@ with an agent present, so a separate paid text-gen API key has no use case.
 **Context-window probe (2026-06-27)**: at ingest start, one conversation round-trip asks the live model for its context window (`_context_probe.resolve_context`); the result drives all chunk/budget sizing via `Config.apply_context`, replacing the former `LLM_CONTEXT_SIZE` env convention. Budgets now adapt to whatever model the agent runs this session (chunk-token ceiling is 64K by default — 1M or 200K ctx → 64K-token chunks, a 128K model → ~42K; override via `IMPROVED_WIKI_TARGET_TOKENS_CEIL`). The probed value is cached per-model in `.llm-wiki/probed-context.json` (7-day TTL) so resumes and repeat ingests pay zero round-trips; a model change triggers exactly one probe. **No fallback**: an implausible probe response (outside [8K, 10M]) pauses the ingest rather than guessing. See `references/context-probe.md`.
 
 Two other external-API dependencies (not text generation):
-- **Stage 1.3 image captioning** → MiniMax VLM (`anthropic/v1/messages`, one image per call with a context-aware prompt — NashSU `captionImage` parity). This is the only MiniMax dependency; it needs `MINIMAX_CN_API_KEY` / `LLM_API_KEY` for the caption endpoint only. **No fallback**: if the key is missing or caption calls fail consecutively after retries, the ingest **pauses** (raises) — it never silently degrades to OCR figure-text (policy 2026-06-24).
+- **Stage 1.3 image captioning** → MiniMax VLM (`anthropic/v1/messages`, one image per call with a context-aware prompt — NashSU `captionImage` parity). This is the only MiniMax dependency; it reads the caption key from `~/.agents/config.json` (`providers.minimax.api_key`) or env `CAPTION_API_KEY` / `LLM_API_KEY` (in that order), for the caption endpoint only. **No fallback**: if the key is missing or caption calls fail consecutively after retries, the ingest **pauses** (raises) — it never silently degrades to OCR figure-text (policy 2026-06-24).
 - **Stage 3.7 embeddings** → mandatory (2026-06-21): defaults to local Ollama bge-m3 (`http://127.0.0.1:11434/v1`), no env var export required. **No fallback**: if Ollama isn't running, the model isn't pulled, or `lancedb` isn't installed, the ingest **pauses** (raises) — it never silently continues with keyword-only retrieval (policy 2026-06-24). Not routed through MiniMax.
 
 > **No-silent-fallback policy (2026-06-24)**: the ingest path allows NO silent fallback. If a main path cannot run (missing API key, missing service, LLM call failure after retries, broken config), the pipeline **warns and pauses** (raises `RuntimeError`) rather than degrading quality. Extraction/page writes are cached, so re-running after fixing the dependency resumes from the failed stage. This applies to: caption key missing, caption batch failure, embedding stack missing, LLM page-merge failure, broken `~/.agents/config.json`. (Corrupted cache/stage-progress files are the one exception: they warn loudly and reset, since re-ingesting is correct recovery, not quality degradation.)
@@ -62,7 +62,7 @@ Two other external-API dependencies (not text generation):
 ## Reference map
 
 **Pipeline core**:
-- `references/ingest-stages-mandatory.md` — ingest stage checklist (Phase 0-4 + Lint + Graph, ⭐ easy-to-skip stages marked)
+- `references/ingest-stages-mandatory.md` — ingest stage checklist (Phase 0-3 + Lint + Graph, ⭐ easy-to-skip stages marked)
 - `references/query-generation.md` — Stage 2.7: auto-generate `wiki/queries/`
 - `references/comparison-generation.md` — Stage 2.9: auto-generate `wiki/comparisons/` (in-source concept pairs AND systematic multi-way 3+ comparisons)
 - `references/dedup-design.md` — two dedup tiers: intra-source (Stage 2.4 closing sub-step, ingest-time) vs cross-source (CLI, lint-time); distinct responsibilities, not interchangeable
@@ -145,7 +145,7 @@ Two other external-API dependencies (not text generation):
 | Graph | `graph.py` |
 | Queue | `wiki-monitor.sh`, `run-queue.sh` |
 | Embeddings | `build_embeddings.py`, `search_wiki.py` |
-| Repair | `sweep_reviews.py`, `enrich_wikilinks_retroactive.py`, `cross_source_dedup.py`（一次性脚本已退役 → `archive/scripts/`） |
+| Repair | `sweep_reviews.py`, `enrich_wikilinks_retroactive.py`, `cross_source_dedup.py`（跨源去重 CLI，在用）；一次性修复脚本已退役 → `archive/scripts/` |
 
 ## Trigger this skill
 

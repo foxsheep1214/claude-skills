@@ -133,8 +133,8 @@ File contents in order:
 ### Append: wiki/log.md
 
 # Constraints
-- Every `[[wikilink]]` MUST use the FULL filename stem (per improved-wiki §6.2)
-- Frontmatter must follow improved-wiki §5
+- Every `[[wikilink]]` MUST use the FULL filename stem (per `references/naming-conventions.md`)
+- Frontmatter must follow `references/naming-conventions.md`
 - Quoted definitions and requirements must be verbatim from the source
 - Use a markdown table for the clause_structure
 - Use a markdown table for key_requirements (requirement | clause | mandatory | test_method)
@@ -165,5 +165,5 @@ File contents in order:
 
 ## See also
 
-- `SKILL.md` §5, §6
+- `references/naming-conventions.md` — frontmatter schema + wikilink naming
 - `templates/digest-paper.md` — for academic papers (different focus on methodology vs. requirements)

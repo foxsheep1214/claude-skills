@@ -43,14 +43,15 @@ ls ~/Documents/知识库/
 
 ## 3. 搜索方式
 
-improved-wiki 使用 **LanceDB 语义搜索**（本地 Ollama bge-m3 嵌入）。需要先建好索引：
+improved-wiki 使用 **hybrid 检索**：keyword（CJK bigram 加权，恒在线、免索引）+ 可选 vector（本地 Ollama bge-m3 + LanceDB）+ RRF(K=60) 融合。**未建索引也能搜**——只用 keyword 路径即可；建 LanceDB 索引只是为了启用 vector 增强：
 
 ```bash
-build_embeddings.py --project <项目> embed     # 一次性建索引
-search_wiki.py "查询" --project <项目>          # 语义搜索
+build_embeddings.py --project <项目> embed     # 一次性建索引（仅为启用 vector 路径）
+search_wiki.py "查询" --project <项目>          # hybrid 检索（未建索引会因 vector 不可用而暂停，见下）
+search_wiki.py "查询" --project <项目> --keyword-only   # 显式只用 keyword，免 Ollama/索引
 ```
 
-向量搜索的优势：即使查询词和页面用词不同，语义相近也能命中（如 "输出振荡" 匹配到 "PWM 调制方式"）。
+vector 路径的优势：即使查询词和页面用词不同，语义相近也能命中（如 "输出振荡" 匹配到 "PWM 调制方式"）。**注意**：若 Ollama/lancedb 不可用，`search_wiki.py` **报警并暂停**（`return 1`，非静默降级），需修复或显式加 `--keyword-only`（全局 no-fallback 策略）。
 
 ## 4. 关键词搜索策略
 
@@ -78,7 +79,7 @@ search_wiki.py "查询" --project <项目>          # 语义搜索
 
 ## 5. 搜索工具使用
 
-### 5.1 search_wiki.py — 语义搜索
+### 5.1 search_wiki.py — hybrid 检索（keyword + vector + RRF）
 
 ```bash
 # 人类可读输出（交互调试用）
@@ -104,10 +105,11 @@ python3 scripts/search_wiki.py "LC谐振导致振铃" \
 2. 取前 N 条的 `path` → `Read <项目>/wiki/<path>` 读全文
 3. 引用具体段落回答
 
-**前提**：需要先建 LanceDB 索引（一次性）：
+**建 vector 索引（一次性，仅为启用 vector 路径；keyword 无需索引）**：
 ```bash
 python3 scripts/build_embeddings.py --project ~/Documents/知识库/HardwareWiki embed
 ```
+未建索引时 hybrid 会因 vector 不可用而暂停；此时改用 `--keyword-only` 仍可检索。
 
 ### 5.2 补充：Read 精读
 
