@@ -96,12 +96,21 @@ SEMANTIC_TOKENS=""
 for arg in "$@"; do
   case $arg in
     --verbose|-v) VERBOSE=true ;;
+    --summary)    SUMMARY=true ;;
     --strict)     STRICT=true ;;
     --semantic)   SEMANTIC=true ;;
     --no-semantic) SEMANTIC=false ;;
     --fix)        AUTO_FIX=true ;;
+    --no-fix)     AUTO_FIX=false ;;
     --fix-links)  FIX_LINKS=true ;;
+    --no-fix-links) FIX_LINKS=false ;;
     --json-only)  JSON_ONLY=true ;;
+    --sweep)       SWEEP=true ;;
+    --no-sweep)    SWEEP=false ;;
+    --dedup)       DEDUP=true ;;
+    --no-dedup)    DEDUP=false ;;
+    --delete-orphans) DELETE_ORPHANS=true ;;
+    --no-delete-orphans) DELETE_ORPHANS=false ;;
     --semantic-limit=*) SEMANTIC_LIMIT="${arg#*=}" ;;
     --semantic-tokens=*) SEMANTIC_TOKENS="${arg#*=}" ;;
     --help|-h)
@@ -298,7 +307,7 @@ if [ "$SEMANTIC" = true ]; then
   [ -n "$SEMANTIC_TOKENS" ] && \
     echo "[lint] --semantic: --semantic-tokens is ignored in conversation mode" >&2
   echo "[lint] --semantic: running conversation-mode semantic pass ..."
-  IMPROVED_WIKI_ROOT="$WIKI_ROOT" python3 "$SCRIPT_DIR/wiki-lint-semantic.py" "${SEM_ARGS[@]}"
+  IMPROVED_WIKI_ROOT="$WIKI_ROOT" python3 "$SCRIPT_DIR/wiki-lint-semantic.py" ${SEM_ARGS:+"${SEM_ARGS[@]}"}
   sem_rc=$?
   if [ "$sem_rc" -eq 101 ]; then
     echo "[lint] --semantic: conversation handoff pending (exit 101) — the calling agent must answer the written prompt and re-invoke wiki-lint-semantic.py to finish the semantic pass." >&2
