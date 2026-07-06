@@ -15,9 +15,7 @@
 #
 # Configuration via env vars:
 #   IMPROVED_WIKI_ROOT       — path to project root (default: cwd)
-#   LLM_API_KEY              — required for LLM calls
-#   LLM_BASE_URL             — default: https://api.deepseek.com
-#   LLM_MODEL                — default: deepseek-chat
+#   LLM_API_KEY              — required for LLM calls (Stage 1.3 caption only)
 
 set -euo pipefail
 
