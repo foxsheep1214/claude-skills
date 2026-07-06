@@ -14,8 +14,7 @@ calls a configured VLM provider.
 
 ## Recommended: Built-in Batch Modes
 
-`ingest.py` has two built-in batch modes. Prefer these over the legacy
-subprocess loop (section below).
+`ingest.py` has two built-in batch modes.
 
 ### Mode 1: `--watch --drain` (Queue-Driven, Fire-and-Forget)
 
@@ -57,60 +56,6 @@ This prefetches the wiki-independent stages of all matching PDFs concurrently
 done. Dedup is automatic — `ingest.py` skips books that
 already have a source page in `wiki/sources/`.
 
-## Legacy: Subprocess Loop (Advanced / Custom Logic)
-
-If you need custom dedup logic, per-book logging, or integration with an
-external scheduler that the built-in modes don't cover, you can still use the
-subprocess loop below. **Use with caution** — you lose built-in concurrency
-limiting and the watcher's automatic retry/queue management.
-
-```python
-#!/usr/bin/env python3
-"""Legacy batch digest — serial subprocess loop. Prefer --watch --drain instead."""
-import os, subprocess, time
-from pathlib import Path
-
-RAW_DIR = Path.home() / "Documents/知识库/HardwareWiki/raw/Book"
-WIKI_SRC = Path.home() / "Documents/知识库/HardwareWiki/wiki/sources"
-INGEST = Path.home() / ".agents/skills/improved-wiki/scripts/ingest.py"
-PROJECT_ROOT = RAW_DIR.parent.parent
-
-os.environ["IMPROVED_WIKI_ROOT"] = str(PROJECT_ROOT)
-# Text generation runs in conversation mode (calling agent's model) — no LLM
-# API key needed. Image captioning (if used) is configured separately via
-# ~/.agents/config.json (caption_provider) — no env var here.
-
-# Collect pending: books with PDF in raw/ but no source page in wiki/
-pdfs = []
-for pdf in sorted(RAW_DIR.rglob("*.pdf")):
-    if not (WIKI_SRC / f"{pdf.stem}.md").exists():
-        pdfs.append(pdf)
-
-total = len(pdfs)
-print(f"Pending: {total} books")
-
-success = failed = 0
-for i, pdf in enumerate(pdfs, 1):
-    print(f"[{i}/{total}] {pdf.stem}", flush=True)
-    try:
-        r = subprocess.run(
-            ["python3", str(INGEST), str(pdf)],
-            capture_output=True, text=True, timeout=3600,
-            cwd=str(PROJECT_ROOT),
-            env={**os.environ, "IMPROVED_WIKI_ROOT": str(PROJECT_ROOT)}
-        )
-        if r.returncode == 0:
-            success += 1
-        else:
-            failed += 1
-    except subprocess.TimeoutExpired:
-        failed += 1
-    except Exception as e:
-        failed += 1
-
-print(f"DONE: {success} OK, {failed} failed, {total} total")
-```
-
 ## Key Points (All Modes)
 
 - **Dedup via source page**: `ingest.py` checks `wiki/sources/<pdf-stem>.md` before
@@ -147,10 +92,7 @@ nohup python3 ~/.agents/skills/improved-wiki/scripts/ingest.py \
   --watch --drain --parallel 4 \
   > /tmp/ingest_watch.log 2>&1 &
 
-# Legacy: subprocess loop
-nohup python3 /tmp/hw_batch.py > /tmp/hw_batch.log 2>&1 &
-
-# Monitor either mode
+# Monitor
 tail -f /tmp/ingest_watch.log
 ```
 

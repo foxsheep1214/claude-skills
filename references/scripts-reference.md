@@ -12,7 +12,7 @@ Full script inventory by category. Entry points (user-facing) are **bold**.
 | Graph | **`graph.py`** |
 | Queue | `wiki-monitor.sh`, `run-queue.sh` |
 | Embeddings | **`build_embeddings.py`**, **`search_wiki.py`** |
-| Repair | `sweep_reviews.py`, `enrich_wikilinks_retroactive.py`, `cross_source_dedup.py`（跨源去重 CLI，在用）；一次性修复脚本已退役 → `archive/scripts/` |
+| Repair | `sweep_reviews.py`, `enrich_wikilinks_retroactive.py`, `cross_source_dedup.py`（跨源去重 CLI，在用） |
 | Search | `search_local.py` (local source search for deep-research) |
 | Review guard | `review_fix_guard.py` |
 | Lint internals | `_lint_suggest.py`, `_lint_fixes.py` |

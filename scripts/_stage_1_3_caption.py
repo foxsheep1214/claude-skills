@@ -97,31 +97,6 @@ CAPTION_SYSTEM_PROMPT = (
 # VLM failure detection + no-API-key hard stop
 # ══════════════════════════════════════════════════════════════════════════════
 
-_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
-
-
-def _stage_1_3_strip_thinking(text: str) -> str | None:
-    """Strip a closed <think>...</think> reasoning block, returning whatever
-    real answer follows it. Returns None if <think> is OPENED but never
-    closed — that's a truncated reasoning dump with no real answer in it,
-    not a caption.
-
-    Bug 2026-07-06: qwen3-vl's "think": false does not reliably suppress
-    reasoning for this model. Under context pressure it burns its entire
-    output budget writing free-form reasoning directly into "content" (not
-    Ollama's separate "thinking" field, so the existing content/thinking
-    fallback doesn't catch it) and never reaches a final answer — observed
-    on ~3/5 of a fresh sample even with concurrency already fixed to 1.
-    That raw dump is well over the 15-char/keyword failure thresholds, so
-    without this check it silently became the "caption"."""
-    if not text:
-        return text
-    lower = text.lower()
-    if "<think>" in lower and "</think>" not in lower:
-        return None
-    return _THINK_BLOCK_RE.sub("", text).strip()
-
-
 def _stage_1_3_is_caption_failed(text: str) -> bool:
     """Detect VLM failure responses that shouldn't be treated as valid captions."""
     if not text or len(text) < 15:
@@ -133,11 +108,6 @@ def _stage_1_3_is_caption_failed(text: str) -> bool:
     # _stage_1_3_pending_images silently treated the placeholder as a
     # permanent cached caption and never retried it.
     if text.startswith("[待重试]"):
-        return True
-    # Already-on-disk <think> dumps from before _stage_1_3_strip_thinking()
-    # existed (bug 2026-07-06) — an unclosed <think> means no real answer was
-    # ever produced, regardless of how long the garbage text is.
-    if _stage_1_3_strip_thinking(text) is None:
         return True
     failure_markers = ["解析失败", "无法识别", "unable to", "cannot describe",
                        "抱歉", "sorry", "I can't", "not clear", "无法描述"]
@@ -610,8 +580,6 @@ def _stage_1_3_caption_one_image(img: dict, config: Config, media_dir: Path,
                 if choices:
                     msg = choices[0].get("message", {})
                     text = (msg.get("content") or "").strip()
-                    if text:
-                        text = _stage_1_3_strip_thinking(text)
                     if text:
                         return text, None
                 last_err = "empty VLM response"
