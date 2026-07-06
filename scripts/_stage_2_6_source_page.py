@@ -132,6 +132,45 @@ def _stage_2_6_validate_main_arguments(response: str, outline) -> None:
               f"(check chunk-claims injection / source front-truncation)")
 
 
+# ── A10 (2026-07-06): required-section presence guard ──────────────────────
+# Bug 2026-07-06: a Richard/2005 source page was found on disk with an
+# entirely different, self-invented section structure (Bibliographic
+# Information / Overview / Chapter Outline) instead of the template's
+# mandatory sections — no Main Arguments, no Key Entities, no Connections/
+# Contradictions/Recommendations at all. A9 only checks claim COUNT inside
+# a Main Arguments section it assumes exists; it can't catch a response that
+# dropped the section headings themselves. Root cause not conclusively
+# pinned down (the archived Stage 2.6 conversation artifact for that exact
+# ingest was well-formed, so the divergence traces to generation-vs-disk
+# rather than a parseable template violation) — this is a detection net,
+# not a fix for whatever produced the divergence.
+_STAGE_2_6_REQUIRED_HEADINGS = (
+    "Book Summary",
+    "Table of Contents & Key Concepts",
+    "Key Entities",
+    "Main Arguments & Findings",
+    "Connections to Existing Wiki",
+    "Contradictions & Tensions",
+    "Recommendations",
+)
+
+
+def _stage_2_6_validate_required_sections(response: str) -> None:
+    """Warn — never raise — when the response's FILE-block body is missing
+    one or more of the template's mandatory H2 sections. Non-fatal to match
+    A9's existing warn-only stance (this stage doesn't otherwise block
+    ingest on generation-quality issues); still, this is the more severe
+    failure mode (a whole section missing, not just under-sampled) so the
+    warning is intentionally loud."""
+    missing = [h for h in _STAGE_2_6_REQUIRED_HEADINGS
+               if not re.search(rf"^##\s+{re.escape(h)}\s*$", response, re.MULTILINE)]
+    if missing:
+        print(f"  [stage 2.6][WARN] Source page is missing required section(s): "
+              f"{', '.join(missing)} — the agent likely invented its own "
+              f"structure instead of following the template. Re-run Stage "
+              f"2.6 or fix the page manually; do not let this ship silently.")
+
+
 def stage_2_6_source_page(
     global_digest: dict,
     file_path: Path,
@@ -518,6 +557,7 @@ venue: {venue_yaml}
         related_fallback=(_gen_c + _gen_e),
     )
     _stage_2_6_validate_main_arguments(response, outline)
+    _stage_2_6_validate_required_sections(response)
     if verbose:
         print(f"[stage 2.6] Source page generated ({len(response):,} chars, stop={stop_reason})")
     else:

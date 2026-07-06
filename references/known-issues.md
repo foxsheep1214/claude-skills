@@ -11,7 +11,11 @@
 ### minerU 偶尔把公式区域分类为 `image` 而非 `equation`
 ~112 公式图被当图片送 VLM，而非用 minerU 已提取的 LaTeX 文本（上游 minerU 版面分析问题）。
 
-### Review sweep 规则阶段 partial-match 假阳性
+### `detect_language()` 非拉丁文字阈值过低，几个杂散字符就能误判全书语言
+`_language.py::detect_language()` 的非拉丁脚本判定阈值只是 `max_count >= 2`——只要样本文本里出现 ≥2 个某非拉丁文字的字符，就判定整份文档是那个语言，而英文本身是纯 ASCII、完全不计入 `counts`，等于没有对照基准。实测：《Fundamentals of Radar Signal Processing - 2005 - Richard》扉页有两张伊朗大学图书馆的波斯语/阿拉伯语公章（OCR 出十几个阿拉伯字符），导致 Stage 2.1/2.4/2.6 全部注入"MANDATORY OUTPUT LANGUAGE: Arabic"，而全书正文 99%+ 是英文——这是和已记录的"São Paulo 陷阱"（`improved-wiki-language-detect-false-positive` 内存条目）同一类假阳性，但触发方式更直接（真实非拉丁文字，不是地名误判）。现有 Greek 分支已有"孤立单字符不算希腊语，需要多字符连续词"的保护（`_has_greek_word_run`），但阿拉伯语等其他非拉丁脚本分支没有对应保护。**当前规避**：生成阶段人工判断源文本主体语言、忽略错误的语言指令即可（本次已验证可行）；项目级也可用 `IMPROVED_WIKI_OUTPUT_LANGUAGE=English` 强制覆盖整本书。**未修复**：给非拉丁脚本分支加类似 Greek 的"需要有意义占比/连续词"保护，风险是可能影响现有中文等双语页面的检测结果，未做（改动前应先补测试用例）。
+
+### Stage 2.6 source 页偶发整体丢失 section 结构，根因未 100% 锁定（已加检测网，2026-07-06）
+《Fundamentals of Radar Signal Processing - 2005 - Richard》今早首次摄入的 source 页完全没有走模板——标题是自创的 Bibliographic Information/Overview/Chapter Outline/Key Concepts，Main Arguments & Findings / Key Entities / Connections / Contradictions / Recommendations 全部缺失。排查过程：archived 的 Stage 2.6 conversation 产物（`.llm-wiki/conversation/47e0adf0/Stage-2-6-SourcePage-532d2243.txt`，生成时间 11:13:16，仅比 log.md 记录的摄入完成时间 11:17:17 早 4 分钟）本身内容完全合规（7 个 section 齐全、英文、43 条 claim）；`_normalize_source_frontmatter()` 只碰 frontmatter 不碰 body，排除了它改坏内容的可能；也没有可复用的旧 source 页触发 merge（首次摄入）；代码里也搜不到硬编码的 fallback 模板匹配这个坏结构。但一份 18 秒后生成的 wikilink-enrichment 提示词（`LLM-task-07027825.md`，11:13:34）里，`## PAGE: sources/Book/Fundamentals of Radar Signal Processing - 2005 - Richard.md` 下面已经是坏结构——**说明损坏发生在 Stage 2.6 生成"之后"、写盘"之前/期间"的 18 秒窗口内**，但受限于现有日志/缓存粒度，未能锁定到具体是哪一行代码/哪一次写入把好内容换成了坏内容。**已加检测网**（非修复根因）：`_stage_2_6_validate_required_sections()`（A10）在 `_stage_2_6_source_page.py`，对比 7 个必需 H2 标题，缺失即打印醒目 WARN（非阻断，与既有 A9 一致的 warn-only 风格）——这次的坏页面已用它验证过确实会触发。**后续如再复现，应保留当次的 `.llm-wiki/conversation/<hash>/` 目录不要清理，为根因排查留证据**。
 `sweep_reviews.py` 规则阶段的 title/path 匹配用子串（partial）匹配，短词（`to`/`ul`/`none`/`DC` 等 2-3 字符片段）会误命中无关页面 slug。实测 ~15/197 review items 被误 auto-resolve。**缓解**：先 dry-run（不加 `--apply`），检查可疑 auto-resolve；规则阶段应要求最小匹配长度 ≥4 字符或全 slug 等值。LLM judge 阶段不受影响。详见 `references/review-sweep.md`。
 
 ## Design decisions (not bugs)

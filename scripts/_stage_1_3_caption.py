@@ -611,6 +611,17 @@ def _stage_1_3_caption_one_image(img: dict, config: Config, media_dir: Path,
                         data = json.loads(resp.read())
                     msg = data.get("message", {})
                     text = (msg.get("content") or "").strip()
+                    # Fallback: qwen3-vl (and other thinking-capable models)
+                    # can burn the whole context/token budget on the
+                    # "thinking" field before ever writing to "content" —
+                    # observed under memory pressure, where Ollama's
+                    # VRAM-based context auto-sizing shrinks the effective
+                    # context window (see /api/ps "context_length"). "think":
+                    # false does not reliably suppress the thinking phase for
+                    # this model family, so recover the answer from there
+                    # rather than discard a real (if unstructured) response.
+                    if not text:
+                        text = (msg.get("thinking") or "").strip()
                     if text:
                         return text, None
                     last_err = "empty VLM response (content)"
