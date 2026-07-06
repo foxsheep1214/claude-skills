@@ -14,6 +14,9 @@
 ### `detect_language()` 非拉丁文字阈值过低，几个杂散字符就能误判全书语言
 `_language.py::detect_language()` 的非拉丁脚本判定阈值只是 `max_count >= 2`——只要样本文本里出现 ≥2 个某非拉丁文字的字符，就判定整份文档是那个语言，而英文本身是纯 ASCII、完全不计入 `counts`，等于没有对照基准。实测：《Fundamentals of Radar Signal Processing - 2005 - Richard》扉页有两张伊朗大学图书馆的波斯语/阿拉伯语公章（OCR 出十几个阿拉伯字符），导致 Stage 2.1/2.4/2.6 全部注入"MANDATORY OUTPUT LANGUAGE: Arabic"，而全书正文 99%+ 是英文——这是和已记录的"São Paulo 陷阱"（`improved-wiki-language-detect-false-positive` 内存条目）同一类假阳性，但触发方式更直接（真实非拉丁文字，不是地名误判）。现有 Greek 分支已有"孤立单字符不算希腊语，需要多字符连续词"的保护（`_has_greek_word_run`），但阿拉伯语等其他非拉丁脚本分支没有对应保护。**当前规避**：生成阶段人工判断源文本主体语言、忽略错误的语言指令即可（本次已验证可行）；项目级也可用 `IMPROVED_WIKI_OUTPUT_LANGUAGE=English` 强制覆盖整本书。**未修复**：给非拉丁脚本分支加类似 Greek 的"需要有意义占比/连续词"保护，风险是可能影响现有中文等双语页面的检测结果，未做（改动前应先补测试用例）。
 
+### `_stage_1_2_extract_from_mineru()` 两处硬编码 width/height=0（已修，2026-07-06）
+`_stage_1_2_images.py::_stage_1_2_extract_from_mineru()` 有两个分支（img_source_dir 存在时的正常复制分支、OCR 缓存续跑的 media_dir 恢复分支）在构造 manifest 图片条目时把 `"width": 0, "height": 0` 写死，而不像同文件里的 `_stage_1_2_harvest_images()` 那样用 PIL 读真实尺寸。后果：凡是走这个函数生成 manifest 的书，`_manifest.json` 里全部图片尺寸恒为 0×0——图片文件本身完全正常，只是元数据没填。表征：caption 失败时的占位符统一显示"尺寸 0×0"，无论实际图片多大（发现于《High Resolution Radar 2nd - 1995 - Wehner》，同一天摄入的《Fundamentals of Radar Signal Processing》走了另一条会算真实尺寸的路径，manifest 正常）。**已修复**：抽出共享辅助 `_stage_1_2_image_size()`（PIL 读取，读失败兜底 (0,0)，跟 `_stage_1_2_harvest_images()` 一致的防御写法），两处硬编码分支都改用它。**已回填**：Wehner 现有 `_manifest.json` 332 张图的尺寸已用现存图片文件补齐，无需重跑 VLM。
+
 ### Stage 2.6 source 页偶发整体丢失 section 结构，根因未 100% 锁定（已加检测网，2026-07-06）
 《Fundamentals of Radar Signal Processing - 2005 - Richard》今早首次摄入的 source 页完全没有走模板——标题是自创的 Bibliographic Information/Overview/Chapter Outline/Key Concepts，Main Arguments & Findings / Key Entities / Connections / Contradictions / Recommendations 全部缺失。排查过程：archived 的 Stage 2.6 conversation 产物（`.llm-wiki/conversation/47e0adf0/Stage-2-6-SourcePage-532d2243.txt`，生成时间 11:13:16，仅比 log.md 记录的摄入完成时间 11:17:17 早 4 分钟）本身内容完全合规（7 个 section 齐全、英文、43 条 claim）；`_normalize_source_frontmatter()` 只碰 frontmatter 不碰 body，排除了它改坏内容的可能；也没有可复用的旧 source 页触发 merge（首次摄入）；代码里也搜不到硬编码的 fallback 模板匹配这个坏结构。但一份 18 秒后生成的 wikilink-enrichment 提示词（`LLM-task-07027825.md`，11:13:34）里，`## PAGE: sources/Book/Fundamentals of Radar Signal Processing - 2005 - Richard.md` 下面已经是坏结构——**说明损坏发生在 Stage 2.6 生成"之后"、写盘"之前/期间"的 18 秒窗口内**，但受限于现有日志/缓存粒度，未能锁定到具体是哪一行代码/哪一次写入把好内容换成了坏内容。**已加检测网**（非修复根因）：`_stage_2_6_validate_required_sections()`（A10）在 `_stage_2_6_source_page.py`，对比 7 个必需 H2 标题，缺失即打印醒目 WARN（非阻断，与既有 A9 一致的 warn-only 风格）——这次的坏页面已用它验证过确实会触发。**后续如再复现，应保留当次的 `.llm-wiki/conversation/<hash>/` 目录不要清理，为根因排查留证据**。
 `sweep_reviews.py` 规则阶段的 title/path 匹配用子串（partial）匹配，短词（`to`/`ul`/`none`/`DC` 等 2-3 字符片段）会误命中无关页面 slug。实测 ~15/197 review items 被误 auto-resolve。**缓解**：先 dry-run（不加 `--apply`），检查可疑 auto-resolve；规则阶段应要求最小匹配长度 ≥4 字符或全 slug 等值。LLM judge 阶段不受影响。详见 `references/review-sweep.md`。
@@ -69,11 +72,6 @@ Stage 2.6 提示词预填了 NashSU parity 模板（frontmatter authors/year/url
 
 ### Stage 1.3「[待重试]」占位符从未被自动重试（已修，2026-07-06）
 `_stage_1_3_pending_images()` 靠 `_stage_1_3_is_caption_failed()` 判断已有 `.caption.txt` 是否需要重跑；后者只认几个失败关键词子串（"解析失败"/"sorry"/"unable to" 等），完全没检查占位符自己的 `[待重试]` 前缀。占位符文本形如 `[待重试] 图片 X，尺寸 W×H — TimeoutError: timed out`——`{err}` 部分是任意异常信息，通常不含那几个关键词——于是占位符被当成一份正常缓存的 caption 永久跳过，`_stage_1_3_pending_images` 文档字符串里"失败会在下次运行重试"的承诺从未真正生效，用户必须手动删 `.caption.txt` 才能强制重跑。修复：`_stage_1_3_is_caption_failed()` 开头加 `text.startswith("[待重试]")` 直接判定为失败。
-
-### Stage 1.3 本地 Ollama 并发过高导致假性 TimeoutError（已修，2026-07-06）
-`CAPTION_MAX_WORKERS=12` 是为远程多租户 API（MiniMax）调的默认值；07-05 caption provider 改可配置、默认切到本地 Ollama 后没跟着调整。本地 Ollama 单实例并行度很低（`OLLAMA_NUM_PARALLEL` 默认 1-4，视可用内存而定），12 个并发请求大多在服务端排队，队列等待时间叠加实际推理时间，导致请求还没真正开始跑就先撞上客户端 180s 超时——表现为 `[待重试] 图片 ...，尺寸 W×H — TimeoutError: timed out`，3 次内部重试全部落在同一个排队瓶颈里，跟具体某张图片无关。修复：`_stage_1_3_caption.py` 新增 `_stage_1_3_is_ollama()` 检测本地 Ollama base_url，未显式设置 `CAPTION_MAX_WORKERS` 时自动降并发到 `OLLAMA_CAPTION_MAX_WORKERS=3`；Ollama 原生 `/api/chat` 请求超时也从 180s 提到 300s 留余量。详见 `references/image-caption-strategy.md`「Local Ollama concurrency cap」。
-
-## Legacy artifacts
 
 ### `.digested` files in `raw/` subdirectories
 旧 pipeline 标记。当前 pipeline（Stage 0.2）用 `wiki/sources/` 作唯一去重信号。清理见 `maintenance-cleanup.md`。
