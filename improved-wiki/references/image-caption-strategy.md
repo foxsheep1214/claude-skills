@@ -49,33 +49,10 @@ PDF (minerU harvest)                  PPTX/DOCX (zipfile office extract)
 
 | Parameter | Default | Env var | Description |
 |-----------|---------|---------|-------------|
-| Max workers | 12 (auto-capped to 3 for local Ollama) | `CAPTION_MAX_WORKERS` | Per-image parallel concurrency. Explicit env var always overrides the auto-cap. |
+| Max workers | 12 | `CAPTION_MAX_WORKERS` | Per-image parallel concurrency. Remote providers (e.g. GLM) support full parallelism. |
 | Image max dim | 1568 | — | Downscale threshold (vision limit) |
 | Context window | 150 chars/side | — | before/after body text fed as anchoring context (NashSU `CONTEXT_CHARS`, matched) |
 | Tiny-image min | 20px | `MINERU_IMG_MIN_WIDTH/HEIGHT` | 过滤噪声（故意低，保留公式截图） |
-
-## Local Ollama concurrency cap (bug 2026-07-06)
-
-`CAPTION_MAX_WORKERS=12` was tuned for a remote multi-tenant API (MiniMax):
-12 concurrent HTTP calls comfortably fit its rate limit. It does **not** fit
-a local Ollama instance — Ollama serves vision requests with very limited
-real parallelism (`OLLAMA_NUM_PARALLEL` defaults to 1–4 depending on
-available memory; effectively one model instance). Firing 12 concurrent
-requests at it just queues most of them server-side.
-
-**Symptom observed**: captions failed with `[待重试] 图片 ...，尺寸 W×H —
-TimeoutError: timed out` even though nothing was actually wrong with the
-image or the model — the request was still queued (not yet started) when
-the client-side per-request timeout fired. All 3 internal retries hit the
-same queue, so the image never got a real shot at captioning.
-
-**Fix**: `_stage_1_3_caption_images_batch()` now auto-detects a local Ollama
-`base_url` (`_stage_1_3_is_ollama()`) and caps `max_workers` down to
-`OLLAMA_CAPTION_MAX_WORKERS = 3` unless the user explicitly set
-`CAPTION_MAX_WORKERS` in the environment (an explicit override always wins).
-The Ollama-native `/api/chat` request timeout was also raised 180s → 300s
-as extra headroom, since local vision inference is slower than a remote API
-even without queuing.
 
 ## One image per call (NashSU parity)
 
@@ -147,8 +124,44 @@ captioned = _stage_1_3_caption_images_batch(images, config, media_dir, source_la
 | (configured via `~/.agents/config.json`) | depends on provider | depends on protocol | **caption 调用** |
 
 配置 caption provider 时，确保 protocol 与 endpoint 匹配：
-- `anthropic` → `/anthropic/v1/messages`（Anthropic Messages API）
-- `openai` → `/v1/chat/completions`（OpenAI 兼容，如 Ollama）。
+- `anthropic` → 代码拼 `{base_url}/anthropic/v1/messages`（Anthropic Messages API）
+- `openai` → 代码拼 `{base_url}/v1/chat/completions`（OpenAI 兼容）
+
+⚠️ **openai 分支的 `/v1` 陷阱**：代码硬编码 `/v1/chat/completions`。智谱 GLM 的 OpenAI 兼容端点是 `/api/paas/v4/chat/completions`（v4 无 v1），走 openai 分支会 404。**智谱 GLM 必须走 anthropic 协议**（见下），不要走 openai 分支。
+
+## Recommended provider: GLM-5v-turbo (智谱, anthropic 协议)
+
+2026-07-06 起默认 caption provider 切到智谱 `glm-5v-turbo`（远程 anthropic 端点）。
+远程端点支持真并行，`CAPTION_MAX_WORKERS=12` 可满载。
+
+```json
+// ~/.agents/config.json
+{
+  "caption_provider": "glm",
+  "providers": {
+    "glm": {
+      "api_key": "<智谱 sk-key，与 Claude Code 的 ANTHROPIC_AUTH_TOKEN 同一个>",
+      "base_url": "https://open.bigmodel.cn/api",
+      "protocol": "anthropic",
+      "model": "glm-5v-turbo",
+      "models": {"caption": "glm-5v-turbo", "vision": "glm-5v-turbo"}
+    }
+  }
+}
+```
+
+`base_url` 设到 `/api` 这一层，代码拼 `/anthropic/v1/messages` → 命中
+`https://open.bigmodel.cn/api/anthropic/v1/messages` ✓。`x-api-key` header 也匹配。
+
+**模型选型教训（2026-07-06 实测）**：视觉任务必须用 `glm-5v-turbo`。
+- `glm-5v-turbo` **不在** `GET /api/paas/v4/models` 的返回列表里（该列表只返回 8 个
+  文本模型），只能靠直接 POST 调用探测发现——别因列表里没有就以为不存在。
+- GLM-5 系列文本模型（`glm-5`/`glm-5.2`/`glm-5-turbo`/`glm-4.7` 等）虽然接受 image
+  输入不报错，但**不理解图片、产生幻觉**——同一张雷达脉冲图被 glm-5-turbo 描述成
+  "暗巷里的人"、glm-5.2 描述成"年轻女性"、glm-4.7 描述成"白狗"。只有 `glm-5v-turbo`
+  正确识别了波束几何/距离门/CLOCK 信号。**不要拿文本模型凑数做 caption。**
+
+key 直接写文件（`~/.agents/config.json` 权限 600、不进 git）。
 
 ## 历史 caption「解析失败」可重试修复
 
