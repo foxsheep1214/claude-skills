@@ -163,6 +163,8 @@ captioned = _stage_1_3_caption_images_batch(images, config, media_dir, source_la
 
 key 直接写文件（`~/.agents/config.json` 权限 600、不进 git）。
 
+⚠️ **限流：必须降并发**。智谱 GLM 端点对并发敏感，默认 `CAPTION_MAX_WORKERS=12` 会触发 `HTTP 429: Too Many Requests`——代码重试 3 次（1s/2s/4s 退避）全落在限流窗口内，连续 3 张失败触发 `CONSECUTIVE_FAIL_PAUSE=3` 硬停（防静默降级策略）。实测 Wehner 书 12 并发跑出 39 个 429 占位 + 78 张没跑到。**GLM caption 重跑务必带 `CAPTION_MAX_WORKERS=4`**（或更低），降到 4 后 117 张 pending 全部成功（0 占位）。Sidecar 是 cache，重跑只处理 pending（`[待重试]` 占位 + 缺失），已成功的跳过。
+
 ## 历史 caption「解析失败」可重试修复
 
 旧 ingest 里 `（图N，解析失败）` 类 caption 大多不是图片问题（A/B 验证灰度图
