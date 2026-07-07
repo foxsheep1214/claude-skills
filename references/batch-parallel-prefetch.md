@@ -6,8 +6,15 @@
 >
 > **并行边界（三层）**：
 > ① **进程级后台预取**（bg OS 子进程）：Phase 0/1（minerU + caption，非 LLM）——自动与主对话 LLM 并行；
-> ② **可并行作答的 conversation prompt** = wiki-independent 段（Phase 0/1 + Stage 2.1/2.2）——多个同时 pending 时可每个派一个 sub-agent 并行作答；
+> ② **可并行作答的 conversation prompt** = wiki-independent 段（Phase 0/1 + Stage 2.1/2.2）——多个同时 pending 时可每个派一个 sub-agent 并行作答，**并发上限 = `--parallel N`**（默认4，见下方"并发上限"节）；
 > ③ **wiki-dependent spine（2.3+）**：串行，一次只有一本书在 2.3+，其 handoff 一次只有一个 pending（见 [[batch-digest-loop]]、[[delegate-mode]]）。
+
+## 并发上限（2026-07-07 补全）
+
+`--parallel N` 只约束了代码层（OCR 子进程数），没有一处明说"派给这些 handoff 作答的 sub-agent 数量也要 ≤N"。**这条现在补上：并行作答 wiki-independent handoff 时，同时存在的 sub-agent 数量不得超过 `--parallel` 的值**（默认4）。
+
+- 原因：即使 minerU 本身靠 `fcntl.flock` 强制单实例（不受 `--parallel` 影响），LLM handoff（2.1/2.2）不受这把锁约束——如果一次喂几十本书且它们的 Phase 0/1 恰好在短时间内密集完成，理论上可能同时冒出远多于 `--parallel` 数量的 pending handoff。不设上限会导致同时派发的 sub-agent 数量跟 `--parallel` 脱钩，跟"`--parallel` 控制并行度"这个用户可见的预期不一致，也可能不必要地推高瞬时并发成本。
+- 做法：主对话维护一个"当前活跃 sub-agent 数"计数，达到 `--parallel` 时新出现的 pending handoff 排队，等某个 sub-agent 完成退出后再派发下一个——不需要精确的调度器，简单的"派够 N 个就等一个回来再派"即可。
 
 ## 设计：流水线，不是 barrier
 
