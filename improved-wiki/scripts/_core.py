@@ -6,6 +6,7 @@ duplicates remain in ingest.py.
 """
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -13,6 +14,7 @@ import re
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -539,6 +541,10 @@ def save_cache(config: Config, cache: dict) -> None:
 
 # ── Checkpoint / Resume ──
 
+# Serializes same-process access to _progress_lock (see its docstring for why
+# flock alone self-deadlocks across two fds in one process).
+_progress_thread_lock = threading.Lock()
+
 def progress_path(config: Config, source_hash: str) -> Path:
     config.progress_dir.mkdir(parents=True, exist_ok=True)
     return config.progress_dir / f"{source_hash[:16]}.json"
@@ -549,6 +555,34 @@ def load_progress(config: Config, source_hash: str) -> dict | None:
     if pp.exists():
         return json.loads(pp.read_text(encoding="utf-8"))
     return None
+
+
+@contextmanager
+def _progress_lock(config: Config, source_hash: str):
+    """Per-source fcntl.flock serializing the load→update→write of progress and
+    stages files. Without this, two concurrent ingests of the same source (e.g.
+    a re-ingest overlapping a still-running one) lose updates: each reads the
+    old state, applies its own delta, and the last rename wins, erasing the
+    other's markers. The atomic tmp+rename only guarantees no torn file — it
+    does not serialize read-modify-write. This lock is an independent safety
+    net; ProjectLock (per-project) is the primary guard.
+
+    Two layers: a process-local threading.Lock prevents self-deadlock (flock is
+    per open-file-description, so two fds in the same process on the same file
+    block each other — the batch driver's ThreadPoolExecutor stages 1.2/1.3/2.1
+    could otherwise call save_progress concurrently and deadlock); fcntl.flock
+    then serializes across processes.
+    """
+    with _progress_thread_lock:
+        config.progress_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = config.progress_dir / f"{source_hash[:16]}.lock"
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
 
 
 def save_progress(config: Config, source_hash: str, data: dict) -> None:
@@ -562,19 +596,20 @@ def save_progress(config: Config, source_hash: str, data: dict) -> None:
     mark_stage_done / is_stage_done — NOT in this file. This file is a pure
     artifact store keyed by artifact name (extracted_text, chunk_analyses, …).
     """
-    pp = progress_path(config, source_hash)
-    existing: dict = {}
-    if pp.exists():
-        try:
-            existing = json.loads(pp.read_text(encoding="utf-8"))
-        except Exception:
-            # Corrupted artifact cache is not fatal — rebuild from empty.
-            existing = {}
-    existing.update(data)
-    existing["_updated_at"] = int(time.time() * 1000)
-    tmp = pp.with_suffix(".tmp")
-    tmp.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.rename(pp)
+    with _progress_lock(config, source_hash):
+        pp = progress_path(config, source_hash)
+        existing: dict = {}
+        if pp.exists():
+            try:
+                existing = json.loads(pp.read_text(encoding="utf-8"))
+            except Exception:
+                # Corrupted artifact cache is not fatal — rebuild from empty.
+                existing = {}
+        existing.update(data)
+        existing["_updated_at"] = int(time.time() * 1000)
+        tmp = pp.with_suffix(".tmp")
+        tmp.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.rename(pp)
 
 
 def clear_progress(config: Config, source_hash: str) -> None:
@@ -611,14 +646,15 @@ def load_stages(config: Config, source_hash: str) -> dict:
 
 def mark_stage_done(config: Config, source_hash: str, stage: str,
                     payload: dict | None = None) -> None:
-    stages = load_stages(config, source_hash)
-    stages[stage] = int(time.time() * 1000)
-    if payload:
-        stages[f"{stage}__payload"] = payload
-    sp = stages_path(config, source_hash)
-    tmp = sp.with_suffix(".tmp")
-    tmp.write_text(json.dumps(stages, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.rename(sp)
+    with _progress_lock(config, source_hash):
+        stages = load_stages(config, source_hash)
+        stages[stage] = int(time.time() * 1000)
+        if payload:
+            stages[f"{stage}__payload"] = payload
+        sp = stages_path(config, source_hash)
+        tmp = sp.with_suffix(".tmp")
+        tmp.write_text(json.dumps(stages, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.rename(sp)
 
 
 def get_stage_payload(config: Config, source_hash: str, stage: str) -> dict:
@@ -634,15 +670,16 @@ def unmark_stage_done(config: Config, source_hash: str, stage: str) -> None:
     better than honoring a "done" marker that would yield 0 pages and silently
     drop every concept/entity/query (the 2026-06-25 loss). Atomic tmp+rename.
     """
-    stages = load_stages(config, source_hash)
-    if stage not in stages and f"{stage}__payload" not in stages:
-        return
-    stages.pop(stage, None)
-    stages.pop(f"{stage}__payload", None)
-    sp = stages_path(config, source_hash)
-    tmp = sp.with_suffix(".tmp")
-    tmp.write_text(json.dumps(stages, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.rename(sp)
+    with _progress_lock(config, source_hash):
+        stages = load_stages(config, source_hash)
+        if stage not in stages and f"{stage}__payload" not in stages:
+            return
+        stages.pop(stage, None)
+        stages.pop(f"{stage}__payload", None)
+        sp = stages_path(config, source_hash)
+        tmp = sp.with_suffix(".tmp")
+        tmp.write_text(json.dumps(stages, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.rename(sp)
 
 
 def is_stage_done(config: Config, source_hash: str, stage: str) -> bool:
@@ -652,61 +689,82 @@ def is_stage_done(config: Config, source_hash: str, stage: str) -> bool:
 # ── Project-level lock ──
 
 class ProjectLock:
-    """PID-file based mutual exclusion for a wiki project."""
+    """fcntl.flock-based mutual exclusion for a wiki project.
+
+    The lock is an exclusive flock on ``runtime_dir/ingest.lock``, held by an
+    open file descriptor for the lock's lifetime. This is race-free (the kernel
+    serializes flock) and auto-releases on process exit — including crashes
+    (SIGKILL) — unlike the prior PID-file approach, whose check→read→kill -0→
+    unlink→write sequence was non-atomic and racy. The lock file's text content
+    (owner/pid) is advisory diagnostics only; the flock is the real lock.
+
+    A child ``ingest.py`` subprocess spawned by the batch driver passes
+    ``--skip-lock`` because the parent already holds this flock in a separate
+    process — flock is per-process (per fd), not inherited across exec, so the
+    child must not try to re-acquire.
+    """
 
     def __init__(self, config: Config, owner_id: str = ""):
+        config.runtime_dir.mkdir(parents=True, exist_ok=True)
         self._lock_path = config.runtime_dir / "ingest.lock"
         self._owner = owner_id or str(os.getpid())
+        self._fd: int | None = None
 
-    def _pid_alive(self, pid: int) -> bool:
-        try:
-            os.kill(pid, 0)
+    def acquire(self, timeout: float = 0) -> bool:
+        """Acquire the lock. Returns True on success, False if already held.
+
+        timeout=0 → non-blocking try. timeout>0 → poll every 0.1s up to ``timeout``
+        seconds. Re-entry on the same instance is idempotent.
+        """
+        if self._fd is not None:
             return True
-        except (ProcessLookupError, PermissionError):
-            return False
+        fd = os.open(self._lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            if timeout and timeout > 0:
+                deadline = time.monotonic() + timeout
+                while True:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            os.close(fd)
+                            return False
+                        time.sleep(0.1)
+            else:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    os.close(fd)
+                    return False
+        except Exception:
+            os.close(fd)
+            raise
+        # Advisory diagnostics — the flock is the real lock.
+        os.ftruncate(fd, 0)
+        os.write(fd, f"owner={self._owner} pid={os.getpid()}\n".encode())
+        self._fd = fd
+        return True
+
+    def release(self) -> None:
+        """Release the lock (close the fd, which drops the flock)."""
+        if self._fd is not None:
+            try:
+                fcntl.flock(self._fd, fcntl.LOCK_UN)
+            finally:
+                os.close(self._fd)
+                self._fd = None
 
     def __enter__(self):
-        if self._lock_path.exists():
-            try:
-                content = self._lock_path.read_text().strip()
-                parts = content.split()
-                pid_str = ""
-                for p in parts:
-                    if p.startswith("pid="):
-                        pid_str = p[4:]
-                if pid_str:
-                    pid = int(pid_str)
-                    if self._pid_alive(pid):
-                        raise RuntimeError(
-                            f"Another ingest is running (PID {pid}). "
-                            f"Wait for it to finish or remove {self._lock_path}"
-                        )
-            except RuntimeError:
-                raise
-            except Exception:
-                pass
-            self._lock_path.unlink(missing_ok=True)
-        self._lock_path.write_text(f"owner={self._owner} pid={os.getpid()}")
+        if not self.acquire():
+            raise RuntimeError(
+                f"Another ingest is running on this project. "
+                f"Wait for it to finish or remove {self._lock_path}"
+            )
         return self
 
     def __exit__(self, *args):
-        if self._lock_path.exists():
-            self._lock_path.unlink(missing_ok=True)
-
-    # Backward-compatible acquire/release for non-context-manager usage
-    def acquire(self, timeout: float = 0) -> bool:
-        """Acquire the lock. Returns True on success, False if already held.
-        timeout: seconds to wait for a stale lock (ignored — stale locks auto-release).
-        """
-        try:
-            self.__enter__()
-            return True
-        except RuntimeError:
-            return False
-
-    def release(self) -> None:
-        """Release the lock."""
-        self.__exit__(None, None, None)
+        self.release()
 
 
 # A2 (audit 2026-07-02, M7): lint-generated placeholder pages must not enter
