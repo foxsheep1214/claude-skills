@@ -78,7 +78,6 @@ if [ -d "$WIKI_DIR/lint" ] && [ "$WIKI_DIR/lint" != "$LINT_PAGES_DIR" ]; then
     echo "[lint] Migrated wiki/lint/ → $LINT_PAGES_DIR" >&2
 fi
 LINT_CACHE="$RUNTIME_DIR/lint-cache.json"
-LINT_LOCK="$RUNTIME_DIR/lint-lock"
 SEMANTIC_CACHE="$RUNTIME_DIR/lint-semantic.json"
 
 # ── Flags ──
@@ -126,21 +125,27 @@ if [ ! -d "$WIKI_DIR" ]; then
   exit 2
 fi
 
-# ── Lock ──
-if [ -e "$LINT_LOCK" ]; then
-  oldpid=$(cat "$LINT_LOCK" 2>/dev/null)
+# ── Lock (mkdir-atomic, race-free; PID staleness reclaim) ──
+# mkdir is atomic — only one instance wins. The prior PID-file approach
+# (check→kill -0→rm→write) was non-atomic and racy: two lints could both pass
+# the existence check and both write. A hard-crashed process leaves a stale
+# lockdir; we reclaim it only after confirming the recorded PID is dead, so a
+# live process is never displaced.
+LINT_LOCKDIR="$RUNTIME_DIR/lint-lock.d"
+if ! mkdir "$LINT_LOCKDIR" 2>/dev/null; then
+  oldpid=$(cat "$LINT_LOCKDIR/pid" 2>/dev/null)
   if [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null; then
     echo "[lint] Another instance (pid $oldpid) running, exiting." >&2
     exit 0
   fi
-  rm -f "$LINT_LOCK"
+  rm -rf "$LINT_LOCKDIR"
+  mkdir "$LINT_LOCKDIR" 2>/dev/null || { echo "[lint] Lock reclaim failed, exiting." >&2; exit 0; }
 fi
-trap 'rm -f "$LINT_LOCK"' EXIT
-echo $$ > "$LINT_LOCK"
+echo $$ > "$LINT_LOCKDIR/pid"
 
 # ── Phase 1: Structural lint ──
 LINT_SCRIPT=$(mktemp -t wiki-lint-XXXXXX.py)
-trap "rm -f '$LINT_SCRIPT' '$LINT_CACHE.tmp' '$LINT_CACHE.tmp.err' '$LINT_LOCK'" EXIT
+trap "rm -rf '$LINT_LOCKDIR'; rm -f '$LINT_SCRIPT' '$LINT_CACHE.tmp' '$LINT_CACHE.tmp.err'" EXIT
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export SCRIPT_DIR
@@ -216,7 +221,16 @@ for stem, path in pages.items():
 print(json.dumps(findings, ensure_ascii=False, indent=2))
 PYEOF
 
-python3 "$LINT_SCRIPT" > "$LINT_CACHE.tmp"
+# Run structural lint. Guard the cache write: a failed python run leaves a
+# partial/empty .tmp, and a blind `mv` would clobber the last good cache —
+# breaking every downstream --from-cache consumer (fix-links, sweep, dedup).
+if ! python3 "$LINT_SCRIPT" > "$LINT_CACHE.tmp" 2> "$LINT_CACHE.tmp.err"; then
+  echo "[lint] Structural lint failed — keeping previous cache." >&2
+  cat "$LINT_CACHE.tmp.err" >&2
+  rm -f "$LINT_CACHE.tmp" "$LINT_CACHE.tmp.err"
+  exit 1
+fi
+rm -f "$LINT_CACHE.tmp.err"
 mv "$LINT_CACHE.tmp" "$LINT_CACHE"
 
 # ── Summary ──
