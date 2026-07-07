@@ -193,3 +193,10 @@ the content doesn't change between merges.
 - 不同 stage 类型的 handoff 一律留给主对话重新派发（保证 prompt 规则正确）。
 - 仅限单书串行链内；跨书 2.3+ 并行仍然禁止（不变量不变）。
 - 效果：链上死区约减半，叠加 1.5 预取后 Skolnik 级单书墙钟 ≈ -15%。
+- **上限是硬性的，不是"看着还行就多连一个"**：第 2 个 handoff 答完必须退出，
+  即使书还没摄入完。2026-07-07 的 Skolnik 事故根因就是驱动 agent 没有在上限处
+  退出，一路连答到第 14 个 chunk，context 单调累积、退化成占位符输出
+  （"Radar Handbook Content" 而非真实概念名）。即便严格执行上限=2，也要在
+  每次 re-invoke 前跑一次质量检查防止提前退化的响应蒙混过关——见
+  `references/conversation-mode-agent-workflow.md` "Stage 2.2 quality gate"
+  一节 + `scripts/qc_stage22.py`。

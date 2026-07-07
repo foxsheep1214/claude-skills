@@ -31,6 +31,7 @@ Each step: `ingest.py` exits 101 → read prompt `.md` → write response `.txt`
 | Stage 2.4 | `Stage-2-4-Generation-*.md` | FILE blocks (`---FILE:wiki/<path>---\n...\n---END FILE---`) for source + concepts + entities | The largest step. Generate a page for EVERY concept/entity listed. Use exact slugs from the prompt. Only link to pages in the "Linkable pages" list. |
 | Stage 2.7 | `Stage-2-7-QueryGeneration-*.md` | 0-5 query FILE blocks or `---QUERIES: 0---` | Each query: type=query, title, background, clues, to-explore, see-also |
 | Stage 2.9 | `Stage-2-9-ComparisonReview-*.md` | 0-N comparison FILE blocks or `---COMPARISONS_IN_SOURCE: 0---` | Each comparison: why compare, table (≥4 dimensions), selection guide, see-also. |
+| Stage 3.4 | `Stage-3-4-Review-*.md` | YAML array of ≥5 review items (`type`/`title`/`description`/`affected_pages`/`severity`/`search_queries`) | Runs **after** Stage 3.1 write, on the already-written pages. Single handoff, no chunk chain — same as 2.1/2.6/2.7/2.9: just answer it and move on, no cap/dispatch decision to make. |
 | Merge tasks | `LLM-task-*.md` | Merged page body (no frontmatter) | **Delegate to subagent** — see below |
 | Wikilink enrichment | `LLM-task-*.md` (JSON) | `{}` to skip | Safe to skip if Stage 2.4 already added inline wikilinks |
 
@@ -46,71 +47,43 @@ These are repetitive — the same pages may be re-merged across runs.
 - For JSON wikilink tasks: output `{}`
 - Stop when `ingest.py` exits 0 (pipeline complete) or a non-merge/non-JSON LLM stage appears
 
-## Turn-level sub-agent orchestration (scale rule, mandatory 2026-07-07)
+## Stage 2.2 quality gate (mandatory, added 2026-07-07)
 
-**Problem (diagnosed 2026-07-07 on Skolnik 14-chunk + 5-book batch)**: A single
-driving sub-agent that serially answers every `CONVERSATION →` turn accumulates
-context monotonically. Stage 2.4 prompts are 290–440 KB each (~50–80K tokens,
-they embed the full ~250K-char chunk source text). After ~3 chunks the sub-agent
-hits its practical context ceiling and either (a) goes idle reporting "waiting
-for next prompt" without actually driving, or (b) degrades to placeholder
-outputs ("Radar Handbook Content" — the Skolnik incident). This is an
-architecture issue, not a model-context-window issue.
+**Incident (Skolnik, 14 chunks)**: a driving sub-agent kept answering
+`CONVERSATION →` turn after turn without ever exiting — the existing L4 chain
+cap (`references/delegate-mode.md`, "链式作答": max **2** same-stage handoffs
+per sub-agent, then exit and let the parent dispatch a fresh one) was not
+enforced. Context accumulated monotonically; Stage 2.4 prompts are 290–440 KB
+each (they embed the full chunk source text), and after chaining well past the
+cap the sub-agent degraded to placeholder outputs ("Radar Handbook Content"
+instead of real concept names) rather than actually reading the source.
 
-**Mandatory rule — one sub-agent per conversation turn for large books/batches**:
+**This is not a new cap — it's a reminder that the existing one is not
+optional**: the L4 rule's "上限2个handoff" is a hard ceiling, not a target to
+approach. A sub-agent chaining Stage 2.2 or Stage 2.4 handoffs MUST exit after
+its 2nd handoff and report progress back to the parent, every time, regardless
+of book size or batch size. If a driving agent ever finds itself answering a
+3rd consecutive same-stage handoff, that is the bug to fix (the exit-after-2
+step was skipped), not a sign the cap should be relaxed.
 
-When driving ingest for a book with **> 6 chunks** OR a **multi-book batch**,
-the parent orchestrator (the Claude Code session agent) MUST NOT hand the
-entire conversation loop to one long-running sub-agent. Instead it orchestrates
-turn-by-turn:
-
-```
-# parent orchestrator loop (pseudocode)
-while not all_books_stage_4_1:
-    run ingest.py (foreground or background, until it exits at CONVERSATION → or 0)
-    if log contains "CONVERSATION → Stage-X-Y-Z" with Prompt/Result paths:
-        dispatch a FRESH turn-level sub-agent:
-            "Read <Prompt path>, generate response per the prompt's instructions,
-             write to <Result path> (the .txt). Then exit."
-        wait for that sub-agent to finish (it exits after one turn — context released)
-        re-run ingest.py
-    elif ingest.py exit 0 and all stage_4_1 set:
-        break
-```
-
-**Why turn-level**:
-- Each sub-agent handles exactly one prompt → response → exit. Context is fresh
-  every turn, never accumulates across chunks. No ceiling, no fatigue-induced
-  placeholders.
-- The parent orchestrator only tracks the loop state (which prompt is pending,
-  whether ingest is done) — it does NOT read the 290 KB prompts itself, so its
-  own context stays small.
-- Applies to ALL conversation turns (Stage 2.1/2.2/2.4/2.6/2.7/2.9/LLM-task),
-  not just Stage 2.4. Stage 2.2 prompts are equally large (they also embed
-  chunk source text).
-
-**When a single long-running sub-agent is still OK**:
-- Single book with **≤ 6 chunks** (small books — Wehner 5 chunks worked fine
-  with one sub-agent).
-- Merge-only loops after Stage 3.1 (merge prompts are small, no source text).
-- In those cases the merge-loop pattern above still applies.
-
-**Quality gate (apply to every Stage 2.2 turn-level sub-agent)**:
-The parent MUST verify each Stage 2.2 response before re-running ingest:
+**Quality gate (new — catches degradation at the cheapest point, Stage 2.2,
+before it propagates into Stage 2.4's generated pages)**: after every Stage 2.2
+response, before deciding whether to chain the next handoff or hand back to the
+parent, verify:
 - ≥ 5 real concepts (count `- name:` entries in `concepts_found`)
 - No placeholder names (regex: `(?i)chunk \d|handbook content|reference material|technical content|book content`)
 - Response size ≥ 3000 bytes
-If a response fails the gate, delete the `.txt` and re-dispatch the turn
-(sub-agent must actually read the chunk source text this time). See
-`/tmp/skolnik_qc.py` for a reference QC script. This gate is what caught the
-Skolnik placeholder incident and is the non-negotiable defense against
-sub-agent laziness.
+
+Run `scripts/qc_stage22.py` (generalized from the ad-hoc script that caught the
+Skolnik incident; scans every `Stage-2-2-Chunk-*.txt` under
+`.llm-wiki/conversation/*/`) to check all responses at once. If a response
+fails the gate, delete the `.txt` and re-dispatch that turn — the sub-agent
+must actually read the chunk source text this time.
 
 **What NOT to do**:
-- Do NOT dispatch one sub-agent to "drive the whole batch" (5 books × N chunks
-  = certain context exhaustion — the 5-book batch incident).
-- Do NOT let a sub-agent silently stop and report "waiting for prompt" — that
-  means it hit the ceiling; the parent must take over with turn-level dispatch.
+- Do NOT let a sub-agent drive an entire multi-chunk book or multi-book batch
+  end-to-end by ignoring the L4 exit-after-2 step — that is exactly how
+  Skolnik degraded.
 - Do NOT skip the quality gate even when context is tight — a thin Stage 2.2
   response propagates to Stage 2.4 (ALREADY COVERED) and silently drops whole
   chapters from the wiki (Skolnik chapters 5–26).
