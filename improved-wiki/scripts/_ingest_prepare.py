@@ -390,7 +390,7 @@ def _do_prepare(
                       f"clean exit (--stop-after-stage=0)")
                 raise PrepareStopAfter("0")
 
-            global_digest = fut_digest.result() if fut_digest else progress.get("global_digest", {})
+            global_digest = fut_digest.result() if fut_digest else (progress or {}).get("global_digest", {})
 
         if needs_digest:
             _verify_stage_2_1_digest(global_digest, raw_file)
