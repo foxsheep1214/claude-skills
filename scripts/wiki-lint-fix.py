@@ -405,6 +405,81 @@ creating an empty stub page.
     print(f"[lint-fix] emitted {count} missing-page review item(s)")
 
 
+def _emit_review_for_unsuggestable(
+    wiki_dir: Path,
+    findings: list[dict],
+    *,
+    dry_run: bool,
+) -> None:
+    """Write review items for orphan / no-outlinks findings that have no
+    suggestion and so produced no fix action.
+
+    NashSU parity (audit M4, 2026-07-07): broken-link-no-suggestion already
+    routes to review via ``--no-stub`` + ``_emit_review_for_broken``. But
+    orphan (no ``suggested_source``) and no-outlinks (no ``suggested_target``)
+    findings are dropped silently by ``plan_fixes`` — there is no stub/append
+    action to take when no suggestion exists. Emit one review .md per affected
+    page into ``wiki/REVIEW/suggestion/`` so the human can decide: link
+    from/to where, deep-research, or ignore. Only called in ``--no-stub`` mode
+    (the review-routing mode ``wiki-lint.sh`` uses by default for
+    ``--fix-links``). Findings WITH a suggestion became append actions and were
+    applied; they are not emitted here.
+    """
+    review_dir = wiki_dir / "REVIEW" / "suggestion"
+    count = 0
+    seen: set[str] = set()
+    for fnd in findings:
+        kind = fnd.get("type")
+        if kind not in ("orphan", "no-outlinks"):
+            continue
+        # Skip findings that had a suggestion — those became append actions.
+        if kind == "orphan" and fnd.get("suggested_source"):
+            continue
+        if kind == "no-outlinks" and fnd.get("suggested_target"):
+            continue
+        page = fnd.get("page")
+        if not page or page in seen:
+            continue
+        seen.add(page)
+        label = ("orphan (no inbound links, no suggested source)" if kind == "orphan"
+                 else "no outbound links (no suggested target)")
+        slug = page.removesuffix(".md").replace("/", "-").replace("\\", "-")[:60]
+        date_str = "2026-07-07"  # stable date → idempotent re-runs (same filename)
+        fname = f"{date_str}-lint-{kind}-{slug}.md"
+        fpath = review_dir / fname
+        if dry_run:
+            print(f"  [review]    would create {fpath.relative_to(wiki_dir)}")
+            count += 1
+            continue
+        review_dir.mkdir(parents=True, exist_ok=True)
+        content = f"""---
+type: review
+review_type: suggestion
+title: "Unsuggestable {kind}: {page}"
+created: {date_str}
+resolved: false
+resolved_at: null
+resolved_reason: null
+affected_pages:
+  - {page}
+---
+
+# Unsuggestable {kind}: {page}
+
+This page is {label}. Structural lint's suggestion engine offered no link
+target/source, so ``--fix-links`` could not auto-fix it. Routed to review
+(``--no-stub`` mode) so a human can decide: add a link manually, deep-research
+a related concept, or ignore.
+
+**Options:** Add link manually | Deep Research | Skip
+"""
+        _atomic_write(fpath, content)
+        print(f"  [review]    created {fpath.relative_to(wiki_dir)}")
+        count += 1
+    if count:
+        print(f"[lint-fix] emitted {count} unsuggestable orphan/no-outlinks review item(s)")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--apply", action="store_true",
@@ -502,6 +577,11 @@ def main() -> int:
             # Generate review items for unsuggestable broken links (NashSU parity:
             # handleFix falls back to Review store when no suggestion exists).
             _emit_review_for_broken(project_root, wiki_dir, stub_actions, dry_run=not args.apply)
+            # Orphan / no-outlinks findings with no suggestion are dropped by
+            # plan_fixes (no stub/append action possible). Route them to review
+            # too (audit M4) — wiki-lint.sh's --fix-links always passes
+            # --no-stub, so this fires by default.
+            _emit_review_for_unsuggestable(wiki_dir, findings, dry_run=not args.apply)
     if args.no_append:
         _before = len(actions)
         actions = [a for a in actions if a.get("kind") != "append"]
