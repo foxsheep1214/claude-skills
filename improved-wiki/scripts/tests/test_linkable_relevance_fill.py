@@ -143,7 +143,22 @@ class TestSourcePageLinkableRelevance(unittest.TestCase):
 
         def _spy(prompt, config, max_tokens=None, label=None):
             prompts.append(prompt)
-            return "", "end_turn"
+            # A structurally valid book source page — the test only inspects
+            # the prompt, but Stage 2.6's required-sections validator is a hard
+            # gate (raises on missing H2s), so the mock response must satisfy
+            # all 7 book sections.
+            return (
+                "---FILE:wiki/sources/book.md---\n"
+                "---\ntype: source\ntitle: T\n---\n\n"
+                "## Book Summary\n\nA book.\n\n"
+                "## Table of Contents & Key Concepts\n\n- none\n\n"
+                "## Key Entities\n\n- none\n\n"
+                "## Main Arguments & Findings\n\n- none\n\n"
+                "## Connections to Existing Wiki\n\nNone identified.\n\n"
+                "## Contradictions & Tensions\n\nNone identified.\n\n"
+                "## Recommendations\n\nNone.\n"
+                "---END FILE---\n"
+            ), "end_turn"
 
         orig = s26.call_anthropic_protocol
         s26.call_anthropic_protocol = _spy

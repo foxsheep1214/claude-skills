@@ -144,7 +144,7 @@ def _stage_2_6_validate_main_arguments(response: str, outline) -> None:
 # ingest was well-formed, so the divergence traces to generation-vs-disk
 # rather than a parseable template violation) — this is a detection net,
 # not a fix for whatever produced the divergence.
-_STAGE_2_6_REQUIRED_HEADINGS = (
+_STAGE_2_6_REQUIRED_HEADINGS_BOOK = (
     "Book Summary",
     "Table of Contents & Key Concepts",
     "Key Entities",
@@ -153,22 +153,55 @@ _STAGE_2_6_REQUIRED_HEADINGS = (
     "Contradictions & Tensions",
     "Recommendations",
 )
+_STAGE_2_6_REQUIRED_HEADINGS_PAPER = (
+    "Paper Summary",
+    "Methodology & Results",
+    "Key Entities",
+    "Main Arguments & Findings",
+    "Connections to Existing Wiki",
+    "Contradictions & Tensions",
+    "Recommendations",
+)
 
 
-def _stage_2_6_validate_required_sections(response: str) -> None:
-    """Warn — never raise — when the response's FILE-block body is missing
-    one or more of the template's mandatory H2 sections. Non-fatal to match
-    A9's existing warn-only stance (this stage doesn't otherwise block
-    ingest on generation-quality issues); still, this is the more severe
-    failure mode (a whole section missing, not just under-sampled) so the
-    warning is intentionally loud."""
-    missing = [h for h in _STAGE_2_6_REQUIRED_HEADINGS
+def _stage_2_6_required_headings(source_kind: str) -> tuple[str, ...]:
+    """Required H2 sections for the source page body, by doctype.
+
+    Papers use "Paper Summary" + "Methodology & Results" (no chapter outline);
+    every other doctype uses the book shape — the template's else branch
+    (datasheet/standard/news/etc. all route through the book body_sections)."""
+    if source_kind == "paper":
+        return _STAGE_2_6_REQUIRED_HEADINGS_PAPER
+    return _STAGE_2_6_REQUIRED_HEADINGS_BOOK
+
+
+def _stage_2_6_validate_required_sections(response: str, source_kind: str = "book") -> None:
+    """Hard-gate — raise RuntimeError — when the response's FILE-block body is
+    missing one or more of the template's mandatory H2 sections.
+
+    A source page missing whole sections is a severe generation-quality failure
+    (the wiki's claim ledger, entity index, or connection map gone), and
+    shipping it silently violates the no-silent-fallback policy. Raising pauses
+    the ingest so the operator can re-run Stage 2.6 or fix the prompt, rather
+    than letting a malformed source page enter the wiki. The generation
+    response is archived under ``.llm-wiki/conversation/<hash>/`` for root-cause
+    investigation (do not clean that dir after a failure).
+
+    Doctype-aware: papers use "Paper Summary" + "Methodology & Results"; all
+    other doctypes use the book shape. The prior fixed list flagged "Book
+    Summary" missing on every paper — a false positive masked by warn-only."""
+    required = _stage_2_6_required_headings(source_kind)
+    missing = [h for h in required
                if not re.search(rf"^##\s+{re.escape(h)}\s*$", response, re.MULTILINE)]
     if missing:
-        print(f"  [stage 2.6][WARN] Source page is missing required section(s): "
-              f"{', '.join(missing)} — the agent likely invented its own "
-              f"structure instead of following the template. Re-run Stage "
-              f"2.6 or fix the page manually; do not let this ship silently.")
+        raise RuntimeError(
+            f"Stage 2.6 source page is missing required section(s): "
+            f"{', '.join(missing)} — the agent likely invented its own "
+            f"structure instead of following the {source_kind} template. "
+            f"Re-run Stage 2.6 (response archived under "
+            f".llm-wiki/conversation/<hash>/ for root-cause). Do not let a "
+            f"malformed source page ship silently."
+        )
 
 
 def stage_2_6_source_page(
@@ -557,7 +590,7 @@ venue: {venue_yaml}
         related_fallback=(_gen_c + _gen_e),
     )
     _stage_2_6_validate_main_arguments(response, outline)
-    _stage_2_6_validate_required_sections(response)
+    _stage_2_6_validate_required_sections(response, source_kind)
     if verbose:
         print(f"[stage 2.6] Source page generated ({len(response):,} chars, stop={stop_reason})")
     else:
