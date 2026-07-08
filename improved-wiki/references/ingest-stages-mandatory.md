@@ -72,7 +72,8 @@ Phase 划分：0 前置检查 / 1 提取 / 2 分析生成 / 3 写入富化。
 - **已知坑**：`mineru -b pipeline` CLI 在 3.4.0 有 502 bug，不可用；API path（hybrid-engine/auto）是唯一提取后端。
 
 ### Stage 1.2 · 图片提取 ⭐ 永远不能跳
-- **作用**：融进 Stage 1.1 chunk 处理——每个 chunk 调 `/file_parse` 后，`_stage_1_2_harvest_images()` 从响应 `images`（base64）+ `content_list`（页码映射）存图到 `wiki/media/<type>/<pdf-stem>/`，文件名 `p<NNN>-mineru_<md5前8>.<ext>`。全本跑完汇总 `_manifest.json`，并直接调 Stage 1.3 配文字。PPTX/DOCX 走 `_stage_1_2_extract_images_office()`（从 zip 内 `ppt/media`/`word/media` 取图）。
+- **作用**：图片存盘（harvest）融进 Stage 1.1 chunk 循环——每个 chunk 调 `/file_parse` 后，`_stage_1_2_harvest_images()` 从响应 `images`（base64）+ `content_list`（页码映射）存图到 `wiki/media/<type>/<pdf-stem>/`，文件名 `p<NNN>-mineru_<md5前8>.<ext>`。manifest 汇总（`_stage_1_2_extract_from_mineru`）+ PPTX/DOCX 提取（`_stage_1_2_extract_images_office`，从 zip 内 `ppt/media`/`word/media` 取图）+ Markdown 提取（`_stage_1_2_extract_markdown_images`，解析 `![[ref]]`/`![alt](ref)` 复制本地图片，NashSU `extractAndSaveMarkdownImages` parity）仍为独立 1.2 阶段（`stage_1_2_done` marker）。全本跑完汇总 `_manifest.json`，并直接调 Stage 1.3 配文字。
+- **NashSU 对齐**：mineru 取图对齐（本地 API base64 vs 云 zip markdown，架构差异）；无 `extractAndSaveSourceImages` 的 pdfium 回退（1.1 no-silent-fallback 延伸，minerU 必跑或 raise）；Markdown 图片提取于 2026-07-08 补齐（此前 .md 源不提图，是唯一缺口）。
 - **产物**：`wiki/media/<type>/<pdf-stem>/p<NNN>-mineru_<id>.<ext>` + `_manifest.json`。
 - **go/no-go**：抽出图总数 >0；确实无图则在 source 页 `## Embedded Images` 写"无嵌入图"。
 - **尺寸过滤**：`MINERU_IMG_MIN_WIDTH/HEIGHT` 默认 20px（故意低，保留公式截图）。

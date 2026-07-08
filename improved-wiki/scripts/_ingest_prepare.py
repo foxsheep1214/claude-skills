@@ -327,6 +327,14 @@ def _do_prepare(
                 # minerU (pipeline or VLM) and is handled by the branch above.
                 # stage_1_2_extract_images() branches on file suffix internally.
                 stage_1_2_result = stage_1_2_extract_images(raw_file, config)
+                save_progress(config, h, {"stage_1_2": stage_1_2_result})
+                mark_stage_done(config, h, "stage_1_2_done")
+            elif raw_file.suffix.lower() in (".md", ".markdown"):
+                # .md sources (method="plain-text"): extract local images referenced
+                # via ![[ref]] / ![alt](ref) — NashSU extractAndSaveMarkdownImages parity.
+                stage_1_2_result = stage_1_2_extract_images(raw_file, config)
+                save_progress(config, h, {"stage_1_2": stage_1_2_result})
+                mark_stage_done(config, h, "stage_1_2_done")
 
             # Stage 1.3: Caption extracted images (runs if 1.2 found images)
             stage_1_3_result = {"captioned": 0}
