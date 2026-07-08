@@ -549,13 +549,98 @@ def _stage_1_2_extract_from_mineru(out_dir: Path, config: Config, raw_file: Path
     }
 
 
+def _stage_1_2_extract_markdown_images(raw_file: Path, media_dir: Path, manifest_path: Path,
+                                        config: Config, min_size: int = 100) -> dict:
+    """Extract local images referenced by a Markdown source into wiki/media/<slug>/.
+
+    NashSU parity: extractAndSaveMarkdownImages + findLocalMarkdownImageRefs
+    (extract-source-images.ts). A .md source may embed images via ![[ref]]
+    (Obsidian/wikilink) or ![alt](ref) (standard markdown) pointing at local
+    files; each referenced image is copied into the media dir and recorded in
+    the manifest so Stage 1.3 captions it and Stage 3.2 injects it — same
+    pipeline as minerU-harvested figures.
+
+    Remote (http/https/ftp/data:) URIs are left in place (not copied). Only
+    local refs, resolved against the source file's directory, are copied.
+    Returns: {"count": int, "media_dir": str, "manifest": str, "images": list}
+    """
+    import re as _re
+    import shutil
+
+    _MARKDOWN_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
+    text = raw_file.read_text(encoding="utf-8")
+    source_dir = raw_file.parent
+
+    refs: list[str] = []
+    seen: set[str] = set()
+
+    def _add(raw_ref: str) -> None:
+        ref = raw_ref.split("#")[0].split("|")[0].strip()
+        if not ref:
+            return
+        if ref.lower().startswith(("http://", "https://", "ftp://", "data:")):
+            return
+        if os.path.splitext(ref)[1].lower() not in _MARKDOWN_IMAGE_EXTS:
+            return
+        if ref not in seen:
+            seen.add(ref)
+            refs.append(ref)
+
+    for m in _re.finditer(r'!\[\[([^\]]+)\]\]', text):
+        _add(m.group(1))
+    for m in _re.finditer(r'!\[[^\]]*\]\(([^)\s]+)(?:\s+["\'][^"\']*["\'])?\)', text):
+        _add(m.group(1))
+
+    saved: list[dict] = []
+    for ref in refs:
+        src = Path(ref) if Path(ref).is_absolute() else source_dir / ref
+        if not src.exists():
+            print(f"[stage 1.2] markdown image not found, skipped: {ref}")
+            continue
+        idx = len(saved) + 1
+        ext = os.path.splitext(src.name)[1].lower() or ".png"
+        dest_name = f"md_{idx:03d}_{src.stem}{ext}"
+        dest = media_dir / dest_name
+        try:
+            shutil.copyfile(str(src), str(dest))
+        except Exception as e:
+            print(f"[stage 1.2] markdown image copy failed ({ref}): {e}")
+            continue
+        w, h = 0, 0
+        try:
+            from PIL import Image
+            im = Image.open(dest)
+            w, h = im.size
+            im.close()
+        except Exception:
+            pass
+        if w and h and _is_image_too_small(w, h):
+            dest.unlink(missing_ok=True)
+            continue
+        saved.append({
+            "filename": dest_name,
+            "page": None,
+            "path": str(dest.relative_to(config.wiki_root)),
+            "width": w, "height": h,
+            "source": "markdown-embedded",
+        })
+
+    _stage_1_2_write_manifest(manifest_path, "markdown", raw_file, saved)
+    print(f"[stage 1.2] {len(saved)} markdown-embedded images copied to {media_dir.name}")
+    return {"count": len(saved), "media_dir": str(media_dir),
+            "manifest": str(manifest_path), "images": saved}
+
+
 def stage_1_2_extract_images(raw_file: Path, config: Config, min_size: int = 100) -> dict:
-    """Extract embedded images from PPTX / DOCX via their internal zipfile media/ directory
-    (NashSU parity: extractAndSaveSourceImages).
+    """Extract embedded images from PPTX / DOCX / Markdown sources.
+
+    - PPTX/DOCX: internal zipfile media/ directory (NashSU parity: extractAndSaveSourceImages).
+    - Markdown: local images referenced via ![[ref]] / ![alt](ref), copied into the media
+      dir (NashSU parity: extractAndSaveMarkdownImages, added 2026-07-08).
 
     PDF images are extracted separately by _stage_1_2_extract_from_mineru(), since all PDF
-    text extraction routes through minerU (pipeline or VLM), which extracts images as part
-    of the same pass.
+    text extraction routes through minerU (hybrid-engine/auto), which extracts images as
+    part of the same pass.
 
     Returns: {"count": int, "media_dir": str, "manifest": str, "images": list}
     """
@@ -574,4 +659,6 @@ def stage_1_2_extract_images(raw_file: Path, config: Config, min_size: int = 100
             pass  # corrupt manifest, re-extract
 
     media_dir.mkdir(parents=True, exist_ok=True)
+    if raw_file.suffix.lower() in (".md", ".markdown"):
+        return _stage_1_2_extract_markdown_images(raw_file, media_dir, manifest_path, config, min_size)
     return _stage_1_2_extract_images_office(raw_file, media_dir, manifest_path, min_size)
