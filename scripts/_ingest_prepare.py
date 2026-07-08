@@ -352,63 +352,30 @@ def _do_prepare(
 
             return stage_1_2_result, stage_1_3_result
 
-        # Parallel execution: 1.2→1.3 pipeline vs 2.1 global digest
-        needs_digest = not is_stage_done(config, h, "stage_2_1_done")
-
-        # --stop-after-stage 0 = "text+image extract only": do NOT enter 2.1.
-        # The digest future is gated so 2.1 never starts; the stop is raised
-        # below once 1.2/1.3 are persisted. (On a re-run without the flag,
-        # needs_digest stays True and 2.1 runs normally — stage_1_x_done
-        # markers make 1.x cached.)
+        # Stage 1.2->1.3 image pipeline. The standalone whole-book global
+        # digest (former Stage 2.1) was removed 2026-07-08 for NashSU
+        # alignment: the digest now rolls up inside Stage 2.2 (empty seed,
+        # per-chunk updated_global_digest). 1.2/1.3 no longer parallel 2.1.
         stop_after_0 = _stop_after_stage(config, "0")
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            fut_images = executor.submit(_run_image_pipeline)
-            fut_digest = None if (stop_after_0 or not needs_digest) else executor.submit(
-                stage_2_1_global_digest, extracted_text, raw_file, config,
-                template_content, verbose=verbose)
+        stage_1_2_result, stage_1_3_result = _run_image_pipeline()
 
-            stage_1_2_result, stage_1_3_result = fut_images.result()
+        # Persist Stage 1.2/1.3 immediately.
+        if not progress or "stage_1_2" not in progress:
+            save_progress(config, h, {
+                "stage_1_2": stage_1_2_result,
+                "stage_1_3": stage_1_3_result,
+            })
+            mark_stage_done(config, h, "stage_1_3_done")
 
-            # Persist Stage 1.2/1.3 immediately, before awaiting the digest future.
-            # fut_digest.result() below can raise ConversationPending (conversation-
-            # mode cache miss), which propagates out of this function before a
-            # later save_progress call would ever be reached — every subsequent
-            # conversation-mode round-trip would otherwise re-run
-            # _run_image_pipeline() from scratch for this source, forever.
-            if not progress or "stage_1_2" not in progress:
-                save_progress(config, h, {
-                    "stage_1_2": stage_1_2_result,
-                    "stage_1_3": stage_1_3_result,
-                })
-                mark_stage_done(config, h, "stage_1_3_done")
+        if stop_after_0:
+            print(f"\n[stop-after-stage] Stage 0 complete — "
+                  f"clean exit (--stop-after-stage=0)")
+            raise PrepareStopAfter("0")
 
-            if stop_after_0:
-                print(f"\n[stop-after-stage] Stage 0 complete — "
-                      f"clean exit (--stop-after-stage=0)")
-                raise PrepareStopAfter("0")
-
-            global_digest = fut_digest.result() if fut_digest else (progress or {}).get("global_digest", {})
-
-        if needs_digest:
-            _verify_stage_2_1_digest(global_digest, raw_file)
-            # Mark 2.1 done + persist global_digest so a resume in the 2.2/2.4
-            # window (e.g. chunk-analysis handoff) skips 2.1 via needs_digest.
-            # Conditional on needs_digest so a later resume (stage already
-            # stage_2_3_done from Fix A) does not regress the marker.
-            save_progress(config, h, {"global_digest": global_digest})
-            mark_stage_done(config, h, "stage_2_1_done")
-        else:
-            print(f"  [stage 2.1] (cached) Global Digest — {len(global_digest)} keys")
-            _verify_stage_2_1_digest(global_digest, raw_file)
-
-        # --stop-after-stage 1 = "global digest only": halt before the chunk
-        # pipeline. stage_2_1_done is set so a re-run without the flag caches
-        # 2.1 and proceeds to 2.2.
-        if _stop_after_stage(config, "1"):
-            print(f"\n[stop-after-stage] Stage 1 complete — "
-                  f"clean exit (--stop-after-stage=1)")
-            raise PrepareStopAfter("1")
+        # 2.1 removed: global_digest starts empty; Stage 2.2 rolls it up and
+        # returns the final rolled-up dict (consumed by 2.4/2.6/2.7/2.9).
+        global_digest = {}
 
         # Stage 1.3 → 2 inline (NashSU ingest.ts Step 0.6 parity): rewrite
         # ![](images/...) refs to carry their VLM caption as alt text, so the
@@ -429,7 +396,7 @@ def _do_prepare(
         # stops at the 2.2/2.3 boundary (wiki-independent prefetch) by raising
         # PrepareStopAfter("1.5"); the spine run (prefetch_only=False) reuses the
         # cached 2.2 and runs the wiki-dependent 2.3+ tail.
-        chunk_analyses, analysis, file_blocks, incremental_associations = _run_chunk_pipeline(
+        chunk_analyses, analysis, file_blocks, incremental_associations, global_digest = _run_chunk_pipeline(
             extracted_text, global_digest, raw_file, config, template_content,
             progress, verbose, analyze_only=prefetch_only)
 

@@ -120,7 +120,7 @@ class TestChunkPipelineResume(unittest.TestCase):
             }
             _core.mark_stage_done(cfg, h, "stage_2_3_done")
 
-            ca, analysis, file_blocks, assoc = _ingest_chunks._run_chunk_pipeline(
+            ca, analysis, file_blocks, assoc, _gd = _ingest_chunks._run_chunk_pipeline(
                 "extracted text " * 50, {"key_concepts": ["soc"]}, raw, cfg,
                 "template", progress, verbose=False)
 
@@ -147,7 +147,7 @@ class TestChunkPipelineResume(unittest.TestCase):
             }
             _core.mark_stage_done(cfg, h, "stage_2_3_done")
 
-            _ca, _an, file_blocks, _assoc = _ingest_chunks._run_chunk_pipeline(
+            _ca, _an, file_blocks, _assoc, _gd = _ingest_chunks._run_chunk_pipeline(
                 "extracted text " * 50, {"key_concepts": ["soc"]}, raw, cfg,
                 "template", progress, verbose=False)
 
@@ -200,7 +200,7 @@ class TestPrefetchBoundary(unittest.TestCase):
         _ingest_chunks._stage_2_2_resolve_chunk_heading_path = lambda *_a, **_k: ""
         _ingest_chunks._verify_stage_2_2_chunks = lambda *_a, **_k: None
         self._fake_ca = [{"concepts_found": [{"name": "soc"}], "entities_found": []}]
-        _ingest_chunks._analyze_all_chunks = lambda *_a, **_k: self._fake_ca
+        _ingest_chunks._analyze_all_chunks = lambda *_a, **_k: (self._fake_ca, "")
 
     def tearDown(self):
         _ingest_chunks._stage_2_1_chunk_text = self._orig["chunk_text"]
@@ -262,7 +262,7 @@ class TestPrefetchBoundary(unittest.TestCase):
                 return ca, {"method": "stub"}, [("concepts/soc.md", "body")], {}
             _ingest_chunks._generate_from_analyses = _fake_gen
 
-            ca, analysis, blocks, assoc = _ingest_chunks._run_chunk_pipeline(
+            ca, analysis, blocks, assoc, _gd = _ingest_chunks._run_chunk_pipeline(
                 "extracted " * 50, {"key_concepts": ["soc"]}, raw, cfg,
                 "template", _core.load_progress(cfg, h), verbose=False)
 
