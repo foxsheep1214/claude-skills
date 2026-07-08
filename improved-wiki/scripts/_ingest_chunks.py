@@ -32,6 +32,33 @@ from _stage_2_4_generation import (
 )
 from _stage_validators import _verify_stage_2_2_chunks
 
+def _parse_accumulated_to_dict(accumulated) -> dict:
+    """Parse the rolled-up accumulated_digest back to a dict for 2.4/2.6/2.7/2.9.
+
+    2.2's per-chunk updated_global_digest refines accumulated_digest across
+    chunks (NashSU rolling-digest parity). 2.4/2.6/2.7/2.9 consume the
+    structured fields (book_meta/outline/key_concepts/key_claims/key_entities),
+    so the final accumulated value must be a dict. Returns {} for empty/corrupt.
+    """
+    if not accumulated:
+        return {}
+    if isinstance(accumulated, dict):
+        return accumulated
+    s = str(accumulated).strip()
+    if not s or s in ("{}", '""'):
+        return {}
+    try:
+        import json as _j
+        return _j.loads(s)
+    except Exception:
+        pass
+    try:
+        import yaml as _y
+        return _y.safe_load(s) or {}
+    except Exception:
+        return {}
+
+
 def _analyze_all_chunks(
     chunk_meta: list, global_digest: dict, accumulated_digest: str,
     raw_file: Path, config: Config, template_content: str,
@@ -62,7 +89,7 @@ def _analyze_all_chunks(
         pct = done * 100 // chunk_total
         eta = ((time.time() - t_start) / done) * (chunk_total - done) if done > 0 else 0
         print(f"  [analyze] {done}/{chunk_total} [{pct}% ETA {eta:.0f}s]")
-    return chunk_analyses
+    return chunk_analyses, accumulated_digest
 
 def _build_gen_inventory(chunk_meta: list, chunk_analyses: list) -> dict[str, int]:
     """Eager slug→owner-chunk inventory for the parallel-gen path.
@@ -278,7 +305,8 @@ def _run_chunk_pipeline(
                 raise PrepareStopAfter("1.5")
             analysis = progress.get("analysis", {})
             incremental_associations = progress.get("incremental_associations", {})
-            return chunk_analyses, analysis, persisted_blocks, incremental_associations
+            global_digest = progress.get("global_digest", global_digest)
+            return chunk_analyses, analysis, persisted_blocks, incremental_associations, global_digest
 
     # Prefetch resume: Stage 2.2 was cached on its own (analyze_only run) but 2.3+
     # has not run yet. Restore chunk_analyses and skip re-analysis. When the caller
@@ -292,9 +320,11 @@ def _run_chunk_pipeline(
         _verify_stage_2_2_chunks(chunk_analyses, extracted_text)
         if analyze_only:
             raise PrepareStopAfter("1.5")
-        return _generate_from_analyses(
+        global_digest = progress.get("global_digest", global_digest)
+        result = _generate_from_analyses(
             chunk_analyses, extracted_text, global_digest, raw_file, config,
             template_content, verbose)
+        return (*result, global_digest)
 
     # \u2500\u2500 Stage 2.2: build chunk plan + analyze all chunks (wiki-independent) \u2500\u2500
     chunk_meta, chunk_total = _build_chunk_meta(extracted_text, config)
@@ -303,27 +333,32 @@ def _run_chunk_pipeline(
           f"target {config.target_chars:,} chars/chunk (est. {est_sec/60:.0f} min)")
     _stage_begin("Stage 2.2: Chunk Analysis")
     t_start = time.time()
-    accumulated_digest = json.dumps(
-        {k: global_digest[k] for k in
-         ("book_meta", "outline", "key_entities", "key_concepts")
-         if k in global_digest},
-        ensure_ascii=False, indent=2)
+    # 2.1 removed (NashSU parity, 2026-07-08): accumulated_digest starts
+    # empty — the global digest rolls up across chunks via each chunk's
+    # updated_global_digest. No whole-book prior.
+    accumulated_digest = ""
 
-    chunk_analyses = _analyze_all_chunks(
+    chunk_analyses, accumulated_digest = _analyze_all_chunks(
         chunk_meta, global_digest, accumulated_digest, raw_file, config,
         template_content, chunk_total, t_start, verbose)
 
     # Persist 2.2 on its own + mark stage_2_2_done so a prefetch (analyze_only)
     # can stop here and the later spine run restores chunk_analyses without
     # re-analyzing. 2.2 is wiki-independent \u2014 safe to cache before 2.3+ runs.
-    save_progress(config, _h, {"chunk_analyses": chunk_analyses})
+    # Roll the final accumulated_digest up into global_digest (dict) for
+    # 2.4/2.6/2.7/2.9. Persist so a cached resume restores it.
+    global_digest = _parse_accumulated_to_dict(accumulated_digest)
+
+    save_progress(config, _h, {"chunk_analyses": chunk_analyses,
+                               "global_digest": global_digest})
     mark_stage_done(config, _h, "stage_2_2_done")
     if analyze_only:
         raise PrepareStopAfter("1.5")
 
-    return _generate_from_analyses(
+    result = _generate_from_analyses(
         chunk_analyses, extracted_text, global_digest, raw_file, config,
         template_content, verbose, chunk_meta=chunk_meta)
+    return (*result, global_digest)
 
 
 def _build_chunk_meta(extracted_text: str, config: Config):
