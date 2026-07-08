@@ -82,7 +82,6 @@ from _stage_1_extract import (
     stage_1_2_extract_images,
     _stage_1_2_extract_from_mineru,
     stage_1_3_caption_images,
-    _stage_1_1_check_text_quality,
     _stage_1_1_detect_pdf_type,
     CAPTION_MAX_WORKERS,
 )
@@ -109,7 +108,7 @@ from _stage_3_write import (
 from _stage_3_2_inject_images import stage_3_2_inject_images
 from _stage_3_7_embed import stage_3_7_embed_new_pages
 from _watch import ingest_watch
-from _stage_validators import (verify_stage_0, StageValidationError, _verify_or_die, _verify_stage_1_1_text, _verify_stage_2_1_digest, _verify_stage_2_2_chunks, _verify_stage_2_4_file_blocks, validate_stage_outputs)
+from _stage_validators import (verify_stage_0, StageValidationError, _verify_or_die, _verify_stage_2_1_digest, _verify_stage_2_2_chunks, _verify_stage_2_4_file_blocks, validate_stage_outputs)
 
 
 # Use shared runtime detection (matches all other scripts)

@@ -63,8 +63,7 @@ from _core import (
 # do not remove. Dependency direction is one-way at load time:
 #   _stage_1_extract → {scanned, images, caption}
 #   scanned → {images, caption}
-#   caption → {}  (log_event reached via late import; _PARSE_METHOD_OVERRIDE
-#                  read via late import)
+#   caption → {}  (log_event reached via late import)
 #   images → {}
 from _stage_1_1_scanned import (  # noqa: F401
     _stage_1_1_extract_text_scanned,
@@ -105,17 +104,6 @@ __all__ = [
 # ══════════════════════════════════════════════════════════════════════════════
 # Constants & Concurrency Control
 # ══════════════════════════════════════════════════════════════════════════════
-
-# parse_method override for the current minerU run ("ocr" | None). Set by
-# stage_1_1_extract_text when fitz sampling detects a garbled-font PDF (text
-# layer exists but is custom-encoded junk — auto would read it via txt and
-# produce garbage, so force OCR). Read by _stage_1_1_scanned_build_parse_body
-# (in _stage_1_1_scanned.py, via late import) to emit a parse_method Form field.
-# Safe as module-level state because _stage_1_1_acquire_mineru_lock serializes
-# all minerU runs — only one ingest touches this at a time. Reset to None
-# after each run.
-_PARSE_METHOD_OVERRIDE: str | None = None
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Stage 1.1: Text extraction
@@ -199,31 +187,22 @@ def stage_1_1_extract_text(file_path: Path, config: Config) -> tuple[str, str]:
     """Extract text from a source file via the minerU API server (hybrid-engine).
 
     All PDFs (text / scanned / mixed) take ONE path: a persistent local minerU
-    API server (mineru.cli.fast_api) + /file_parse per 50-page chunk, backend
+    API server (mineru.cli.fast_api) + /file_parse per N-page chunk, backend
     hybrid-engine (server default), parse_method auto — hybrid-engine routes
     per-page (text layer present → txt, no OCR; absent → VLM OCR).
-    hybrid-engine/auto does that routing internally, so an external fitz
-    classification would be redundant.
 
-    The ONE fitz-based override: a garbled-font PDF (text layer exists but is
-    custom-encoded garbage, e.g. the Fuqua book) would be misread by auto — it
-    sees a text layer and reads it via txt, producing junk. _stage_1_1_sample_pdf
-    detects this (C0 control-char ratio > 1%) and the caller forces
-    parse_method=ocr so hybrid-engine OCRs instead of reading the garbage layer.
-    This is the sole reason fitz sampling is retained (detection only, NOT
-    extraction).
+    NashSU parity note: NashSU uses the minerU **cloud** API (mineru.net, needs
+    a token, pipeline/vlm model, 200-page cap). improved-wiki uses the **local**
+    free server (hybrid-engine/auto, no token, no page cap) — an intentional
+    offset. No garbled-font pre-detection and no extraction quality gate: NashSU
+    has neither, and on minerU 3.4.0 the OCR impact of dropping them is limited,
+    so both were removed 2026-07-08 for NashSU alignment. (If minerU is upgraded,
+    reconsider whether auto still handles garbled text layers acceptably.)
 
     txt/md/pptx/docx bypass minerU entirely.
 
-    Returns (text, method_label). method_label always contains "mineru" for PDFs
-    (the validator keys on that): "mineru-api" (auto), "mineru-api-ocr"
-    (garbled-forced OCR), suffixed "-low-quality" when <2000 chars extracted.
-
-    Backend choice rationale (verified 2026-06-23 on Wu text PDF + Huang scanned
-    PDF): hybrid-engine matches or beats pipeline/vlm-engine on both text and
-    scanned — identical CJK text, equal block-formula capture, 2.5x more inline
-    formulas on scanned vs pipeline. The API path (hybrid-engine/auto) is the
-    sole extraction backend.
+    Returns (text, method_label). method_label is "mineru-api" for PDFs — the
+    Stage-1.2 image path keys on the "mineru" prefix.
     """
     if file_path.suffix.lower() in {".txt", ".md"}:
         return file_path.read_text(encoding="utf-8"), "plain-text"
@@ -232,30 +211,9 @@ def stage_1_1_extract_text(file_path: Path, config: Config) -> tuple[str, str]:
     if file_path.suffix.lower() != ".pdf":
         raise ValueError(f"Unsupported file type: {file_path.suffix}")
 
-    # fitz sampling: garbled-font detection + diagnostics. NOT content extraction.
-    avg_chars, is_garbled, img_ratio = _stage_1_1_sample_pdf(file_path)
-    print(f"[extract] PDF sample: avg {avg_chars:.0f} chars/page, img_ratio={img_ratio:.2f}, garbled={is_garbled}")
-
-    # Garbled text layer → force OCR (auto would read the garbage layer via txt).
-    # Otherwise auto lets hybrid-engine route per-page (txt vs VLM OCR).
-    parse_method = "ocr" if is_garbled else "auto"
-    base_label = "mineru-api-ocr" if is_garbled else "mineru-api"
-
-    # Set the per-run override read by _stage_1_1_scanned_build_parse_body.
-    # Safe as module-level state: _stage_1_1_acquire_mineru_lock serializes runs.
-    global _PARSE_METHOD_OVERRIDE
-    _PARSE_METHOD_OVERRIDE = parse_method
-    try:
-        text = _stage_1_1_extract_text_scanned(file_path, config)
-        method = base_label
-    finally:
-        _PARSE_METHOD_OVERRIDE = None
-
-    # Universal quality guard.
-    if len(text) < 2000:
-        print(f"[extract] ⚠️  Only {len(text)} chars extracted -- quality may be poor")
-        method = f"{method}-low-quality"
-    return text, method
+    # parse_method=auto lets hybrid-engine route per-page (txt vs VLM OCR).
+    text = _stage_1_1_extract_text_scanned(file_path, config)
+    return text, "mineru-api"
 
 
 # ---------- Stage 0: PDF type detection ----------
@@ -348,58 +306,3 @@ def _stage_1_1_detect_pdf_type(file_path: Path, sample_pages: int = 15) -> tuple
         return ("scanned", avg)
     return ("mixed", avg)
 
-
-def _stage_1_1_check_text_quality(text: str, source_name: str = "") -> dict:
-    """Pre-ingest text quality gate (pre-Stage 1.1).
-
-    Detects garbled text from custom font encoding (e.g. Fuqua book:
-    500+ chars/page but all unreadable). Returns a quality report dict.
-    Caller should warn if quality is poor; ingest pipeline may choose to
-    abort or re-route to OCR.
-
-    Checks:
-      - C0 control character ratio (>1% → likely garbled)
-      - Printable ASCII ratio (<80% → unusual for English technical books)
-      - CJK ratio vs expected language (if source_expected_lang is set)
-    """
-    if not text:
-        return {"status": "empty", "c0_ratio": 0, "printable_ratio": 0}
-
-    _C0_RE = __import__('re').compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
-    _PRINTABLE_RE = __import__('re').compile(r'[A-Za-z0-9\s.,;:!?()[\]{}/\\@#$%^&*+=_\-~`\'"<>|]')
-    _CJK_RE = __import__('re').compile(r'[一-鿿㐀-䶿]')
-
-    sample = text[:50000]  # first 50K chars is sufficient
-    n = len(sample)
-    c0_count = len(_C0_RE.findall(sample))
-    printable_count = len(_PRINTABLE_RE.findall(sample))
-    cjk_count = len(_CJK_RE.findall(sample))
-
-    c0_ratio = c0_count / n
-    printable_ratio = printable_count / n
-    cjk_ratio = cjk_count / n
-
-    # Heuristic: classify quality
-    issues = []
-    if c0_ratio > 0.01:
-        issues.append(f"garbled: {c0_ratio:.1%} C0 control chars (font encoding failure?)")
-    if printable_ratio < 0.5 and cjk_ratio < 0.1:
-        issues.append(f"low-readability: only {printable_ratio:.1%} printable ASCII and {cjk_ratio:.1%} CJK")
-    if c0_ratio > 0.05:
-        issues.append("SEVERE: text appears to be corrupted — LLM digest will be useless")
-
-    status = "ok" if not issues else ("severe" if c0_ratio > 0.05 else "warning")
-
-    report = {
-        "status": status,
-        "c0_ratio": round(c0_ratio, 4),
-        "printable_ratio": round(printable_ratio, 4),
-        "cjk_ratio": round(cjk_ratio, 4),
-        "sample_size": n,
-        "issues": issues,
-    }
-
-    if issues:
-        print(f"[quality] {source_name}: {status.upper()} — {'; '.join(issues)}")
-
-    return report

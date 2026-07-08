@@ -45,7 +45,7 @@ MINERU_API_PORT = int(os.environ.get("MINERU_API_PORT", "19999"))
 MINERU_LOCK_FILE = Path.home() / ".cache" / "improved-wiki" / ".mineru.lock"
 MINERU_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-MINERU_CHUNK_SIZE = 50  # pages per minerU invocation
+MINERU_CHUNK_SIZE = 32  # pages per minerU invocation (crash-recovery granularity; total time is minerU-bound, so prefer small chunks: shorter per-call wait + finer resume)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -481,11 +481,6 @@ def _stage_1_1_scanned_build_parse_body(
     pdf_path.name). with_images requests return_images + return_content_list
     so figures can be harvested and mapped to source pages.
     """
-    # Late import: _PARSE_METHOD_OVERRIDE lives in the facade (_stage_1_extract)
-    # and is set by stage_1_1_extract_text before calling down into this path.
-    # Late import avoids a load-time circular dependency (facade imports this
-    # module at top level).
-    from _stage_1_extract import _PARSE_METHOD_OVERRIDE
 
     boundary = "----FormBoundary" + os.urandom(8).hex()
     parts: list[bytes] = []
@@ -499,16 +494,6 @@ def _stage_1_1_scanned_build_parse_body(
     parts.append(b'Content-Disposition: form-data; name="data"')
     parts.append(b"")
     parts.append(json.dumps({"lang": "ch"}).encode())
-    # parse_method override (set by stage_1_1_extract_text for garbled-font
-    # PDFs to force OCR). Omitting it lets the server default to "auto".
-    # NOTE: the "data" field above is actually ignored by the API (it reads
-    # lang_list/backend/parse_method as separate Form fields with defaults);
-    # parse_method here is the one that takes effect.
-    if _PARSE_METHOD_OVERRIDE:
-        parts.append(f"--{boundary}".encode())
-        parts.append(b'Content-Disposition: form-data; name="parse_method"')
-        parts.append(b"")
-        parts.append(_PARSE_METHOD_OVERRIDE.encode())
     # No `effort` field is sent: minerU runs at its server default (medium),
     # which OCRs text/tables/formulas but does NOT run per-figure image/chart
     # analysis. The opt-in effort=high path (which fed minerU's structured
