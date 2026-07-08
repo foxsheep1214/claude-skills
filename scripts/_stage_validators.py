@@ -47,16 +47,6 @@ def _verify_or_die(condition: bool, stage: str, msg: str) -> None:
         raise RuntimeError(f"[{stage}] ❌ VERIFICATION FAILED: {msg}")
 
 
-def _verify_stage_1_1_text(raw_file: Path, extracted_text: str, method: str) -> None:
-    """Verify OCR/text extraction produced usable output."""
-    _verify_or_die(len(extracted_text) >= 500, "Stage 0",
-                   f"Extracted text too short ({len(extracted_text)} chars) from {raw_file.name} "
-                   f"via {method}. Digest will not be meaningful.")
-    # For scanned PDFs with minerU, also verify per-page quality
-    if method in ("mineru", "mineru-ocr", "mineru-vlm", "mineru-local-ocr"):
-        _verify_or_die(len(extracted_text) >= 2000, "Stage 0",
-                       f"MinerU OCR output suspiciously short ({len(extracted_text)} chars). "
-                       f"VLM may have deadlocked or produced empty pages.")
 
 
 def _verify_stage_2_1_digest(global_digest: dict, raw_file: Path) -> None:
@@ -147,8 +137,9 @@ def validate_stage_outputs(
 
     # Stage 0: extracted text sufficiency.
     # Only a soft, redundant cross-check — a genuinely short/empty extraction is
-    # already HARD-gated at extract time by _verify_stage_1_1_text (raises at
-    # <500 chars). Guard on non-empty text: on a write-phase RESUME the caller
+    # (No hard gate at extract time: the _verify_stage_1_1_text quality gate
+    # was removed 2026-07-08 for NashSU alignment; verify_stage_0's >=100-char
+    # check is the only extraction guard.) Guard on non-empty text: on a write-phase RESUME the caller
     # does not reload the cached extracted text and passes "", which otherwise
     # fired a false "0 chars" warning even though extraction succeeded and every
     # page wrote. The empty-string case here means "not reloaded this run", not

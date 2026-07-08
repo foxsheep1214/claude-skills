@@ -27,7 +27,6 @@ from _stage_1_extract import (
     stage_1_2_extract_images,
     _stage_1_2_extract_from_mineru,
     stage_1_3_caption_images,
-    _stage_1_1_check_text_quality,
 )
 from _frontmatter import extract_frontmatter_title
 from _frontmatter_array import parse_frontmatter_array
@@ -42,7 +41,6 @@ from _stage_2_9_comparison import (
 from _stage_validators import (
     verify_stage_0,
     StageValidationError,
-    _verify_stage_1_1_text,
     _verify_stage_2_1_digest,
     _verify_stage_2_4_file_blocks,
 )
@@ -290,18 +288,12 @@ def _do_prepare(
         else:
             extracted_text, method = stage_1_1_extract_text(raw_file, config)
             print(f"  [extract] {method}: {len(extracted_text)} chars")
-            _verify_stage_1_1_text(raw_file, extracted_text, method)
 
             # Stage 0 Validation (Phase 2: per-stage verification)
             if not verify_stage_0(extracted_text):
                 print(f"  [validate] ❌ Stage 0 failed: text extraction insufficient")
                 raise StageValidationError("Stage 0: text extraction failed")
 
-            qr = _stage_1_1_check_text_quality(extracted_text, raw_file.name)
-            if qr["status"] == "severe":
-                print(f"  [extract] ❌ Text quality SEVERE — aborting ingest. "
-                      f"Re-run with a different PDF or re-download from source.")
-                return None
             save_progress(config, h, {
                 "extracted_text": extracted_text,
                 "extract_method": method,
@@ -321,10 +313,8 @@ def _do_prepare(
                 stage_1_2_result = progress["stage_1_2"]
                 print(f"  [stage 1.2] (cached) {stage_1_2_result.get('count', 0)} images")
             elif method.startswith("mineru"):
-                # Covers "mineru", "mineru-local-ocr", "mineru-local-ocr-low-quality"
-                # (low-quality OCR still ran and produced images on disk —
-                # excluding it here silently dropped every image from those
-                # sources even though minerU already extracted them).
+                # method is "mineru-api" for all PDFs (extraction quality gate
+                # removed 2026-07-08; all minerU runs produce images on disk).
                 ocr_out = config.extract_tmp_dir / raw_file.stem
                 if ocr_out.exists():
                     stage_1_2_result = _stage_1_2_extract_from_mineru(ocr_out, config, raw_file)
