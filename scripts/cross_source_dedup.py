@@ -370,6 +370,9 @@ def _save_dedup_embed_cache(runtime: Path, cache_key: str,
     cache_path = runtime / DEDUP_EMBED_CACHE
     vecs = {k: v for k, v in embeddings.items() if v is not None}
     data = {"key": cache_key, "count": total_pages, "vectors": vecs}
+    # Standalone CLI can run on a project that never ingested (no .llm-wiki/
+    # yet) — create the runtime dir before the atomic tmp→rename write.
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     tmp.replace(cache_path)
