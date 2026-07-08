@@ -49,7 +49,7 @@ PDF (minerU harvest)                  PPTX/DOCX (zipfile office extract)
 
 | Parameter | Default | Env var | Description |
 |-----------|---------|---------|-------------|
-| Max workers | 12 | `CAPTION_MAX_WORKERS` | Per-image parallel concurrency. Remote providers (e.g. GLM) support full parallelism. |
+| Max workers | 4 | `CAPTION_MAX_WORKERS` | Per-image parallel concurrency. 4 stays under GLM-5v-turbo free-tier rate limit (12 trips HTTP 429). |
 | Image max dim | 1568 | — | Downscale threshold (vision limit) |
 | Context window | 150 chars/side | — | before/after body text fed as anchoring context (NashSU `CONTEXT_CHARS`, matched) |
 | Tiny-image min | 20px | `MINERU_IMG_MIN_WIDTH/HEIGHT` | 过滤噪声（故意低，保留公式截图） |
@@ -132,7 +132,7 @@ captioned = _stage_1_3_caption_images_batch(images, config, media_dir, source_la
 ## Recommended provider: GLM-5v-turbo (智谱, anthropic 协议)
 
 2026-07-06 起默认 caption provider 切到智谱 `glm-5v-turbo`（远程 anthropic 端点）。
-远程端点支持真并行，`CAPTION_MAX_WORKERS=12` 可满载。
+远程端点支持真并行，但智谱 GLM-5v-turbo 免费档限流紧——默认 `CAPTION_MAX_WORKERS=4`（12 会触发 429，见下方"限流"节）。付费/高频账号可调高。
 
 ```json
 // ~/.agents/config.json
@@ -163,7 +163,7 @@ captioned = _stage_1_3_caption_images_batch(images, config, media_dir, source_la
 
 key 直接写文件（`~/.agents/config.json` 权限 600、不进 git）。
 
-⚠️ **限流：必须降并发**。智谱 GLM 端点对并发敏感，默认 `CAPTION_MAX_WORKERS=12` 会触发 `HTTP 429: Too Many Requests`——代码重试 3 次（1s/2s/4s 退避）全落在限流窗口内，连续 3 张失败触发 `CONSECUTIVE_FAIL_PAUSE=3` 硬停（防静默降级策略）。实测 Wehner 书 12 并发跑出 39 个 429 占位 + 78 张没跑到。**GLM caption 重跑务必带 `CAPTION_MAX_WORKERS=4`**（或更低），降到 4 后 117 张 pending 全部成功（0 占位）。Sidecar 是 cache，重跑只处理 pending（`[待重试]` 占位 + 缺失），已成功的跳过。
+⚠️ **限流：必须降并发**。智谱 GLM 端点对并发敏感，`CAPTION_MAX_WORKERS=12`（旧默认）会触发 `HTTP 429: Too Many Requests`——代码重试 3 次（1s/2s/4s 退避）全落在限流窗口内，连续 3 张失败触发 `CONSECUTIVE_FAIL_PAUSE=3` 硬停（防静默降级策略）。实测 Wehner 书 12 并发跑出 39 个 429 占位 + 78 张没跑到。**代码默认已降为 `CAPTION_MAX_WORKERS=4`**（2026-07-07），降到 4 后 Wehner 书 117 张 pending 全部成功（0 占位）。Sidecar 是 cache，重跑只处理 pending（`[待重试]` 占位 + 缺失），已成功的跳过。若 4 仍 429（限流窗口期/账号日配额耗尽），进一步降到 1 或切本地 Ollama `qwen3-vl:8b-instruct` provider。
 
 ## 历史 caption「解析失败」可重试修复
 

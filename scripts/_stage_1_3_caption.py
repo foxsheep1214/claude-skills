@@ -46,12 +46,13 @@ from _paths import atomic_write  # noqa: E402
 # Constants
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Default 12 parallel VLM calls — captioning is pure I/O-bound (one HTTP call
-# per image), so threads give real speedup and 12 fits comfortably under a
-# remote multi-tenant API's rate limit for typical book figure counts. Override
-# per run with the CAPTION_MAX_WORKERS env var (e.g. set to 1 for a local
-# single-instance server that serializes vision inference).
-CAPTION_MAX_WORKERS = int(os.environ.get("CAPTION_MAX_WORKERS", "12"))
+# Default 4 parallel VLM calls — captioning is pure I/O-bound (one HTTP call
+# per image), so threads give real speedup. 12 (the former default) overruns the
+# GLM-5v-turbo free-tier rate limit and trips HTTP 429 after ~3 images; 4 stays
+# under it while still parallelizing. Override per run with the
+# CAPTION_MAX_WORKERS env var (e.g. set to 1 for a local single-instance server
+# that serializes vision inference, or back up to 12 on a paid/higher-limit tier).
+CAPTION_MAX_WORKERS = int(os.environ.get("CAPTION_MAX_WORKERS", "4"))
 
 # How many chars of before/after body text to pass as anchoring context.
 # NashSU parity (image-caption-pipeline.ts CONTEXT_CHARS): NashSU tuned this
