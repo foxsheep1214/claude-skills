@@ -37,10 +37,17 @@ __all__ = [
     "stage_3_5_aggregate_repair",      # Stage 3.5
 ]
 
-# Per-side cap on body text shown to the LLM page-merge prompt. Was a hardcoded
-# 3000 that truncated normal pages mid-content and made the body-shrink
-# threshold (0.7 * full body length) unachievable. 24K comfortably holds a full
-# wiki page and stays within the merge output budget (config.max_tokens).
+# Fallback per-side cap on body text shown to the LLM page-merge prompt, used
+# only when config has no target_chars (e.g. minimal test configs). The real
+# cap is config.target_chars (see llm_merger below) — the same live-probed,
+# context-aware budget the rest of the pipeline uses for "how much text is
+# safe in one prompt". A fixed 24K (raised from a hardcoded 3000 that
+# truncated normal pages mid-content) was itself found too small 2026-07-09:
+# a comprehensive source page's body (~67 claims, ~38 entities) runs to ~65K
+# chars, well past 24K, silently truncating the "new content" side of the
+# merge before the LLM ever saw the sections beyond Table of Contents — the
+# merge then fell back to the old page's stale Key Entities/Claims/etc.
+# sections for the part it never received.
 MERGE_PROMPT_BODY_CAP = 24000
 
 # ---------- File writing ----------
@@ -304,14 +311,16 @@ def _stage_3_1_merge_page_content(existing_text: str, new_text: str, config: Con
         # the LLM tries to reproduce (bug 2026-06-25).
         old_body = strip_embedded_images_section(parse_frontmatter(prev_content)[1])
         new_body = strip_embedded_images_section(parse_frontmatter(merged_content)[1])
-        # Show each body up to a generous cap, NOT a hardcoded 3K. The
+        # Show each body up to a generous cap, NOT a hardcoded constant. The
         # body-shrink threshold (_frontmatter.merge_page_content) rejects a
-        # merge below 0.7 * max(full old, full new); truncating the prompt to 3K
-        # meant any page whose body exceeds ~4.3K was shown only its head, so the
-        # LLM could not reproduce ≥70% of the full body and the no-fallback
-        # policy raised RuntimeError on a legitimate merge (2026-06-30 ohms-law,
-        # re-ingesting 无源器件篇). Normal-sized pages are now shown in full.
-        cap = MERGE_PROMPT_BODY_CAP
+        # merge below 0.7 * max(full old, full new); truncating the prompt too
+        # aggressively meant the LLM could not reproduce ≥70% of the full body
+        # and the no-fallback policy raised RuntimeError on a legitimate merge
+        # (2026-06-30 ohms-law, re-ingesting 无源器件篇). Use the live-probed,
+        # context-aware target_chars budget already computed for this session's
+        # model (same one chunking uses) rather than a stale fixed number — a
+        # fixed 24K silently truncated large source pages (2026-07-09).
+        cap = getattr(config, "target_chars", None) or MERGE_PROMPT_BODY_CAP
         prompt = f"""Merge two versions of a wiki page. Preserve ALL unique information from both.
 Do NOT drop claims, entities, formulas, or references from either version.
 
