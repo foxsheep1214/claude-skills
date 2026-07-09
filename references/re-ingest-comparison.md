@@ -1,7 +1,42 @@
 # Re-Ingest Comparison Workflow
 
-When you need to re-ingest a book that's already been digested (e.g., to compare
-old vs new pipeline results, or to fix a broken ingest):
+When you need to re-ingest a book that's already been digested (e.g., to fix
+weak digestion, or to compare old vs new pipeline results):
+
+## 🔴 Ask first: full redo, or analysis-only?
+
+**Before touching anything**, ask the user which of the two flows below they
+want. Do not default to a full `--delete` wipe — the two flows are not
+interchangeable and one of them is only partially reversible:
+
+| | Full redo | Analysis-only (`--keep-media`) |
+|---|---|---|
+| OCR text | re-extracted | reused from `.llm-wiki/extract-tmp/` cache |
+| Images + captions | re-extracted | **kept as-is**, `wiki/media/<slug>/` untouched |
+| Stage 2.2+ analysis/generation | redone | redone |
+| Time cost | full minerU re-run (minutes-per-book) | skips minerU entirely |
+| When to use | user suspects OCR/caption quality issues, or media was never any good | user confirms OCR/images/captions were already fine — only the analysis (concepts/entities/source page) was weak |
+
+**Why this matters (2026-07-10 incident)**: a full `--delete` was run on 5
+books whose OCR/captions were actually fine — only the Stage 2.2+ digestion
+was weak. `--delete` removed `wiki/media/<slug>/` (all harvested images +
+caption sidecar files) with no way to cheaply regenerate just that piece:
+minerU's image harvest runs **inline with the same `/file_parse` API call**
+as text extraction — there is no separate image/caption cache anywhere else.
+Once `wiki/media/` is gone, the *only* way to get images/captions back is a
+full re-call of minerU (which re-does the text too, harmlessly but wastefully
+if the text was already fine).
+
+**OCR text, by contrast, IS separately cacheable**: `.llm-wiki/extract-tmp/<book>/`
+keeps per-page `p{NNNN}.txt` files independent of the wiki-side `--delete`.
+A known gotcha: the cache-hit check compares chunk-boundary names (e.g.
+`"0-50"`) against the CURRENT `MINERU_CHUNK_SIZE` (32 as of 2026-07-08) — if a
+book was originally ingested under an older chunk size, the boundary names
+won't match and Stage 1.1 will look uncached and re-run minerU even though
+every page's `.txt` already exists. If OCR reuse unexpectedly seems to be
+missing, check `.llm-wiki/extract-tmp/<book>/_mineru_stats.json`'s
+`completed_chunks` against page-file coverage before assuming the cache is
+genuinely absent.
 
 ## Rule: never read prior digest output as source material
 
@@ -16,7 +51,11 @@ reusing it as a reference defeats the point of re-ingesting from a clean source.
 applies even though Step 1 below backs up the old pages — the backup is for
 comparison in Step 4, not for reading during re-generation.
 
-## Step 1: Backup old results
+---
+
+## Flow A: Full redo (OCR + images + captions + analysis)
+
+### Step 1: Backup old results
 
 ```bash
 BOOK="从零开始学散热 - 2014 - 陈继良"
@@ -33,7 +72,12 @@ find "$PROJECT/wiki/concepts" -name "*.md" -exec grep -l "$BOOK" {} \; | \
 # Backup entities, queries, comparisons, reviews similarly
 ```
 
-## Step 2: Delete old ingest
+`--delete` also backs up the source/concept/entity pages it removes to
+`page-history/` on its own (and, since 2026-07-10, the media directory to
+`page-history/media/` too) — the manual backup above is for side-by-side
+comparison in Step 4, not the only safety net.
+
+### Step 2: Delete old ingest (full redo, including media)
 
 ```bash
 ~/.venv/bin/python3 ~/.agents/skills/improved-wiki/scripts/ingest.py \
@@ -41,9 +85,10 @@ find "$PROJECT/wiki/concepts" -name "*.md" -exec grep -l "$BOOK" {} \; | \
 ```
 
 `--delete` removes: source page + orphan concepts/entities (whose only source was
-this book) + media directory + cache entry. Prints a summary of all removed files.
+this book) + media directory (now backed up to `page-history/media/` first) + cache entry.
+Prints a summary of all removed files.
 
-## Step 3: Re-ingest
+### Step 3: Re-ingest
 
 ```bash
 # Phase 1: OCR (may timeout on 200+ page books, re-run resumes from cache)
@@ -52,6 +97,36 @@ this book) + media directory + cache entry. Prints a summary of all removed file
 # Phase 2: LLM stages (conversation mode, multiple exit-101 cycles)
 ~/.venv/bin/python3 scripts/ingest.py "raw/Book/$BOOK.pdf"
 ```
+
+## Flow B: Analysis-only re-ingest (reuse existing OCR/images/captions)
+
+Use when the user confirms OCR/images/captions are fine and only wants Stage
+2.2+ (concepts/entities/source page) redone.
+
+### Step 1: Backup old results
+
+Same as Flow A Step 1 (source/concept/entity `.md` pages only — media isn't
+touched by this flow, so it doesn't need backing up).
+
+### Step 2: Delete, keeping media
+
+```bash
+~/.venv/bin/python3 ~/.agents/skills/improved-wiki/scripts/ingest.py \
+  --delete --keep-media "raw/Book/$BOOK.pdf"
+```
+
+This removes the source page + orphan concepts/entities + cache entry, same
+as Flow A, but leaves `wiki/media/<slug>/` untouched.
+
+### Step 3: Re-ingest
+
+Same commands as Flow A Step 3. Stage 1.1 will hit the `extract-tmp` per-page
+cache and skip minerU entirely **if the chunk-boundary names match the
+current `MINERU_CHUNK_SIZE`** (see the gotcha above) — verify the ingest log
+shows `(cached)` for each chunk rather than real elapsed times (`OK (Ns, ...)`);
+if it doesn't, the boundary-name mismatch is likely the cause and text will be
+harmlessly (but wastefully) re-extracted even though `--keep-media` correctly
+preserved the images.
 
 ## Step 4: Compare
 

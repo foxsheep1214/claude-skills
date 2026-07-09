@@ -478,6 +478,10 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Don't write anything")
     parser.add_argument("--delete", action="store_true",
                         help="Delete source: remove source page, cache entry, and cleanup orphans (NashSU source-lifecycle parity)")
+    parser.add_argument("--keep-media", action="store_true",
+                        help="With --delete: keep wiki/media/<slug>/ (images+captions) instead of removing it. "
+                             "Use for an analysis-only re-ingest that reuses existing OCR/images/captions — "
+                             "ask the user before choosing this vs. a full redo (see references/re-ingest-comparison.md).")
     parser.add_argument("--enrich-wikilinks", action="store_true", default=True,
                         help="Auto-enrich new pages with [[wikilinks]] after write (NashSU enrich-wikilinks parity)")
     parser.add_argument("--no-enrich", action="store_true",
@@ -575,7 +579,7 @@ def main() -> int:
         from _source_lifecycle import delete_source
         for f in args.file:
             rf = Path(f).expanduser().resolve()
-            delete_source(rf, config, dry_run=args.dry_run)
+            delete_source(rf, config, dry_run=args.dry_run, keep_media=args.keep_media)
         return 0
 
     config = Config.from_env()
