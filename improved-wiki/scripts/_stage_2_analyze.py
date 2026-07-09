@@ -246,6 +246,19 @@ def _stage_2_1_chunk_text(text: str, target_chars: int, overlap_chars: int,
 _CHAPTER_ANCHOR_RE = re.compile(
     r"^#{1,3}\s*(第[一二三四五六七八九十百0-9]+章[^\n]*|Chapter\s+\d+[^\n]*)",
     re.MULTILINE | re.IGNORECASE)
+# Letter-spaced chapter-opener typography (Wiley ELINT live incident,
+# 2026-07-10): some books' decorative chapter-title-page graphic OCRs as a
+# BARE line of widely spaced single letters — "C H A P T E R 1", two-digit
+# chapters even space the digits ("C H A P T E R 1 0") — sitting above the
+# real "# <Chapter Title>" H1, not as a markdown heading itself. Meanwhile
+# that same book's own Table of Contents lists each chapter as "## CHAPTER N"
+# (OCR promotes TOC lines to real headings), which _CHAPTER_ANCHOR_RE matches
+# perfectly — 100% false-positive on TOC noise, 0% match on the real openers.
+# This anchor's true position is always far later in the book than any TOC
+# mention, so once detected it naturally wins the "last anchor before
+# chunk_end" comparison over the TOC's early-clustered noise.
+_CHAPTER_SPACED_RE = re.compile(r"^C\s+H\s+A\s+P\s+T\s+E\s+R\s+((?:\d\s*)+)$",
+                                 re.MULTILINE)
 _NUMERIC_HEADING_RE = re.compile(r"^#{1,3}\s*(\d+(?:\.\d+)*[ \t][^\n]*)", re.MULTILINE)
 _FRONT_MATTER_LABEL = "前置材料（前言/目录）"
 
@@ -266,6 +279,10 @@ def _stage_2_2_resolve_chunk_heading_path(text: str, chunk_start: int, chunk_end
     """
     anchors = [(m.start(), m.group(1).strip())
                for m in _CHAPTER_ANCHOR_RE.finditer(text)]
+    for m in _CHAPTER_SPACED_RE.finditer(text):
+        num = re.sub(r"\s+", "", m.group(1))
+        anchors.append((m.start(), f"Chapter {num}"))
+    anchors.sort(key=lambda a: a[0])
     if not anchors:
         anchors = [(m.start(), m.group(1).strip())
                    for m in _NUMERIC_HEADING_RE.finditer(text)]

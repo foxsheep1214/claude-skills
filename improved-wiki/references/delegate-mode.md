@@ -91,6 +91,22 @@ def ingest_via_conversation(pdf_path, project_path):
 
 ## Operational pitfalls
 
+### Read tool spuriously fails on large prompt files (2.2/2.4 handoffs)
+
+A 2.2/2.4 chunk prompt is routinely 300-460KB with at least one very long
+single line (the capped "Existing wiki pages" slug list, or the raw
+`<extracted_text>` block). The Read tool sometimes fails/over-estimates token
+count on certain (offset, limit) combinations against files this shape — seen
+live on both a Hansen chunk-1 retry and a Wiley chunk-4 prompt — even though
+the file itself is intact (valid UTF-8, no corruption). This is a Read-tool
+quirk, not a skill bug and not a sign the prompt file is broken.
+
+**Workaround for the answering subagent**: narrow the `limit` until reads
+succeed (binary-search down if a full-file or large-limit read fails), or
+fall back to `sed -n 'START,ENDp'`/`grep -n`/`awk` via Bash to inspect the
+problem region directly — both are already in every subagent's toolset. Don't
+conclude the prompt file is missing or corrupted from a single failed Read.
+
 ### Must use venv Python — system Python 3.9 will crash
 
 **Always** invoke with `~/.venv/bin/python3` — system `/usr/bin/python3` (3.9)
