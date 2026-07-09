@@ -391,6 +391,11 @@ def batch_ingest(
     try:
         for i, f in enumerate(raw_files, 1):
             h = file_sha256(f)
+            config.conversation_prefix = h[-8:]  # per-source isolation (was never
+            # set in batch mode — every batch-mode book fell through to the
+            # router's "00000000" fallback and shared one conversation dir /
+            # tasks.json across all books and all past batch ingests; see
+            # ingest_one()'s equivalent line for the single-file path)
             print(f"\n[batch] book {i}/{total_books} — {f.name}", flush=True)
 
             # Wait for this book's Phase 0/1 (bg extract). For book 1 this is the

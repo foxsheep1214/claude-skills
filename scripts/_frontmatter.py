@@ -309,9 +309,22 @@ def merge_page_content(
         if isinstance(v, list):
             return {str(s) for s in v}
         return set()
-    if _src_set(parse_frontmatter(existing_content)[0]).issuperset(
-        _src_set(parse_frontmatter(new_content)[0])
-    ) and _src_set(parse_frontmatter(new_content)[0]):
+    # Excludes type:source pages: a source page's `sources:` field is a
+    # self-referential singleton (always exactly [this book's own raw file]),
+    # so old-vs-new is trivially equal/superset on EVERY re-ingest of the same
+    # book — this heuristic was designed for concept/entity pages accumulating
+    # contributions across multiple *different* source books (where a genuine
+    # "this book's contribution is already merged in" signal exists), not for
+    # a source page's own re-ingest. Without the exclusion, this fast path
+    # fired unconditionally and silently discarded every re-generated source
+    # page body, keeping only frontmatter array unions (found 2026-07-09 via
+    # a live re-ingest: the body was byte-identical to the pre-re-ingest
+    # version despite a fresh, substantially different LLM-generated body).
+    _new_type = parse_frontmatter(new_content)[0].get("type")
+    if (_new_type != "source"
+            and _src_set(parse_frontmatter(existing_content)[0]).issuperset(
+                _src_set(parse_frontmatter(new_content)[0]))
+            and _src_set(parse_frontmatter(new_content)[0])):
         # Keep the existing (already-merged) body; union frontmatter arrays.
         return merge_array_fields_into_content(existing_content, new_content)
 
