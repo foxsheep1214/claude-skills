@@ -182,12 +182,17 @@ for f in .llm-wiki/conversation/<conv_prefix>/LLM-task-*.md; do
 done
 ```
 
-### Re-ingest pattern: `--delete` first
+### Re-ingest pattern: `--delete` first — ask full-redo vs analysis-only
 
 `--delete` removes the source page, orphaned concept/entity pages (those whose
-only source was the deleted book), media directory, and cache entry, then a
-fresh run re-ingests cleanly. **Authoritative flow (backup → delete → re-ingest
-→ compare): `references/re-ingest-comparison.md`.**
+only source was the deleted book), media directory (images+captions — backed
+up to `page-history/media/` first, 2026-07-10), and cache entry, then a fresh
+run re-ingests cleanly. **Ask the user first** whether they want a full redo
+(re-extract OCR/images/captions too) or an analysis-only re-ingest that reuses
+existing OCR/images/captions (`--delete --keep-media`) — media has no separate
+cache, so once removed without `--keep-media` it can only come back via a full
+minerU re-call. **Authoritative flow (backup → delete → re-ingest → compare),
+both variants: `references/re-ingest-comparison.md`.**
 
 ### Source page may be merged multiple times（已代码化，2026-07-09）
 
