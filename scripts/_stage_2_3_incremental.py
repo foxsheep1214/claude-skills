@@ -69,6 +69,38 @@ def _stage_2_3_initials_mismatch(name: str, slug: str) -> bool:
     return bool(a) and bool(b) and not (a & b)
 
 
+def _stage_2_3_bare_surname_mismatch(name: str, existing_title: str) -> bool:
+    """True when the EXISTING page's title is a bare single-word surname
+    (zero disambiguating tokens) while the NEW name is strictly more
+    specific (multiple parts, at least one single-letter initial).
+
+    Live failure (2026-07-09, Wiley ELINT re-ingest): existing page
+    entities/taylor.md is titled just "Taylor" (no initials in slug OR
+    title — the initials guard above requires BOTH sides to carry initials,
+    so it correctly declined to cover this). A new chunk's "J. W. Taylor"
+    (fully qualified) word-Jaccard-matched {taylor} == {taylor} → 1.0 →
+    ALREADY COVERED. Stage 2.4 generation caught the risk (per an explicit
+    prompt warning) and created a separate entities/j-w-taylor page anyway,
+    but Stage 2.6's source-page generation — a different subagent, same
+    buggy fact, no such warning — trusted the association and wikilinked
+    Key Entities to the WRONG [[taylor]] instead of the real
+    [[entities/j-w-taylor]]. A bare-surname existing page provides zero
+    evidence of being the SAME specific person as a fully-initialed new
+    name; blocking here is a one-directional refinement — a bare NEW name
+    against an initialed EXISTING page, or bare-vs-bare, are unaffected
+    (those need real semantic judgment, not a token heuristic).
+    """
+    existing_words = _stage_2_title_words(existing_title)
+    if len(existing_words) != 1:
+        return False  # existing title has its own disambiguating detail
+    if _stage_2_3_initials(existing_title):
+        # Existing title DOES carry initials (e.g. "T. T. Taylor") — it just
+        # ALSO reduces to one word under _stage_2_title_words (which strips
+        # single-letter tokens same as it does for the new name). Not bare.
+        return False
+    return bool(_stage_2_3_initials(name))
+
+
 def stage_2_3_detect_incremental_associations(wiki_root: Path, chunk_analyses: list[dict]) -> dict:
     associations = {}
     concepts_dir = wiki_root / "concepts"
@@ -89,6 +121,7 @@ def stage_2_3_detect_incremental_associations(wiki_root: Path, chunk_analyses: l
 
     existing = {}
     existing_cjk = {}
+    existing_titles = {}
     for page_dir in [concepts_dir, entities_dir]:
         if not page_dir.is_dir():
             continue
@@ -99,6 +132,7 @@ def stage_2_3_detect_incremental_associations(wiki_root: Path, chunk_analyses: l
                 if title:
                     existing[f.stem] = _stage_2_title_words(title)
                     existing_cjk[f.stem] = _stage_2_title_cjk_bigrams(title)
+                    existing_titles[f.stem] = title
             except Exception as e:
                 print(f"[2.3] warn: skip {f}: {type(e).__name__}: {e}")
 
@@ -118,7 +152,9 @@ def stage_2_3_detect_incremental_associations(wiki_root: Path, chunk_analyses: l
             elif (words and name_words
                   and len(name_words & words) / len(name_words | words) > 0.5
                   and not _stage_2_3_acronym_only_mismatch(name, slug, name_words & words)
-                  and not _stage_2_3_initials_mismatch(name, slug)):
+                  and not _stage_2_3_initials_mismatch(name, slug)
+                  and not _stage_2_3_bare_surname_mismatch(
+                      name, existing_titles.get(slug, ""))):
                 matches.append(slug)
             # CJK bigram Jaccard branch (A4, audit 2026-07-02): pure/mostly-CJK
             # titles previously had no non-exact match path at all. Separate
