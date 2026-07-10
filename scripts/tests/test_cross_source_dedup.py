@@ -241,6 +241,59 @@ class TestApplySnapshotFreshness(unittest.TestCase):
             self.assertIn("MERGED-IN-BY-GROUP-ONE.", final)
 
 
+class TestApplyMergesEagerDrain(unittest.TestCase):
+    """2026-07-10: _apply_merges must emit ALL uncached merge prompts in one
+    invocation before raising ConversationPending once — not stop at the
+    first pending group.
+
+    Why this matters more than convenience: every APPLIED merge changes pages
+    on disk, and the embedding cache + detector-batch conversation cache are
+    both content/id-keyed, so a re-invocation after even one applied merge
+    invalidates the whole detection layer (full re-embed + 60 detector
+    batches re-answered). Emitting all merge prompts while the disk is still
+    unchanged keeps every upstream cache hit; the answered merges then apply
+    together in one later invocation. The snapshot-freshness sync (see
+    TestApplySnapshotFreshness) makes this safe for groups sharing a page:
+    a stale pre-merge prompt simply misses the content-hash cache after the
+    earlier group applies, and re-pends with fresh content.
+    """
+
+    def test_all_merge_prompts_attempted_before_single_raise(self):
+        from _core import ConversationPending
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            wiki = root / "wiki"
+            (wiki / "entities").mkdir(parents=True)
+            for name, body in (("a1", "A one."), ("a2", "A two."),
+                               ("b1", "B one."), ("b2", "B two.")):
+                (wiki / "entities" / f"{name}.md").write_text(_page(
+                    f"type: entity\ntitle: {name}\ntags: []\nrelated: []\nsources: []",
+                    body,
+                ), encoding="utf-8")
+            (wiki / "index.md").write_text("# Index\n", encoding="utf-8")
+
+            merge_attempts = []
+
+            def llm_call(system_prompt: str, user_message: str) -> str:
+                if "likely refer to the same" in system_prompt:
+                    return json.dumps({"groups": [
+                        {"slugs": ["a1", "a2"], "reason": "r", "confidence": "high"},
+                        {"slugs": ["b1", "b2"], "reason": "r", "confidence": "high"},
+                    ]})
+                merge_attempts.append(user_message)
+                raise ConversationPending()
+
+            with self.assertRaises(ConversationPending):
+                ds.run_phase2(root, llm_call, apply=True, today=FIXED_TODAY,
+                              embedding_prefilter=False)
+            # BOTH groups' merge prompts were attempted (emitted), not just
+            # the first, before the single ConversationPending re-raise.
+            self.assertEqual(len(merge_attempts), 2)
+            # No merge was applied: all four pages untouched on disk.
+            for name in ("a1", "a2", "b1", "b2"):
+                self.assertTrue((wiki / "entities" / f"{name}.md").exists())
+
+
 class TestWhitelist(unittest.TestCase):
     def test_whitelist_suppresses_group(self):
         with tempfile.TemporaryDirectory() as t:

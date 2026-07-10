@@ -637,6 +637,7 @@ def _apply_merges(project_root, runtime, groups, pages, llm_call, today,
     backup_dir = runtime / f"dedup-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     backup_dir.mkdir(parents=True, exist_ok=True)
     content_by_path = dict(pages)
+    pending_merges = 0
     for g in groups:
         if g.get("confidence") == "low" and not apply_low_confidence:
             continue
@@ -657,8 +658,25 @@ def _apply_merges(project_root, runtime, groups, pages, llm_call, today,
         other_pages = [{"path": p, "content": c}
                        for p, c in content_by_path.items()
                        if _slug_from_path(p) not in group_slugs]
-        result = _dedup.merge_duplicate_group(
-            group_pages, canonical_slug, other_pages, llm_call, today=today)
+        # Eager-drain (2026-07-10): an uncached merge's prompt is written by
+        # llm_call before it raises ConversationPending — catch it and
+        # CONTINUE so one invocation emits ALL uncached merge prompts, then
+        # re-raise once at the end. Critical here (unlike the semantic-lint /
+        # detector loops, where it was only a latency win): every APPLIED
+        # merge changes pages on disk, and the embedding cache + detector
+        # conversation cache are content/id-keyed — a re-invocation after one
+        # applied merge invalidates the entire detection layer. Emitting all
+        # prompts while the disk is unchanged keeps those caches hot; the
+        # answered merges then apply together in one later invocation. Safe
+        # for groups sharing a page: the snapshot sync below changes the later
+        # group's prompt content after the earlier one applies, so a stale
+        # pre-merge answer misses the content-hash cache and re-pends fresh.
+        try:
+            result = _dedup.merge_duplicate_group(
+                group_pages, canonical_slug, other_pages, llm_call, today=today)
+        except ConversationPending:
+            pending_merges += 1
+            continue
         _persist_merge(project_root, result, backup_dir)
         # Sync the in-memory snapshot with what _persist_merge just wrote.
         for p in result.pages_to_delete:
@@ -671,6 +689,11 @@ def _apply_merges(project_root, runtime, groups, pages, llm_call, today,
                         "rewrites": [r["path"] for r in result.rewrites]})
         print(f"[dedup] merged → {canonical_slug} "
               f"(removed {sorted(removed)}, {len(result.rewrites)} rewrite(s))")
+    if pending_merges:
+        print(f"[dedup] {pending_merges} merge prompt(s) pending — emitted for "
+              f"parallel answering ({len(applied)} merge(s) applied this pass)",
+              flush=True)
+        raise ConversationPending()
     return applied
 
 
