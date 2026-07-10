@@ -284,13 +284,37 @@ class TestBatching(unittest.TestCase):
             self.assertLessEqual(len(b), ds.DEDUP_DETECTOR_BATCH_SUMMARIES)
         self.assertEqual(sum(len(b) for b in batches), 100)
 
-    def test_single_oversized_cluster_kept_whole(self):
-        # Faithful to NashSU: one 200-member cluster is one batch, not split.
+    def test_single_oversized_cluster_is_split_into_capped_batches(self):
+        # 2026-07-10: deliberate non-parity fix. NashSU's batchCandidateClusters
+        # keeps one oversized cluster whole (never sub-splits) — confirmed
+        # against the local NashSU v0.6.0 checkout, byte-for-byte the same gap.
+        # RadarWiki hit this for real: a loose 0.68 similarity threshold's
+        # transitive union-find chaining across ~7000 topically-cohesive pages
+        # produced a single 4606-member cluster, blowing a single LLM call 57x
+        # past the 80-item cap. Every batch must now stay <=80, even one
+        # cluster's own worth of candidates.
         summary_by_slug = {f"s{i}": _summ(f"s{i}") for i in range(200)}
         clusters = [[f"s{i}" for i in range(200)]]
         batches = ds._batch_candidate_clusters(clusters, summary_by_slug)
-        self.assertEqual(len(batches), 1)
-        self.assertEqual(len(batches[0]), 200)
+        self.assertGreater(len(batches), 1)
+        for b in batches:
+            self.assertLessEqual(len(b), ds.DEDUP_DETECTOR_BATCH_SUMMARIES)
+            self.assertGreaterEqual(len(b), 2)
+        self.assertEqual(sum(len(b) for b in batches), 200)
+
+    def test_oversized_cluster_flushes_pending_batch_first(self):
+        # A small cluster accumulating in `current`, followed by an oversized
+        # one, must not have the oversized cluster merged into `current` —
+        # the pending small batch is flushed first, then the big cluster is
+        # split on its own.
+        summary_by_slug = {f"s{i}": _summ(f"s{i}") for i in range(210)}
+        clusters = [["s0", "s1", "s2"]] + [[f"s{i}" for i in range(10, 210)]]
+        batches = ds._batch_candidate_clusters(clusters, summary_by_slug)
+        self.assertEqual(batches[0], [summary_by_slug["s0"], summary_by_slug["s1"],
+                                       summary_by_slug["s2"]])
+        for b in batches[1:]:
+            self.assertLessEqual(len(b), ds.DEDUP_DETECTOR_BATCH_SUMMARIES)
+        self.assertEqual(sum(len(b) for b in batches), 203)
 
     def test_small_clusters_packed_together(self):
         summary_by_slug = {f"s{i}": _summ(f"s{i}") for i in range(6)}
@@ -310,6 +334,40 @@ class TestBatching(unittest.TestCase):
         keys = {ds._normalize_slug_group_key(g["slugs"]) for g in out}
         self.assertIn(ds._normalize_slug_group_key(["paos", "聚磷菌"]), keys)
         self.assertIn(ds._normalize_slug_group_key(["x", "y"]), keys)
+
+
+class TestDetectGroupsEagerDrain(unittest.TestCase):
+    """2026-07-10: the batch loop inside _detect_groups must emit ALL
+    uncached batches' prompts (calling llm_call once per batch) before
+    raising ConversationPending a single time — not stop at the first
+    pending batch. Mirrors wiki-lint-semantic.py's eager-drain fix; the
+    candidate-cluster batches here are independent (disjoint clusters, only
+    deduped once at the end via _unique_duplicate_groups), so there's no
+    ordering dependency to preserve. Real-world trigger: a RadarWiki dedup
+    run that (after the oversized-cluster split fix above) produced dozens
+    of detector batches — answering them one round-trip at a time would
+    take hours; parallel dispatch needs all prompts emitted up front."""
+
+    def test_all_batches_attempted_before_raising_once(self):
+        from _core import ConversationPending
+        summaries = [_summ(f"s{i}") for i in range(100)]
+        pairs = [(f"s{2 * i}", f"s{2 * i + 1}") for i in range(50)]  # 50 disjoint pairs
+
+        calls = []
+
+        def llm_call(system, user):
+            calls.append(user)
+            raise ConversationPending()
+
+        with mock.patch.object(ds, "_token_candidate_pairs", return_value=pairs):
+            with self.assertRaises(ConversationPending):
+                ds._detect_groups(summaries, [], llm_call, [],
+                                  embedding_prefilter=False, token_only=True)
+
+        # 100 summaries in 2-item clusters, 80-item cap → >=2 batches. ALL of
+        # them must have been attempted (llm_call invoked once per batch)
+        # before the single re-raised ConversationPending — not just the first.
+        self.assertGreaterEqual(len(calls), 2)
 
 
 class TestEmptyPrefilterLimit(unittest.TestCase):
