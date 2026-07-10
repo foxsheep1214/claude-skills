@@ -301,14 +301,33 @@ def _filter_whitelisted_pairs(pairs, not_duplicates):
 
 def _batch_candidate_clusters(clusters, summary_by_slug):
     """Pack candidate clusters into <=DEDUP_DETECTOR_BATCH_SUMMARIES-summary
-    batches so a very large cluster doesn't blow up one LLM call. Mirrors
-    NashSU batchCandidateClusters. (NashSU dedup-runner.ts)"""
+    batches so a very large cluster doesn't blow up one LLM call.
+
+    Deliberate non-parity fix (2026-07-10): NashSU's batchCandidateClusters
+    (dedup-runner.ts) never sub-splits a single oversized cluster — it's
+    packed whole regardless of the cap, byte-for-byte confirmed against the
+    local NashSU v0.6.0 checkout. RadarWiki hit this for real: a loose 0.68
+    similarity threshold's transitive union-find chaining across ~7000
+    topically-cohesive pages produced one 4606-member cluster, blowing a
+    single LLM call 57x past the 80-item cap. Any cluster larger than the cap
+    is now split into its own <=cap chunks; a pending (not-yet-flushed) small
+    batch is flushed first so the oversized cluster's chunks don't merge into
+    unrelated candidates."""
     batches: List[list] = []
     current: list = []
     for cluster in clusters:
         cluster_summaries = [summary_by_slug[sid] for sid in cluster
                              if sid in summary_by_slug]
         if len(cluster_summaries) < 2:
+            continue
+        if len(cluster_summaries) > DEDUP_DETECTOR_BATCH_SUMMARIES:
+            if current:
+                batches.append(current)
+                current = []
+            for i in range(0, len(cluster_summaries), DEDUP_DETECTOR_BATCH_SUMMARIES):
+                chunk = cluster_summaries[i:i + DEDUP_DETECTOR_BATCH_SUMMARIES]
+                if len(chunk) >= 2:
+                    batches.append(chunk)
             continue
         if (current
                 and len(current) + len(cluster_summaries) > DEDUP_DETECTOR_BATCH_SUMMARIES):
@@ -489,11 +508,28 @@ def _detect_groups(summaries, pages, llm_call, not_duplicates, embedding_prefilt
 
     batches = _batch_candidate_clusters(clusters, summary_by_slug)
     print(f"[dedup] {len(batches)} detector batch(es).", flush=True)
+    # Eager-drain (2026-07-10, mirrors wiki-lint-semantic.py / ingest.py Stage
+    # 2.4): an uncached batch's prompt is written by llm_call() before it
+    # raises ConversationPending, so catch it per batch and CONTINUE instead
+    # of stopping at the first pending one — a single invocation thus emits
+    # prompts for ALL currently-uncached batches, and the calling agent can
+    # dispatch one subagent per prompt in parallel. Batches are disjoint
+    # clusters, only deduped once at the end via _unique_duplicate_groups, so
+    # there is no cross-batch ordering dependency to preserve.
     groups: List[dict] = []
+    pending = 0
     for batch in batches:
-        sub_groups = _dedup.detect_duplicate_groups(
-            batch, llm_call, not_duplicates=not_duplicates)
+        try:
+            sub_groups = _dedup.detect_duplicate_groups(
+                batch, llm_call, not_duplicates=not_duplicates)
+        except ConversationPending:
+            pending += 1
+            continue
         groups.extend(sub_groups)
+    if pending > 0:
+        print(f"[dedup] {pending}/{len(batches)} detector batch(es) pending — "
+              f"prompts emitted for parallel answering", flush=True)
+        raise ConversationPending()
     return _unique_duplicate_groups(groups)
 
 
