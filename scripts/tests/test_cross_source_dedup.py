@@ -241,6 +241,65 @@ class TestApplySnapshotFreshness(unittest.TestCase):
             self.assertIn("MERGED-IN-BY-GROUP-ONE.", final)
 
 
+class TestIncrementalEmbedCache(unittest.TestCase):
+    """2026-07-11 (#1): the embedding cache is per-page content-hashed —
+    unchanged pages reuse their cached vector; only new/changed pages are
+    embedded. The old v1 cache (global sorted-ids+count key) invalidated
+    wholesale on ANY page-set change, forcing a full re-embed of the whole
+    wiki (demonstrated live: a 2-page id dedupe cascaded into re-embedding
+    ~7.5K pages and 52/60 detector-batch cache misses)."""
+
+    def _run_detect(self, root, monkey_embed_calls):
+        wiki = root / "wiki"
+        pages = ds.collect_wiki_pages(wiki)
+        summaries = [s for s in (
+            _dedup.extract_entity_summary(p, c) for p, c in pages) if s]
+        import hashlib
+
+        def fake_bounded(emb_pages):
+            monkey_embed_calls.append([pg["id"] for pg in emb_pages])
+            return {pg["id"]: [1.0, 0.0] for pg in emb_pages}
+
+        original = ds._embed_pages_bounded
+        ds._embed_pages_bounded = fake_bounded
+        try:
+            runtime = root / ".llm-wiki"
+            ds._detect_groups(summaries, pages, lambda s, u: '{"groups": []}',
+                              [], embedding_prefilter=True, runtime=runtime)
+        finally:
+            ds._embed_pages_bounded = original
+
+    def test_second_run_embeds_nothing_third_embeds_only_changed(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            wiki = root / "wiki"
+            (wiki / "entities").mkdir(parents=True)
+            (wiki / "entities" / "aa.md").write_text(_page(
+                "type: entity\ntitle: AA\ntags: []\nrelated: []\nsources: []",
+                "AA body."), encoding="utf-8")
+            (wiki / "entities" / "bb.md").write_text(_page(
+                "type: entity\ntitle: BB\ntags: []\nrelated: []\nsources: []",
+                "BB body."), encoding="utf-8")
+
+            calls: list = []
+            self._run_detect(root, calls)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(sorted(calls[0]), ["aa", "bb"])
+
+            # Run 2: nothing changed → zero embed calls.
+            self._run_detect(root, calls)
+            self.assertEqual(len(calls), 1, "unchanged wiki must not re-embed")
+
+            # Run 3: change ONE page's description → only that page re-embeds
+            # (the old v1 cache would have re-embedded both).
+            (wiki / "entities" / "bb.md").write_text(_page(
+                "type: entity\ntitle: BB\ntags: []\nrelated: []\nsources: []",
+                "BB body CHANGED."), encoding="utf-8")
+            self._run_detect(root, calls)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[1], ["bb"])
+
+
 class TestApplySlugCollisionGuard(unittest.TestCase):
     """2026-07-11: a merge group containing a slug that maps to MULTIPLE files
     (same basename in different dirs) must be skipped mechanically — the

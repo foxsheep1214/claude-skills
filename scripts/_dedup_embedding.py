@@ -128,6 +128,7 @@ def candidate_pairs(
     max_pages: int = 5000,
     min_success_ratio: float = 0.8,
     embeddings: Optional[dict[str, Optional[list[float]]]] = None,
+    _force_pure: bool = False,
 ) -> list[tuple[str, str]]:
     """Generate candidate duplicate pairs: each page's top-K nearest neighbors
     above ``threshold``, self-excluded, symmetric-deduplicated.
@@ -168,6 +169,20 @@ def candidate_pairs(
             if nv is not None:
                 normalized[pg["id"]] = nv
 
+    # 2026-07-11 (#7): numpy fast path when available — the pairwise sweep
+    # becomes blocked matrix multiplication (BLAS), turning ~10 CPU-minutes
+    # at 7.5K pages into seconds. numpy is NOT a required dependency: the
+    # pure-Python loop below remains the fallback (stdlib-only convention),
+    # and both paths produce identical pair sets (same threshold semantics,
+    # same stable tie-breaking by ascending index; regression-tested for
+    # equivalence in tests/test_dedup_embedding.py).
+    try:
+        import numpy as _np
+    except ImportError:
+        _np = None
+    if _np is not None and len(normalized) >= 2 and not _force_pure:
+        return _candidate_pairs_numpy(_np, subset, normalized, threshold, top_k)
+
     pair_set: set[str] = set()
     pairs: list[tuple[str, str]] = []
     for i, pi in enumerate(subset):
@@ -192,6 +207,56 @@ def candidate_pairs(
             if key not in pair_set:
                 pair_set.add(key)
                 pairs.append((a, b))
+    return pairs
+
+
+_NUMPY_BLOCK_ROWS = 512  # rows per matmul block: 512×N similarity slab keeps
+                         # peak memory ~30MB at N=7500 instead of an N×N matrix
+
+
+def _candidate_pairs_numpy(np, subset: list[dict],
+                           normalized: dict[str, list[float]],
+                           threshold: float, top_k: int) -> list[tuple[str, str]]:
+    """numpy implementation of the top-K nearest-neighbor pair sweep.
+
+    Semantics mirror the pure-Python loop exactly: for each page (in subset
+    order), score every OTHER embedded page by dot product of the normalized
+    vectors, keep those >= threshold, take the top_k by score with ties broken
+    by ascending candidate index (the pure path's stable sort preserves the
+    ascending-j scan order), symmetric-dedup across the whole sweep.
+    float64 matches CPython float arithmetic; tiny summation-order differences
+    vs sum(map(mul, ...)) are ~1e-16 and only matter for exact-boundary ties.
+    """
+    ids = [pg["id"] for pg in subset if pg["id"] in normalized]
+    if len(ids) < 2:
+        return []
+    mat = np.array([normalized[pid] for pid in ids], dtype=np.float64)
+    n = len(ids)
+    pair_set: set = set()
+    pairs: list[tuple[str, str]] = []
+    for start in range(0, n, _NUMPY_BLOCK_ROWS):
+        stop = min(start + _NUMPY_BLOCK_ROWS, n)
+        # errstate: macOS Accelerate BLAS emits spurious divide-by-zero /
+        # overflow RuntimeWarnings from matmul even on verified-finite inputs
+        # (reproduced on clean normalized float64). Inputs here are normalized
+        # finite vectors by construction, so the suppression cannot mask a
+        # real numerical problem in this call.
+        with np.errstate(all="ignore"):
+            sims = mat[start:stop] @ mat.T  # (block, n)
+        for r in range(stop - start):
+            i = start + r
+            row = sims[r]
+            row[i] = -np.inf  # self-excluded
+            cand = np.flatnonzero(row >= threshold)
+            if cand.size == 0:
+                continue
+            order = np.argsort(-row[cand], kind="stable")
+            for j in cand[order][:top_k]:
+                a, b = ids[i], ids[int(j)]
+                key = f"{a}\t{b}" if a < b else f"{b}\t{a}"
+                if key not in pair_set:
+                    pair_set.add(key)
+                    pairs.append((a, b))
     return pairs
 
 
