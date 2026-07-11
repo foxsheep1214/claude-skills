@@ -113,6 +113,11 @@ class TestCandidatePairs(unittest.TestCase):
         threshold = 0.9
         pairs = e.candidate_pairs(pages, threshold=threshold, top_k=n, embeddings=emb)
         got = {frozenset(p) for p in pairs}
+        # The pure-Python fallback must agree with whichever path ran above
+        # (numpy when installed) — both against the cosine_similarity reference.
+        pure = e.candidate_pairs(pages, threshold=threshold, top_k=n,
+                                 embeddings=emb, _force_pure=True)
+        self.assertEqual({frozenset(p) for p in pure}, got)
 
         expected = set()
         for i in range(n):
@@ -124,6 +129,43 @@ class TestCandidatePairs(unittest.TestCase):
         self.assertEqual(got, expected)
         self.assertIn(frozenset(("p0", "p1")), got)
         self.assertIn(frozenset(("p49", "p50")), got)
+
+
+class TestNumpyPurePathEquivalence(unittest.TestCase):
+    """2026-07-11 (#7): the numpy fast path and the pure-Python fallback must
+    produce identical pair sets, including top_k truncation and threshold
+    filtering, on data with realistic score spread."""
+
+    def test_paths_agree_with_topk_truncation(self):
+        import random
+        random.seed(7)
+        n, d, top_k, threshold = 120, 24, 3, 0.75
+        pages = [{"id": f"p{i}"} for i in range(n)]
+        # Clustered vectors so many candidates clear the threshold and top_k
+        # truncation actually bites.
+        base = [[random.random() for _ in range(d)] for _ in range(4)]
+        emb = {}
+        for i in range(n):
+            b = base[i % 4]
+            emb[f"p{i}"] = [x + random.gauss(0, 0.05) for x in b]
+        fast = e.candidate_pairs(pages, threshold=threshold, top_k=top_k,
+                                 embeddings=emb)
+        pure = e.candidate_pairs(pages, threshold=threshold, top_k=top_k,
+                                 embeddings=emb, _force_pure=True)
+        self.assertEqual({frozenset(p) for p in fast},
+                         {frozenset(p) for p in pure})
+        self.assertGreater(len(fast), 0)
+
+    def test_pages_without_embeddings_skipped_identically(self):
+        pages = [{"id": "a"}, {"id": "b"}, {"id": "c"}]
+        emb = {"a": [1.0, 0.0], "b": None, "c": [0.99, 0.01]}
+        fast = e.candidate_pairs(pages, threshold=0.9, top_k=8, embeddings=emb,
+                                 min_success_ratio=0.5)
+        pure = e.candidate_pairs(pages, threshold=0.9, top_k=8, embeddings=emb,
+                                 min_success_ratio=0.5, _force_pure=True)
+        self.assertEqual({frozenset(p) for p in fast},
+                         {frozenset(p) for p in pure})
+        self.assertEqual({frozenset(p) for p in fast}, {frozenset(("a", "c"))})
 
 
 class TestClusterByPairs(unittest.TestCase):

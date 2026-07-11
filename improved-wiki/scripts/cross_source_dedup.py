@@ -357,38 +357,36 @@ def _unique_duplicate_groups(groups):
     return out
 
 
-def _make_embed_cache_key(emb_pages: list[dict]) -> str:
-    """Stable key from sorted page IDs + count. Invalidate when wiki changes."""
-    import hashlib
-    ids = sorted(pg["id"] for pg in emb_pages)
-    payload = f"{len(ids)}:{'|'.join(ids)}"
-    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+def _load_dedup_embed_cache_v2(runtime: Path) -> dict[str, dict]:
+    """Load the per-page embedding cache: {page_id: {"h": <md5 of the exact
+    embedding text>, "v": [floats]}}.
 
-
-def _load_dedup_embed_cache(runtime: Path, cache_key: str) -> dict[str, list[float]] | None:
-    """Load cached embedding vectors. Returns None on miss/corrupt/stale."""
+    v2 (2026-07-11, #1 cache brittleness): the old v1 cache was keyed on the
+    GLOBAL page set (sorted ids + count) — ANY page added/removed/renamed
+    invalidated the whole file and forced a full re-embed of the entire wiki
+    (~7.5K pages / tens of minutes), demonstrated live when a 2-page id
+    dedupe change cascaded into a full re-detection. Per-page content hashes
+    make the cache incremental: only new/changed pages are embedded. Returns
+    {} on miss/corrupt/v1-format (v1 is simply re-populated as v2 on save).
+    """
     cache_path = runtime / DEDUP_EMBED_CACHE
     if not cache_path.exists():
-        return None
+        return {}
     try:
         data = json.loads(cache_path.read_text(encoding="utf-8"))
-        if data.get("key") != cache_key:
-            return None
-        vecs_raw = data.get("vectors", {})
-        if not vecs_raw or len(vecs_raw) != data.get("count", 0):
-            return None
-        return {k: [float(x) for x in v] for k, v in vecs_raw.items()}
+        if data.get("version") != 2:
+            return {}
+        pages = data.get("pages", {})
+        return {k: v for k, v in pages.items()
+                if isinstance(v, dict) and v.get("h") and v.get("v")}
     except Exception:
-        return None
+        return {}
 
 
-def _save_dedup_embed_cache(runtime: Path, cache_key: str,
-                            embeddings: dict[str, list[float] | None],
-                            total_pages: int) -> None:
-    """Persist embedding vectors for re-invoke reuse."""
+def _save_dedup_embed_cache_v2(runtime: Path, entries: dict[str, dict]) -> None:
+    """Persist the per-page embedding cache (atomic write)."""
     cache_path = runtime / DEDUP_EMBED_CACHE
-    vecs = {k: v for k, v in embeddings.items() if v is not None}
-    data = {"key": cache_key, "count": total_pages, "vectors": vecs}
+    data = {"version": 2, "pages": entries}
     # Standalone CLI can run on a project that never ingested (no .llm-wiki/
     # yet) — create the runtime dir before the atomic tmp→rename write.
     cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -450,30 +448,48 @@ def _detect_groups(summaries, pages, llm_call, not_duplicates, embedding_prefilt
         page_ids = [pg["id"] for pg in emb_pages]
 
         try:
-            # Check embedding cache first — avoids re-embedding 2771 pages
-            # across conversation handoffs (detector batches are serial, one
-            # per invoke, but embeddings are reuseable). Cache keyed by sorted
-            # page IDs + count; auto-invalidates when wiki changes.
-            cache_key = _make_embed_cache_key(emb_pages)
-            embed_cache = None
-            if runtime is not None:
-                embed_cache = _load_dedup_embed_cache(runtime, cache_key)
-            if embed_cache is not None:
-                print(f"[dedup] embedding cache hit ({len(embed_cache)} vectors), "
-                      f"skipping re-embed.", flush=True)
-                pairs = candidate_pairs(emb_pages, threshold=DEDUP_PREFILTER_THRESHOLD,
-                                        embeddings=lambda pgs: embed_cache)
-            else:
+            # Per-page incremental embedding cache (v2, 2026-07-11): reuse the
+            # vector of every page whose exact embedding text is unchanged
+            # (md5), embed only new/changed pages. This also removes the old
+            # cache-hit path's latent crash (it passed a lambda where
+            # candidate_pairs expects a dict — never triggered because the v1
+            # global key never actually hit).
+            import hashlib as _hashlib
+            cached = _load_dedup_embed_cache_v2(runtime) if runtime is not None else {}
+            hashes = {
+                pg["id"]: _hashlib.md5(
+                    page_to_embedding_text(pg).encode("utf-8")).hexdigest()
+                for pg in emb_pages
+            }
+            embeddings: dict = {}
+            to_embed: List[dict] = []
+            for pg in emb_pages:
+                entry = cached.get(pg["id"])
+                if entry and entry.get("h") == hashes[pg["id"]]:
+                    embeddings[pg["id"]] = entry["v"]
+                else:
+                    to_embed.append(pg)
+            if to_embed:
+                print(f"[dedup] embedding cache: {len(embeddings)} hit(s), "
+                      f"{len(to_embed)} page(s) to embed", flush=True)
                 # NashSU dedup-runner overrides the module default (0.82, the
                 # intra-source value) with DEDUP_PREFILTER_THRESHOLD=0.68 so
                 # cross-language/abbrev aliases aren't missed. (NashSU dedup-runner.ts)
                 # Embeddings come from the bounded embedder (Fix 4) — hard timeouts,
                 # heartbeat, per-batch skip — not the unbounded embed_pages path.
-                embeddings = _embed_pages_bounded(emb_pages)
-                if runtime is not None:
-                    _save_dedup_embed_cache(runtime, cache_key, embeddings, len(emb_pages))
-                pairs = candidate_pairs(emb_pages, threshold=DEDUP_PREFILTER_THRESHOLD,
-                                        embeddings=embeddings)
+                embeddings.update(_embed_pages_bounded(to_embed))
+            else:
+                print(f"[dedup] embedding cache: all {len(embeddings)} page(s) "
+                      f"hit (per-page, content-hashed)", flush=True)
+            if runtime is not None:
+                # Prune ids no longer in the wiki; store only successful vectors.
+                _save_dedup_embed_cache_v2(runtime, {
+                    pid: {"h": hashes[pid], "v": vec}
+                    for pid, vec in embeddings.items()
+                    if vec and pid in hashes
+                })
+            pairs = candidate_pairs(emb_pages, threshold=DEDUP_PREFILTER_THRESHOLD,
+                                    embeddings=embeddings)
         except DuplicatePrefilterError as ex:
             if no_llm or (len(summaries) > DEDUP_EMPTY_PREFILTER_FULL_SCAN_LIMIT
                           and _is_embedding_coverage_error(ex)):
