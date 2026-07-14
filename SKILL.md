@@ -79,7 +79,7 @@ Single-file auto-ingest, lint, graph, and save-chat-to-wiki are NOT gated — pr
 - `references/comparison-generation.md` — Stage 2.9: auto-generate `wiki/comparisons/` (in-source concept pairs AND systematic multi-way 3+ comparisons)
 - `references/dedup-design.md` — two dedup tiers: intra-source (Stage 2.4 closing sub-step, ingest-time) vs cross-source (CLI, lint-time); distinct responsibilities, not interchangeable
 - `references/scanned-pdf-ocr-pipeline.md` — minerU local API extraction pipeline (all PDFs: text/scanned/mixed unified)
-- `references/raw-naming-conventions.md` — raw 文件命名规范检查机制（项目级 `raw/NAMING.md` + auto-check）
+- `references/raw-naming-conventions.md` — raw 文件命名规范检查机制（项目级 `schema.md` 命名规则 + auto-check）
 - `references/chat-ingest.md` ⭐ — interactive human-guided ingest (CLI revival of interactive ingest removed in a later NashSU version)
 - `references/deep-research.md` ⭐ — closed-loop web→wiki research pipeline (参考 NashSU deep-research.ts)
 - `references/save-chat-to-wiki.md` ⭐ — save any conversation as wiki page + auto-ingest (参考 NashSU chat-save-to-wiki.ts)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stage 0.1: raw/ file name normalizer for any wiki project.
 
-The pregate (Stage 0) pre-processing gate. Reads <project>/raw/NAMING.md and
+The pregate (Stage 0) pre-processing gate. Reads <project>/schema.md and
 extracts machine-readable rules from the ```yaml rules``` block. Checks all
 (or recent) files against those rules. In --fix mode, renames files that can
 be automatically corrected.
@@ -26,7 +26,7 @@ from typing import Optional, List, Dict, Tuple
 # ── Lightweight YAML block parser (no PyYAML dependency) ────────
 
 def _stage_0_1_parse_yaml_block(text: str) -> dict:
-    """Parse the naming-rules ```yaml block from schema.md / NAMING.md.
+    """Parse the naming-rules ```yaml block from schema.md.
 
     schema.md contains several ```yaml fences (e.g. the frontmatter example);
     pick the one that actually holds the rules — identified by a top-level
@@ -42,13 +42,13 @@ def _stage_0_1_parse_yaml_block(text: str) -> dict:
 
 
 def _stage_0_1_parse_simple_yaml(text: str) -> dict:
-    """Minimal YAML parser for the NAMING.md rules block subset.
+    """Minimal YAML parser for the schema.md rules block subset.
 
     Supports nested dicts, scalars, and lists in TWO syntaxes:
       * inline:  ``key: - a - b - c``            (single line, split on ' - ')
       * block:   ``key:\\n  - a\\n  - b``          (one item per line)
 
-    Block lists are the form NAMING.md actually uses; the previous impl
+    Block lists are the form schema.md actually uses; the previous impl
     skipped any line without a colon, silently dropping every ``- item``
     line and leaving ``vendors`` / ``vendor_prefixes`` empty — which made
     every datasheet fail the vendor check with a false "未识别的 Vendor".
@@ -292,7 +292,7 @@ def _stage_0_1_fix_file(filepath: Path, rule: dict, vendors: List[str],
 
 def stage_0_1_scan_raw(raw_root: Path, rules: dict, check: bool = True, fix: bool = False,
              verbose: bool = False, recent_minutes: Optional[int] = None) -> Dict:
-    """Scan raw/ files against parsed rules from NAMING.md."""
+    """Scan raw/ files against parsed rules from schema.md."""
     results = {"ok": 0, "issues": 0, "warns": 0, "fixed": 0, "unfixable": 0}
     cutoff = _time.time() - (recent_minutes * 60) if recent_minutes else 0
     files_skipped = 0
@@ -318,8 +318,6 @@ def stage_0_1_scan_raw(raw_root: Path, rules: dict, check: bool = True, fix: boo
             if filepath.suffix.lower() not in ('.pdf',):
                 continue
             if filepath.name.startswith('.'):
-                continue
-            if filepath.name == 'NAMING.md':
                 continue
 
             if recent_minutes:
