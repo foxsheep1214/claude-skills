@@ -62,6 +62,7 @@ from _frontmatter_array import (  # noqa: E402
     write_frontmatter_array,
 )
 from _paths import iter_wiki_pages, atomic_write as _atomic_write  # noqa: E402
+from _review_utils import resolve_review_path  # noqa: E402
 
 # Scan universe = NashSU {index, log} (overview/schema stay valid link targets,
 # their outlinks count). The engine exempts aggregates from findings, so the
@@ -375,11 +376,11 @@ def _emit_review_for_broken(
         for a in stub_actions:
             if a.get("broken") == broken and a.get("page"):
                 ref_pages.append(a["page"])
-        # Build review item
-        slug = broken.replace("/", "-").replace("\\", "-")[:60]
-        date_str = "2026-07-05"  # stable date for lint-generated items
-        fname = f"{date_str}-lint-{slug}.md"
-        fpath = review_dir / fname
+        # Build review item — readable <type>-<topic>-<date>.md + content-hash id.
+        date_str = "2026-07-05"  # stable date for lint-generated items (idempotent)
+        title = f"Missing page: [[{broken}]]"
+        fpath, review_id = resolve_review_path(
+            review_dir, "missing-page", title, date_str.replace("-", ""))
         if dry_run:
             print(f"  [review]    would create {fpath.relative_to(wiki_dir)}")
             count += 1
@@ -388,6 +389,7 @@ def _emit_review_for_broken(
         ref_list = "\n".join(f"  - {p}" for p in ref_pages[:10])
         content = f"""---
 type: review
+review_id: {review_id}
 review_type: missing-page
 title: "Missing page: [[{broken}]]"
 created: {date_str}
@@ -455,10 +457,10 @@ def _emit_review_for_unsuggestable(
         seen.add(page)
         label = ("orphan (no inbound links, no suggested source)" if kind == "orphan"
                  else "no outbound links (no suggested target)")
-        slug = page.removesuffix(".md").replace("/", "-").replace("\\", "-")[:60]
         date_str = "2026-07-07"  # stable date → idempotent re-runs (same filename)
-        fname = f"{date_str}-lint-{kind}-{slug}.md"
-        fpath = review_dir / fname
+        title = f"Unsuggestable {kind}: {page}"
+        fpath, review_id = resolve_review_path(
+            review_dir, "suggestion", title, date_str.replace("-", ""))
         if dry_run:
             print(f"  [review]    would create {fpath.relative_to(wiki_dir)}")
             count += 1
@@ -466,6 +468,7 @@ def _emit_review_for_unsuggestable(
         review_dir.mkdir(parents=True, exist_ok=True)
         content = f"""---
 type: review
+review_id: {review_id}
 review_type: suggestion
 title: "Unsuggestable {kind}: {page}"
 created: {date_str}
@@ -517,10 +520,10 @@ def _emit_review_for_uncertain_rewrite(
         suggested = act.get("suggested", "")
         score = act.get("score")
         score_str = f"{score}" if score is not None else "unknown (older cache)"
-        slug = broken.replace("/", "-").replace("\\", "-")[:60]
         date_str = "2026-07-10"  # stable date → idempotent re-runs
-        fname = f"{date_str}-lint-uncertain-rewrite-{slug}.md"
-        fpath = review_dir / fname
+        title = f"Uncertain link rewrite: [[{broken}]] → [[{suggested}]]"
+        fpath, review_id = resolve_review_path(
+            review_dir, "suggestion", title, date_str.replace("-", ""))
         if dry_run:
             print(f"  [review]    would create {fpath.relative_to(wiki_dir)}")
             count += 1
@@ -529,6 +532,7 @@ def _emit_review_for_uncertain_rewrite(
         ref_list = "\n".join(f"  - {p}" for p in ref_pages[:10])
         content = f"""---
 type: review
+review_id: {review_id}
 review_type: suggestion
 title: "Uncertain link rewrite: [[{broken}]] → [[{suggested}]]"
 created: {date_str}
@@ -583,15 +587,16 @@ def _emit_review_for_orphan_delete(
     review_dir = wiki_dir / "REVIEW" / "orphan"
     count = 0
     for rel in orphan_rels:
-        slug = rel.removesuffix(".md").replace("/", "-").replace("\\", "-")[:60]
         date_str = "2026-07-10"  # stable date → idempotent re-runs
-        fname = f"{date_str}-lint-orphan-delete-{slug}.md"
-        fpath = review_dir / fname
+        title = f"Orphan delete candidate: {rel}"
+        fpath, review_id = resolve_review_path(
+            review_dir, "orphan", title, date_str.replace("-", ""))
         if fpath.exists():
             continue
         review_dir.mkdir(parents=True, exist_ok=True)
         content = f"""---
 type: review
+review_id: {review_id}
 review_type: orphan
 title: "Orphan delete candidate: {rel}"
 created: {date_str}

@@ -53,6 +53,7 @@ if str(_script_dir) not in sys.path:
     sys.path.insert(0, str(_script_dir))
 from _core import Config  # noqa: E402
 from _paths import atomic_write  # noqa: E402
+from _review_utils import resolve_review_path  # noqa: E402
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Constants
@@ -154,16 +155,17 @@ def _emit_caption_skip_review(config, source_label: str, media_dir: Path,
     full warn + REVIEW + pause behavior."""
     import time
     date_str = time.strftime("%Y-%m-%d")
-    safe_source = re.sub(r'[^\w\s-]', '', source_label or media_dir.parent.name).strip()[:40]
-    if not safe_source:
-        safe_source = "unknown"
     reviews_dir = config.wiki_dir / "REVIEW" / "suggestion"
     reviews_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"{date_str}-{safe_source}-vlm-captioning-skipped-no-api-key.md"
-    page_path = reviews_dir / filename
+    # Generic title → one content-hash review for "captioning is unconfigured"
+    # (NashSU-style: same content = same review; the source is in source_ingest).
+    title = "VLM image captioning skipped — no caption provider API key"
+    page_path, review_id = resolve_review_path(
+        reviews_dir, "suggestion", title, date_str.replace("-", ""))
     pending = max(0, total_images - already_captioned)
     md = f"""---
 type: review
+review_id: {review_id}
 review_type: suggestion
 severity: high
 affected_pages: []

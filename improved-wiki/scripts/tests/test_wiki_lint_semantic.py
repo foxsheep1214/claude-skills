@@ -394,7 +394,7 @@ class TestEmitReviewForWarnings(unittest.TestCase):
             ]
             n = wls.emit_review_for_warnings(wiki, findings)
             self.assertEqual(n, 2)
-            contra = list((wiki / "REVIEW" / "contradiction").glob("semlint-*.md"))
+            contra = list((wiki / "REVIEW" / "contradiction").glob("contradiction-*.md"))
             self.assertEqual(len(contra), 1)
             body = contra[0].read_text(encoding="utf-8")
             self.assertIn("review_type: contradiction", body)
@@ -402,7 +402,7 @@ class TestEmitReviewForWarnings(unittest.TestCase):
             self.assertIn("resolved: false", body)
             # missing-page maps to REVIEW/missing-page so the sweep RULE stage
             # can auto-resolve it once the page exists.
-            missing = list((wiki / "REVIEW" / "missing-page").glob("semlint-*.md"))
+            missing = list((wiki / "REVIEW" / "missing-page").glob("missing-page-*.md"))
             self.assertEqual(len(missing), 1)
             # info finding produced nothing.
             sugg_dir = wiki / "REVIEW" / "suggestion"

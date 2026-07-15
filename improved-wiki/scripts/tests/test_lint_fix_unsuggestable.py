@@ -55,8 +55,11 @@ class EmitReviewForUnsuggestable(unittest.TestCase):
             # dup orphan1 skipped, broken-link skipped (wrong type).
             self.assertEqual(len(files), 2)
             names = " ".join(f.name for f in files)
-            self.assertIn("lint-orphan-concepts-orphan1", names)
-            self.assertIn("lint-no-outlinks-concepts-noout1", names)
+            # New scheme: <type>-<topic>-<date>.md (topic from the review title
+            # "Unsuggestable <kind>: <page>"). See _review_utils.review_filename.
+            self.assertIn("Unsuggestable-orphan-concepts-orphan1", names)
+            # topic truncates at 40 chars (_review_utils._REVIEW_TOPIC_MAXLEN)
+            self.assertIn("Unsuggestable-no-outlinks-concepts-noout", names)
 
     def test_emitted_item_shape(self):
         with tempfile.TemporaryDirectory() as d:
