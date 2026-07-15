@@ -1,10 +1,14 @@
 # Output Language Directive（NashSU `outputLanguage` parity）
 
-NashSU 有明确的 KB 文档语言策略（`outputLanguage` 设置）：默认 `auto` = 检测**每份源文档自身**的语言并用该语言生成（英文书 → 英文页，中文资料 → 中文页，日文论文 → 日文页）；也可以锁定整个 KB 用同一语言。以强指令 `## ⚠️ MANDATORY OUTPUT LANGUAGE` 注入提示词，且**始终原样保留专有名词/技术标识符/URL/文件名/论文标题**（如 BGA、IPC-4101、Tg 即便在非英文模式下也保留）。NashSU 把它注入约 7 个 prompt builder，含 ingest。
+**KB 只允许两种语言（用户裁定 2026-07-15）：** 默认 `auto` = 检测源文档语言，中文源 → 中文页，**其余任何语言**（英文、日文、法文、挪威文……）一律 → 英文页。不再是"每种源语言各自出一种页面语言"——旧策略会让单页语言（挪威语、法语等）混进 KB，且容易被误判触发（见下"已知误判"）。也可以用 env 锁定整个 KB 用同一语言（不受此折叠规则约束，原样透传）。以强指令 `## ⚠️ MANDATORY OUTPUT LANGUAGE` 注入提示词，且**始终原样保留专有名词/技术标识符/URL/文件名/论文标题**（如 BGA、IPC-4101、Tg 即便在非英文模式下也保留）。NashSU 把它注入约 7 个 prompt builder，含 ingest。
 
 ## 移植状态
 
-improved-wiki 早就移植了 `scripts/_language.py`（`detect_language` + `build_language_directive` + `IMPROVED_WIKI_OUTPUT_LANGUAGE` 环境变量覆盖），但过去只接入了语义 lint，**没有**接入 ingest 的生成/分析提示词。已于 2026-06-29（commit c359232）修复：`build_language_directive(<源文本样本>)` 现在在 `# Role` 之前注入全部生成/分析 builder（Stage 2.2/2.4/2.6/2.9，共 4 个——修复时含 2.1/2.7 共 6 个，2.1 已于 2026-07-08、2.7 已于 2026-07-12 移除），默认 auto（按源文本检测）。测试覆盖：`test_ingest_language_directive.py`（英文→英文、中文→中文、env 覆盖三种场景）。
+improved-wiki 早就移植了 `scripts/_language.py`（`detect_language` + `build_language_directive` + `IMPROVED_WIKI_OUTPUT_LANGUAGE` 环境变量覆盖），但过去只接入了语义 lint，**没有**接入 ingest 的生成/分析提示词。已于 2026-06-29（commit c359232）修复：`build_language_directive(<源文本样本>)` 现在在 `# Role` 之前注入全部生成/分析 builder（Stage 2.2/2.4/2.6/2.9，共 4 个——修复时含 2.1/2.7 共 6 个，2.1 已于 2026-07-08、2.7 已于 2026-07-12 移除），默认 auto（按源文本检测后折叠为中/英二选一）。测试覆盖：`test_ingest_language_directive.py`（英文→英文、中文→中文、env 覆盖三种场景）+ `test_language.py`（`TestOutputLanguageCollapsesToTwoLanguages`：法/日/挪威源均折叠为英文）。
+
+## 已知误判 & 已修（2026-07-15）
+
+`detect_language` 内部一些拉丁语系判定曾经只要求"命中 1 个功能词"（如挪威语集合里的 `for`——英语里也极常见）。真实事故：一篇纯英文 arXiv 论文（Aalborg University），作者名带 `æ`/`ø`（如 Damkjær、Ørum），摘要里普普通通一个 "for" 就把整页误判成挪威语。已把 Norwegian / Danish / Swedish / Finnish / Turkish / Romanian / Portuguese 全部统一成和 German/French 一致的"≥2 个功能词命中"门槛（`_language.py` `_detect_latin`）。`detect_language` 本身仍能正确识别真实的挪威语/丹麦语等（回归测试见 `TestDiacriticNameNotNordic`），只是不再被单个碰巧同形的英文词触发。此前"São Paulo 陷阱"类误判都靠逐本设 `IMPROVED_WIKI_OUTPUT_LANGUAGE` 硬覆盖绕过；现在从根上修了 Portuguese 判定，且即便再误判，`get_output_language` 的二语言折叠也兜底成英文，不会再产生第三种页面语言。
 
 ## 配置
 
