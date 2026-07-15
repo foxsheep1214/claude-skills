@@ -902,8 +902,18 @@ def schema_folders(schema_text: str) -> set[str]:
     NashSU schema-driven routing: the schema defines which typed folders exist for
     this project. Used to (a) tell the generation LLM which folders it may route
     pages into and (b) let the writer accept those pages instead of dropping them.
+
+    Table rows use either the bare form (``wiki/sources``) or the trailing-
+    slash form (``wiki/concepts/``) — both accepted. A negative lookahead
+    excludes a literal ``.`` right after the name so plain prose mentions of
+    aggregate FILES — e.g. "``wiki/index.md`` lists all pages..." in the
+    Index/Log Format sections — aren't misread as folder declarations. Before
+    this fix, "index" and "log" both leaked into the accept-list this way; a
+    2026-07 ingest actually hit it, writing a misclassified ``type: index``
+    page to a phantom ``wiki/index/`` directory instead of being caught by
+    schema-routing validation.
     """
-    return set(re.findall(r"wiki/([a-z0-9][a-z0-9_-]*)", schema_text or ""))
+    return set(re.findall(r"wiki/([a-z0-9][a-z0-9_-]*)/?(?!\.)", schema_text or ""))
 
 
 # Canonical page-type → folder map for the fixed base types (NashSU

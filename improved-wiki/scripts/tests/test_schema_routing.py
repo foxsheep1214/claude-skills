@@ -75,6 +75,25 @@ class TestSchemaFolders(unittest.TestCase):
         extra = _core.schema_folders(_SCHEMA_WITH_EXTRAS) - _core.BASE_PAGE_DIRS
         self.assertEqual(extra, {"people"})
 
+    def test_index_md_and_log_md_prose_mentions_are_not_folders(self):
+        # Regression (2026-07-15): every project schema.md's "## Index Format"
+        # / "## Log Format" sections mention `wiki/index.md` / `wiki/log.md`
+        # in prose. The old whole-text regex had no way to tell that apart
+        # from a real `wiki/<folder>/` table row, so "index"/"log" leaked
+        # into the writer's accept-list — one ingest actually exploited this,
+        # writing a misclassified `type: index` page to a phantom
+        # `wiki/index/` directory instead of being rejected.
+        schema = _SCHEMA_WITH_EXTRAS + (
+            "\n## Index Format\n`wiki/index.md` lists all pages.\n"
+            "## Log Format\n`wiki/log.md` records activity.\n"
+        )
+        folders = _core.schema_folders(schema)
+        self.assertNotIn("index", folders)
+        self.assertNotIn("log", folders)
+        # Real table-declared folders must still come through unaffected.
+        self.assertIn("sources", folders)
+        self.assertIn("people", folders)
+
 
 class TestLoadSchemaMd(unittest.TestCase):
     def test_reads_root_then_wiki_fallback_then_empty(self):
