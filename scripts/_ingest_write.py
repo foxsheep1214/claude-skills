@@ -205,8 +205,12 @@ def _do_write(prepared: dict, verbose: bool = False) -> dict:
     _LISTING_PAGES = {"index.md", "log.md", "overview.md", "schema.md"}
 
     try:
-        from _language import detect_language
-        expected_lang = detect_language(extracted_text[:5000]) if extracted_text else "unknown"
+        from _language import get_output_language
+        # Policy target, not raw source language: the wiki only ever holds
+        # Chinese or English pages (get_output_language collapses everything
+        # else to English), so the per-block check below must compare against
+        # that same two-language policy rather than the source's raw language.
+        expected_lang = get_output_language(extracted_text[:5000]) if extracted_text else "English"
     except ImportError:
         expected_lang = "unknown"
 

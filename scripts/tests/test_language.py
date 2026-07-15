@@ -93,6 +93,78 @@ class TestChineseAndEnglish(unittest.TestCase):
         self.assertEqual(detect_language("This is a plain English sentence about radar."), "English")
 
 
+class TestDiacriticNameNotNordic(unittest.TestCase):
+    """A single Nordic diacritic (from an author name/affiliation) plus one
+    incidental English function word must not flip an English paper to
+    Norwegian/Danish/Swedish. Real hit: an Aalborg University arXiv paper
+    (English body) with author "Alba Spliid Damkjær" (æ) and "Magnus Ørum
+    Bastrup Poulsen" (ø) was misdetected as Norwegian because the abstract
+    happened to contain the word "for" — the only Norwegian function word
+    that also doubles as common English vocabulary."""
+
+    def test_english_paper_with_danish_author_names_stays_english(self):
+        text = (
+            "Anders Malthe Westerkam, Alba Spliid Damkjaer, Magnus Oerum "
+            "Bastrup Poulsen. Aalborg University, Aalborg Denmark.\n"
+            "Abstract—We propose an analytic model for the second-order "
+            "characteristics of the radar return signal from a swarm of "
+            "rotor drones, presenting new challenges for radar detection."
+        ).replace("ae", "æ").replace("Oerum", "Ørum")
+        self.assertEqual(detect_language(text), "English")
+
+    def test_single_nordic_function_word_not_enough(self):
+        # One diacritic char + exactly one function word ("for") must not
+        # be enough on its own (mirrors the German/French ≥2 threshold).
+        self.assertEqual(
+            detect_language("Poulsen Damkjær reaching for the radar data."),
+            "English",
+        )
+
+    def test_real_norwegian_still_detected(self):
+        text = "Vi målte støyen på radarsystemet og fant gode resultater."
+        self.assertEqual(detect_language(text), "Norwegian")
+
+    def test_real_danish_still_detected(self):
+        text = "Dette system bruges til at måle støj fra dronen og fugle."
+        self.assertEqual(detect_language(text), "Danish")
+
+
+class TestOutputLanguageCollapsesToTwoLanguages(unittest.TestCase):
+    """Policy (user ruling 2026-07-15): the wiki only ever holds Chinese or
+    English pages. Any detected source language other than Chinese must
+    collapse to English — it must NOT return the source's own language."""
+
+    def setUp(self):
+        self._old = os.environ.get(OUTPUT_LANGUAGE_ENV)
+        os.environ.pop(OUTPUT_LANGUAGE_ENV, None)
+
+    def tearDown(self):
+        if self._old is None:
+            os.environ.pop(OUTPUT_LANGUAGE_ENV, None)
+        else:
+            os.environ[OUTPUT_LANGUAGE_ENV] = self._old
+
+    def test_chinese_source_stays_chinese(self):
+        self.assertEqual(get_output_language("先进米波雷达是一种重要的雷达体制。"), "Chinese")
+
+    def test_english_source_stays_english(self):
+        self.assertEqual(get_output_language("This is a plain English sentence."), "English")
+
+    def test_french_source_collapses_to_english(self):
+        text = "Le radar est un système de détection qui utilise les ondes."
+        self.assertEqual(detect_language(text), "French")  # raw detector unchanged
+        self.assertEqual(get_output_language(text), "English")  # policy collapses it
+
+    def test_norwegian_source_collapses_to_english(self):
+        text = "Vi målte støyen på radarsystemet og fant gode resultater."
+        self.assertEqual(detect_language(text), "Norwegian")  # raw detector unchanged
+        self.assertEqual(get_output_language(text), "English")  # policy collapses it
+
+    def test_japanese_source_collapses_to_english(self):
+        text = "これは日本語のテキストです。レーダーについて説明します。"
+        self.assertEqual(get_output_language(text), "English")
+
+
 class TestDirectivePreservationClauses(unittest.TestCase):
     """build_language_directive must port NashSU buildLanguageDirective's
     preservation rules so the LLM localizes prose but NEVER translates

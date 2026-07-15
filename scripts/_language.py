@@ -4,14 +4,20 @@ Supports 25+ languages via Unicode script ranges and Latin-script diacritic/word
 patterns. Used by ingest.py for output validation and wiki-lint-semantic.py for
 LLM language directives.
 
-Output language override
-------------------------
-``build_language_directive`` auto-detects the target language from the sampled
-text. To force a fixed output language regardless of source, set the env var
+Output language policy
+-----------------------
+The wiki holds only two languages. ``get_output_language`` / ``build_language_
+directive`` auto-detect the source language via ``detect_language`` (which
+still resolves 25+ languages), then collapse the result: Chinese source →
+Chinese page; anything else (English, Norwegian, German, Japanese, ...) →
+English page. ``detect_language`` itself is unchanged/unrestricted and is
+also used standalone for source/consistency checks (see ``_ingest_write.py``).
+
+To force a fixed output language regardless of source, set the env var
 ``IMPROVED_WIKI_OUTPUT_LANGUAGE`` to a language name (e.g. ``English``,
-``Chinese``, ``French``). The default value ``auto`` keeps auto-detection.
-This mirrors NashSU getOutputLanguage (output-language.ts): an explicit,
-non-``auto`` value forces the language; otherwise it falls back to detection.
+``Chinese``). The default value ``auto`` keeps the auto-detect+collapse
+behavior above. This mirrors NashSU getOutputLanguage (output-language.ts):
+an explicit, non-``auto`` value forces the language verbatim (not collapsed).
 """
 from __future__ import annotations
 
@@ -98,14 +104,24 @@ def _get_language_prompt_name(lang: str) -> str:
 def get_output_language(fallback_text: str = "") -> str:
     """Effective output language for LLM content generation.
 
-    NashSU getOutputLanguage (output-language.ts) parity: if the user has set
-    an explicit, non-"auto" override (via ``IMPROVED_WIKI_OUTPUT_LANGUAGE``),
-    use it; otherwise auto-detect from ``fallback_text``.
+    Policy (user ruling 2026-07-15): the wiki holds only two languages. A
+    Chinese source produces a Chinese page; every other detected source
+    language (English, Norwegian, German, Japanese, ...) produces an
+    English page. This replaces the old "one page per detected source
+    language" auto behavior, which let single-page languages (Norwegian,
+    French, ...) leak into the KB — often from a false-positive detection
+    off a few diacritic characters in an author name or address.
+
+    If the user has set an explicit, non-"auto" override (via
+    ``IMPROVED_WIKI_OUTPUT_LANGUAGE``), that value is honored verbatim and
+    is NOT collapsed — it is a deliberate escape hatch (NashSU
+    getOutputLanguage parity).
     """
     configured = os.environ.get(OUTPUT_LANGUAGE_ENV, "").strip()
     if configured and configured.lower() != "auto":
         return configured
-    return detect_language((fallback_text or "English")[:2000])
+    detected = detect_language((fallback_text or "English")[:2000])
+    return "Chinese" if detected == "Chinese" else "English"
 
 
 def build_language_directive(text: str) -> str:
@@ -231,7 +247,7 @@ def _detect_latin(text: str):
     if re.search(r"[ảạắằẳẵặấầẩẫậđẻẽẹếềểễệỉĩịỏọốồổỗộơớờởỡợủũụưứừửữựỷỹỵ]", lower):
         return "Vietnamese"
     # Turkish
-    if re.search(r"[ğış]", lower) and words & {"bir", "ve", "için", "ile", "bu", "da", "de"}:
+    if re.search(r"[ğış]", lower) and len(words & {"bir", "ve", "için", "ile", "bu", "da", "de"}) >= 2:
         return "Turkish"
     # Polish
     if re.search(r"[ąćęłńóśźż]", lower):
@@ -240,7 +256,7 @@ def _detect_latin(text: str):
     if re.search(r"[ěšžřďťňů]", lower):
         return "Czech"
     # Romanian
-    if re.search(r"[ăâîșț]", lower) and words & {"și", "este", "sau", "care", "pentru"}:
+    if re.search(r"[ăâîșț]", lower) and len(words & {"și", "este", "sau", "care", "pentru"}) >= 2:
         return "Romanian"
     # Hungarian
     if re.search(r"[őű]", lower):
@@ -252,7 +268,7 @@ def _detect_latin(text: str):
     if len(words & {"le", "la", "les", "est", "une", "des"}) >= 2:
         return "French"
     # Portuguese (before Spanish — stricter chars)
-    if re.search(r"[ãõç]", lower) and words & {"o", "a", "os", "as", "de", "do", "da", "não", "que"}:
+    if re.search(r"[ãõç]", lower) and len(words & {"o", "a", "os", "as", "de", "do", "da", "não", "que"}) >= 2:
         return "Portuguese"
     # Spanish (ñ/¿/¡ alone is a strong signal; otherwise require ≥2 function words)
     if re.search(r"[ñ¿¡]", lower) or len(words & {"el", "los", "las", "del", "por"}) >= 2:
@@ -264,16 +280,16 @@ def _detect_latin(text: str):
     if len(words & {"het", "een", "van", "dat"}) >= 2:
         return "Dutch"
     # Swedish
-    if re.search(r"[åäö]", lower) and words & {"och", "att", "det", "är", "för"}:
+    if re.search(r"[åäö]", lower) and len(words & {"och", "att", "det", "är", "för"}) >= 2:
         return "Swedish"
     # Norwegian
-    if re.search(r"[åæø]", lower) and words & {"og", "er", "det", "for", "med", "på"}:
+    if re.search(r"[åæø]", lower) and len(words & {"og", "er", "det", "for", "med", "på"}) >= 2:
         return "Norwegian"
     # Danish
-    if re.search(r"[åæø]", lower) and words & {"og", "er", "det", "til", "med", "af"}:
+    if re.search(r"[åæø]", lower) and len(words & {"og", "er", "det", "til", "med", "af"}) >= 2:
         return "Danish"
     # Finnish
-    if re.search(r"[äö]", lower) and words & {"ja", "on", "ei", "se", "että", "tai", "kun"}:
+    if re.search(r"[äö]", lower) and len(words & {"ja", "on", "ei", "se", "että", "tai", "kun"}) >= 2:
         return "Finnish"
     # Indonesian
     if len(words & {"yang", "dari", "untuk", "dengan", "adalah"}) >= 2:
