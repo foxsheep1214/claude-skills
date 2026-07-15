@@ -1,7 +1,7 @@
 
 from _stage_2_base import *
 from _paths import atomic_write
-from _review_utils import review_id_for
+from _review_utils import review_id_for, resolve_review_path
 
 
 def _append_review_failure_log(config: Config, raw_file: Path, messages: list[str]) -> None:
@@ -85,7 +85,8 @@ def stage_3_4_review_suggestions(file_blocks: list[tuple[str, str]], raw_file: P
     FILE blocks and never survived parse_file_blocks. So the check was already
     inert; the volume signal now reads directly off ``file_blocks`` instead.
 
-    Output: wiki/REVIEW/<type>/<date>-<source>-<short-slug>.md — human-browsable review pages.
+    Output: wiki/REVIEW/<type>/<type>-<topic>-<YYYYMMDD>.md — human-browsable review pages
+    (see _review_utils.review_filename; frontmatter review_id = NashSU content hash).
     Each page has frontmatter `resolved: false`. When resolved, user changes to true.
     Resolved pages are KEPT (never auto-deleted) — the content-stable review_id +
     resolved-wins dedup keeps them resolved across re-ingest (NashSU parity).
@@ -233,9 +234,12 @@ def stage_3_4_review_suggestions(file_blocks: list[tuple[str, str]], raw_file: P
         _append_review_failure_log(config, raw_file, [msg])
         raise RuntimeError(msg)
 
-    # Write review pages to wiki/REVIEW/<review_type>/ (分子目录，一目了然)
-    date_str = time.strftime("%Y-%m-%d")
-    safe_source = re.sub(r'[^\w\s-]', '', raw_file.stem).strip()[:40]
+    # Write review pages to wiki/REVIEW/<review_type>/ (分子目录，一目了然).
+    # Filename is human-readable <type>-<topic>-<YYYYMMDD>.md (see
+    # _review_utils.review_filename); the canonical identity stays the
+    # content-hash review_id in frontmatter, which sweep/process-reviews key on.
+    date_str = time.strftime("%Y-%m-%d")      # frontmatter created:
+    date_compact = time.strftime("%Y%m%d")    # filename segment
 
     written = 0
     for it in items:
@@ -257,18 +261,10 @@ def stage_3_4_review_suggestions(file_blocks: list[tuple[str, str]], raw_file: P
             queries = [queries]
         queries = [str(q).strip() for q in queries if str(q).strip()]
 
-        # Build short-slug from title (kebab-case, English only, max 40 chars)
-        import unicodedata
-        slug_raw = unicodedata.normalize('NFKD', title).encode('ascii', 'ignore').decode('ascii')
-        short_slug = re.sub(r'[^\w\s-]', '', slug_raw).strip().lower()
-        short_slug = re.sub(r'[-\s]+', '-', short_slug)[:50].strip('-')
-        if not short_slug:
-            short_slug = f"item-{written + 1}"
-
         reviews_dir = config.wiki_dir / "REVIEW" / rtype
         reviews_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"{date_str}-{safe_source}-{short_slug}.md"
-        page_path = reviews_dir / filename
+        # Readable <type>-<topic>-<date>.md name + content-hash id (collision-safe).
+        page_path, _rid = resolve_review_path(reviews_dir, rtype, title, date_compact)
 
         md = _render_review_page(rtype, title, desc, affected, queries,
                                  severity, date_str, raw_file.stem)

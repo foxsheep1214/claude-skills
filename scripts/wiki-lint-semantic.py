@@ -112,6 +112,7 @@ from _core import ConversationPending, _compute_chunk_targets, _CONTEXT_SIZE_DEF
 from _llm_call import make_conversation_llm_call  # noqa: E402
 from _paths import iter_wiki_pages, atomic_write  # noqa: E402
 from _lint_suggest import STATE_FILES  # noqa: E402
+from _review_utils import resolve_review_path  # noqa: E402
 
 
 def _probe_context_size(state_dir: Path) -> int:
@@ -495,17 +496,18 @@ def emit_review_for_warnings(wiki_dir: Path, findings: list[dict]) -> int:
         review_type = _REVIEW_TYPE_FOR_RAW.get(raw_type, "suggestion")
         title = f.get("page", "semantic finding")
         affected = f.get("affectedPages") or []
-        safe = re.sub(r"[^\w一-鿿\-]", "-", title)[:60]
-        safe = re.sub(r"-{2,}", "-", safe).strip("-") or "finding"
         review_dir = wiki_dir / "REVIEW" / review_type
-        fpath = review_dir / f"semlint-{raw_type}-{safe}.md"
+        review_dir.mkdir(parents=True, exist_ok=True)
+        # Readable <type>-<topic>-<date>.md + content-hash id (idempotent by id).
+        fpath, review_id = resolve_review_path(
+            review_dir, review_type, title, date_str.replace("-", ""))
         if fpath.exists():
             continue
-        review_dir.mkdir(parents=True, exist_ok=True)
         affected_yaml = "\n".join(f"  - {p}" for p in affected) or "  []"
         body_detail = re.sub(r"^\[[\w-]+\]\s*", "", detail)
         md = f"""---
 type: review
+review_id: {review_id}
 review_type: {review_type}
 title: "{title}"
 created: {date_str}
