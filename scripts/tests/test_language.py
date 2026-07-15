@@ -129,6 +129,91 @@ class TestDiacriticNameNotNordic(unittest.TestCase):
         self.assertEqual(detect_language(text), "Danish")
 
 
+class TestMathAndAcronymFalsePositivesStayEnglish(unittest.TestCase):
+    """Broader sweep (2026-07-15) of the same false-positive pattern across
+    other detectors, found by scanning RadarWiki/HardwareWiki for pages whose
+    body language came out neither Chinese nor English."""
+
+    def test_two_letter_greek_math_pairs_stay_english(self):
+        # σθ, αβ (alpha-beta tracking filter), 2πΔf — two single-letter Greek
+        # symbols written back to back with no separator is common notation,
+        # not a Greek word. Real hits: pa-vs-fda-vs-mimo-vs-fda-mimo.md,
+        # classical-control-for-radar-servo-tracking.md.
+        text = "Scaling σθ≈θbw/(km√(2SNR)). This method best matches an αβ/Kalman tracker over 2πΔf bandwidth."
+        self.assertEqual(detect_language(text), "English")
+
+    def test_los_el_radar_acronyms_not_spanish(self):
+        # "LOS" (line-of-sight) and "EL" (elevation) lowercase to "los"/"el",
+        # which used to be 2 of Spanish's 5 function words. Real hit:
+        # satellite-communication-link-geometry-and-loss-budget.md.
+        text = "LOS loss = 32.44 + 20 log(distance) + 20 log(freq), computed from the EL and AZ angles."
+        self.assertEqual(detect_language(text), "English")
+
+    def test_stray_tilde_char_not_portuguese(self):
+        # A single ã/õ/ç from a tilde-accented math symbol plus incidental
+        # "a"/"as" (both dropped from the word set) used to be enough.
+        # Real hit: complementary-golay-codes.md.
+        text = "The estimator ã is used here, as well as a related bound derived from the same sequence."
+        self.assertEqual(detect_language(text), "English")
+
+    def test_stray_tilde_vowel_not_vietnamese(self):
+        # A single precomposed tilde/circumflex vowel (ũ, ẽ, ...) is exactly
+        # how an "estimate"/"conjugate" math symbol renders over a Latin
+        # letter. Real hit: cramer-rao-bound-for-mimo-radar.md, with
+        # equations like "ũ†(...)" and "c̃".
+        text = "The received signal model f = 2|b|^2 k^2 re{n_r ũ†(x - m)} uses ũ as the whitened vector."
+        self.assertEqual(detect_language(text), "English")
+
+    def test_cuk_converter_name_not_polish(self):
+        # "Ćuk" (the Ćuk converter, named after Slobodan Ćuk) is the only
+        # diacritic in an all-English power-electronics page. Real hits:
+        # cuk-converter.md, buck-boost-converter-dc-dc.md, Hart's Power
+        # Electronics textbook source page.
+        text = "The Ćuk converter is a type of DC-DC converter named after Slobodan Ćuk, providing inverted output."
+        self.assertEqual(detect_language(text), "English")
+
+    def test_japanese_loanword_in_chinese_page_stays_chinese(self):
+        # パス ("pass", as in a filter's passband) cited once inside an
+        # otherwise Chinese circuit-design page used to flip the whole page
+        # to "Japanese" off 4 stray kana characters against 500+ Han
+        # characters. Real hit: "Bandstop filters Bainter topology" page.
+        text = (
+            "许多应用需要陷波滤波器（bandstop/notch filter）来消除特定频率信号，"
+            "如音频信号处理、助听器反馈抑制、工频噪声抑制等。关键参数定义："
+            "f0为陷波中心频率，带宽定义品质因数，通带パス特性决定滤波器性能，"
+            "工程师需要根据具体应用场景选择合适的滤波器拓扑结构和元器件参数。"
+        )
+        self.assertEqual(detect_language(text), "Chinese")
+
+    def test_genuine_japanese_still_detected(self):
+        text = "これは日本語のテキストです。レーダーについて説明します。"
+        self.assertEqual(detect_language(text), "Japanese")
+
+    def test_genuine_polish_still_detected(self):
+        text = "To jest bardzo ważne, że nie możemy zapomnieć o tym problemie, który się pojawił."
+        self.assertEqual(detect_language(text), "Polish")
+
+    def test_genuine_czech_still_detected(self):
+        text = "Tento systém se používá pro sledování letadel a dronů, což je velmi užitečné pro obranu."
+        self.assertEqual(detect_language(text), "Czech")
+
+    def test_genuine_hungarian_still_detected(self):
+        text = "Ez egy fontos kérdés, és sokan gondolkodnak róla a jövőben is."
+        self.assertEqual(detect_language(text), "Hungarian")
+
+    def test_genuine_vietnamese_still_detected(self):
+        text = "Đây là một câu tiếng Việt để kiểm tra việc phát hiện ngôn ngữ."
+        self.assertEqual(detect_language(text), "Vietnamese")
+
+    def test_genuine_portuguese_still_detected(self):
+        text = "Este sistema utiliza um radar para detectar aviões não tripulados, o que é muito importante."
+        self.assertEqual(detect_language(text), "Portuguese")
+
+    def test_genuine_spanish_still_detected(self):
+        text = "Esta es una técnica de detección por radar, muy útil para el seguimiento de objetivos también."
+        self.assertEqual(detect_language(text), "Spanish")
+
+
 class TestOutputLanguageCollapsesToTwoLanguages(unittest.TestCase):
     """Policy (user ruling 2026-07-15): the wiki only ever holds Chinese or
     English pages. Any detected source language other than Chinese must

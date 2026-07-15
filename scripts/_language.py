@@ -51,8 +51,14 @@ def detect_language(text: str) -> str:
     if counts.get("Greek", 0) and not _has_greek_word_run(text):
         del counts["Greek"]
 
-    # Japanese: Hiragana/Katakana + Kanji → Japanese (not Chinese)
-    if counts.get("Japanese", 0) > 0 and counts.get("Chinese", 0) > 0:
+    # Japanese: Hiragana/Katakana + Kanji → Japanese (not Chinese). Kana must
+    # make up a non-trivial share of the CJK content, not just a single
+    # borrowed term — e.g. パス ("pass", as in a filter's passband) cited
+    # inside an otherwise ~500-character Chinese circuit-design page used to
+    # flip the whole page to "Japanese" off 4 stray kana characters.
+    _kana = counts.get("Japanese", 0)
+    _han = counts.get("Chinese", 0)
+    if _kana > 0 and _han > 0 and _kana / (_kana + _han) >= 0.15:
         return "Japanese"
 
     # Dominant non-Latin script
@@ -161,15 +167,18 @@ def build_language_directive(text: str) -> str:
 
 # ── Script detection ──
 
-_GREEK_WORD_RUN = re.compile(r"[Ͱ-Ͽἀ-῿]{2,}")
+_GREEK_WORD_RUN = re.compile(r"[Ͱ-Ͽἀ-῿]{3,}")
 
 
 def _has_greek_word_run(text: str) -> bool:
-    """True if ``text`` contains ≥2 consecutive Greek letters — a word run.
+    """True if ``text`` contains ≥3 consecutive Greek letters — a word run.
 
     Isolated single Greek letters (math symbols like λ, σ, Δ) do not form a
-    run, so a math-heavy English paragraph returns False and is not
-    misclassified as Greek.
+    run. A 2-letter run isn't enough either: engineering notation routinely
+    writes two single-letter symbols back to back with no separator — σθ,
+    αβ (the alpha-beta tracking filter), 2πΔf — and those are not Greek
+    words. Real Greek words are almost always 3+ letters, so a math-heavy
+    English/radar paragraph stays English and is not misclassified as Greek.
     """
     return bool(_GREEK_WORD_RUN.search(text))
 
@@ -243,23 +252,39 @@ def _detect_latin(text: str):
     lower = text.lower()
     words = set(re.findall(r"\w+", lower))
 
-    # Vietnamese
-    if re.search(r"[ảạắằẳẵặấầẩẫậđẻẽẹếềểễệỉĩịỏọốồổỗộơớờởỡợủũụưứừửữựỷỹỵ]", lower):
+    # Vietnamese (diacritic alone is NOT enough: a single precomposed tilde/
+    # circumflex vowel like ũ, ẽ, ố is exactly how math notation renders a
+    # "hat"/"tilde" estimator or complex-conjugate symbol over a Latin
+    # letter — e.g. "ũ" as an estimated vector in a radar signal-processing
+    # equation. Real hit: RadarWiki concept pages with equations like
+    # "ũ†(...)" and "c̃" were misdetected as Vietnamese off one stray char.)
+    if (re.search(r"[ảạắằẳẵặấầẩẫậđẻẽẹếềểễệỉĩịỏọốồổỗộơớờởỡợủũụưứừửữựỷỹỵ]", lower)
+            and len(words & {"và", "của", "là", "các", "không", "được",
+                              "trong", "cho", "với", "một", "này", "có"}) >= 2):
         return "Vietnamese"
     # Turkish
     if re.search(r"[ğış]", lower) and len(words & {"bir", "ve", "için", "ile", "bu", "da", "de"}) >= 2:
         return "Turkish"
-    # Polish
-    if re.search(r"[ąćęłńóśźż]", lower):
+    # Polish (diacritic alone is NOT enough: a single proper noun like "Ćuk"
+    # — the Ćuk converter, named after Slobodan Ćuk — is enough Polish-looking
+    # signal to misfire on an otherwise all-English power-electronics page.)
+    if (re.search(r"[ąćęłńóśźż]", lower)
+            and len(words & {"nie", "się", "jest", "oraz", "że", "który",
+                              "która", "które", "przez", "między"}) >= 2):
         return "Polish"
-    # Czech
-    if re.search(r"[ěšžřďťňů]", lower):
+    # Czech (same rationale as Polish — a diacritic from a name/citation is
+    # not evidence of Czech prose on its own.)
+    if (re.search(r"[ěšžřďťňů]", lower)
+            and len(words & {"je", "se", "na", "že", "nebo", "který",
+                              "která", "pro", "jako", "také"}) >= 2):
         return "Czech"
     # Romanian
     if re.search(r"[ăâîșț]", lower) and len(words & {"și", "este", "sau", "care", "pentru"}) >= 2:
         return "Romanian"
-    # Hungarian
-    if re.search(r"[őű]", lower):
+    # Hungarian (same rationale — ő/ű alone can appear in a transliterated
+    # name or citation without the surrounding text being Hungarian.)
+    if (re.search(r"[őű]", lower)
+            and len(words & {"és", "hogy", "nem", "egy", "van", "de", "az"}) >= 2):
         return "Hungarian"
     # German
     if len(words & {"und", "der", "die", "das", "ist"}) >= 2:
@@ -267,11 +292,19 @@ def _detect_latin(text: str):
     # French
     if len(words & {"le", "la", "les", "est", "une", "des"}) >= 2:
         return "French"
-    # Portuguese (before Spanish — stricter chars)
-    if re.search(r"[ãõç]", lower) and len(words & {"o", "a", "os", "as", "de", "do", "da", "não", "que"}) >= 2:
+    # Portuguese (before Spanish — stricter chars). "a"/"as"/"o"/"os" were
+    # dropped from the word set: they're single/short tokens that collide
+    # with common English words and math variable names, so a stray ã/õ/ç
+    # (e.g. a tilde-accented math symbol) plus one incidental "a" used to be
+    # enough to misfire — real hit: complementary-golay-codes.md.
+    if re.search(r"[ãõç]", lower) and len(words & {"de", "do", "da", "não", "que", "com", "uma", "mais", "também"}) >= 2:
         return "Portuguese"
-    # Spanish (ñ/¿/¡ alone is a strong signal; otherwise require ≥2 function words)
-    if re.search(r"[ñ¿¡]", lower) or len(words & {"el", "los", "las", "del", "por"}) >= 2:
+    # Spanish (ñ/¿/¡ alone is a strong signal; otherwise require ≥2 function
+    # words). "el"/"los" were dropped from the word set: they collide with
+    # the radar acronyms EL (elevation) and LOS (line-of-sight), so two
+    # ordinary radar-jargon pages misfired as Spanish off nothing but those
+    # two acronyms.
+    if re.search(r"[ñ¿¡]", lower) or len(words & {"las", "del", "por", "una", "también", "más", "qué", "cómo", "para"}) >= 2:
         return "Spanish"
     # Italian
     if len(words & {"il", "della", "gli", "che", "è"}) >= 2:
