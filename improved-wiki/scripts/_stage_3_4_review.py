@@ -187,7 +187,7 @@ def stage_3_4_review_suggestions(file_blocks: list[tuple[str, str]], raw_file: P
 对 suggestion 和 missing-page 类型，search_queries 必填：2-3 条关键词式 web 搜索查询
 （用于 Deep Research——关键词丰富、具体、面向搜索引擎，不是标题或整句）；
 其它类型用空数组 []。
-至少 5 个 items。数字、参数、公式要严格。"""
+只报告真实发现的问题；如果确实没有发现任何可疑项，输出空数组 []。不要为了凑数量而编造问题或写"未发现问题"类的确认项。数字、参数、公式要严格。"""
 
     prompt = f"{system_prompt}\n\n{user_content}"
     try:
@@ -215,21 +215,33 @@ def stage_3_4_review_suggestions(file_blocks: list[tuple[str, str]], raw_file: P
         if text.endswith("```"):
             text = text[:-3]
 
+    # A genuinely empty YAML list (``[]``) is now a legitimate "no issues
+    # found" response (the "at least 5 items" padding requirement was dropped
+    # for NashSU parity — 2026-07-15). Only a response that fails to parse
+    # into a list at all (garbage text, a bare scalar, truncated output) is
+    # treated as a real parse failure and raises.
+    parse_failed = False
     try:
         import yaml
-        items = yaml.safe_load(text.strip())
+        parsed = yaml.safe_load(text.strip())
+        if isinstance(parsed, list):
+            items = parsed
+        else:
+            items = []
+            parse_failed = True
     except Exception:
-        items = parse_simple_yaml(text.strip())
-        if not isinstance(items, list):
-            items = [items] if items else []
+        fallback = parse_simple_yaml(text.strip())
+        if isinstance(fallback, list) and fallback:
+            items = fallback
+        elif fallback:
+            items = [fallback]
+        else:
+            items = []
+            parse_failed = True
 
-    if not isinstance(items, list):
-        items = []
-    if not items:
-        # YAML parse produced nothing (both yaml.safe_load and the
-        # parse_simple_yaml fallback failed to yield items) — raise instead of
-        # silently writing 0 review pages.
-        msg = (f"stage 3.4 review YAML parse yielded 0 items "
+    if parse_failed:
+        msg = (f"stage 3.4 review YAML parse failed — response did not "
+               f"parse into a usable items list "
                f"(response {len(response)} chars, stop={stop_reason})")
         _append_review_failure_log(config, raw_file, [msg])
         raise RuntimeError(msg)

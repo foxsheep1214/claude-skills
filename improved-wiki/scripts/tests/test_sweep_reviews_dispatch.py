@@ -412,7 +412,7 @@ class TestHumanGateExclusion(unittest.TestCase):
             judged_batches = []
             original = sweep._llm_judge_reviews
 
-            def spy(pending, pages, runtime_dir):
+            def spy(pending, pages, runtime_dir, apply_fn=None):
                 judged_batches.append(list(pending))
                 return set()
 

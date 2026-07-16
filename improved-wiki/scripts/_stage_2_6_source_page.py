@@ -373,19 +373,18 @@ The book's core claims, results, or design rules — this section is the wiki's
 claim ledger (it feeds overview Strong/Weak claims, contradiction review, and
 query grounding), so it must be COMPLETE, not sampled.
 
-# ⚠️  MAIN ARGUMENTS RULES (CRITICAL — a hard gate checks claim count and
-# evidence quality; insufficient claims will RAISE and pause the ingest):
-#   1. Include **EVERY substantive claim** from the "Claims from per-chunk
-#      analysis" list above. Do NOT summarize, merge, or drop claims.
-#   2. Each claim MUST retain its evidence anchor (§X.X, 式(N), Figure N).
-#      Claims without specific evidence anchors will cause a HARD GATE failure.
-#   3. Minimum: 1 claim per technical chapter in the outline. A 10-chapter
-#      book must have ≥10 claims. A 15-chapter book must have ≥15.
-#   4. Claims must be falsifiable/actionable (quantitative results, design
-#      rules, comparative verdicts, limits, mechanisms) — NOT scope
-#      descriptions or bare definitions.
-#   5. Deduplicate near-identical claims across chunk overlaps (keep the
-#      best-evidenced version), but do NOT drop unique claims to save space.
+MAIN ARGUMENTS RULES:
+  1. Include **EVERY substantive claim** from the "Claims from per-chunk
+     analysis" list above. Do NOT summarize, merge, or drop claims. Aim for
+     coverage across all technical chapters in the outline, but YOU judge
+     substantiveness — no numeric quota, no padding.
+  2. Each claim should retain its evidence anchor (§X.X, 式(N), Figure N)
+     where the source material provides one.
+  3. Claims must be falsifiable/actionable (quantitative results, design
+     rules, comparative verdicts, limits, mechanisms) — NOT scope
+     descriptions or bare definitions.
+  4. Deduplicate near-identical claims across chunk overlaps (keep the
+     best-evidenced version), but do NOT drop unique claims to save space.
 
 For EACH:
 - **Claim:** the assertion (one sentence).
