@@ -68,12 +68,20 @@ class TestReviewFailureRaises(unittest.TestCase):
         self.assertIn("Book.pdf", log)
         self.assertIn("provider down", log)
 
-    def test_yaml_zero_items_raises_and_logs(self):
+    def test_yaml_garbage_raises_and_logs(self):
         review.call_with_retry = lambda fn, **kw: ("total garbage, not yaml", "end_turn")
         with self.assertRaises(RuntimeError) as ctx:
             review.stage_3_4_review_suggestions(_BLOCKS, self.raw_file, self.config)
-        self.assertIn("0 items", str(ctx.exception))
-        self.assertIn("0 items", self._log_text())
+        self.assertIn("parse failed", str(ctx.exception))
+        self.assertIn("parse failed", self._log_text())
+
+    def test_empty_yaml_array_is_legitimate_and_does_not_raise(self):
+        # Since the "at least 5 items" padding requirement was dropped for
+        # NashSU parity, an explicit "[]" is a legitimate "nothing found"
+        # response and must NOT raise or be treated as a parse failure.
+        review.call_with_retry = lambda fn, **kw: ("```yaml\n[]\n```", "end_turn")
+        result = review.stage_3_4_review_suggestions(_BLOCKS, self.raw_file, self.config)
+        self.assertEqual(result.get("items"), 0)
 
     def test_valid_yaml_still_writes_review_pages(self):
         yaml_resp = (

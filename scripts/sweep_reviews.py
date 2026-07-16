@@ -34,7 +34,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
@@ -321,7 +321,8 @@ def parse_judge_response(raw: str, batch: List[Dict]) -> Set[str]:
 
 def _llm_judge_reviews(pending: List[Dict],
                        pages: List[Tuple[str, Optional[str]]],
-                       runtime_dir: Path) -> Set[str]:
+                       runtime_dir: Path,
+                       apply_fn: Optional[Callable[[Set[str]], None]] = None) -> Set[str]:
     """Port of NashSU sweep-reviews.ts ``llmJudgeReviews``.
 
     Judge still-pending items in batches of JUDGE_BATCH_SIZE, capped at
@@ -352,7 +353,10 @@ def _llm_judge_reviews(pending: List[Dict],
         try:
             raw = llm_call(system, user)
         except ConversationPending:
-            # Propagate so the CLI returns 101 and the agent answers + resumes.
+            # Flush already-accumulated resolutions before propagating, so a
+            # later batch's cache-miss doesn't discard earlier batches' work.
+            if apply_fn and resolved:
+                apply_fn(resolved)
             raise
         batch_resolved = parse_judge_response(raw, batch)
         batches += 1
@@ -525,7 +529,21 @@ def sweep_reviews(wiki_root: Path, dry_run: bool = True, use_llm: bool = True) -
         from _paths import detect_runtime_dir
         runtime_dir = detect_runtime_dir(wiki_root)
         pages = _wiki_page_summaries(wiki_dir)
-        resolved_ids = _llm_judge_reviews(judge_pool, pages, runtime_dir)
+
+        def _flush_llm_resolved(ids: Set[str]) -> None:
+            # Flush cache-hit resolutions to disk before a later batch's
+            # cache-miss raises, so prior batches' work isn't lost.
+            for r in judge_pool:
+                if r.get("review_id") in ids:
+                    item = dict(r)
+                    item["reason"] = "LLM judged resolved by current wiki state"
+                    if not dry_run:
+                        if _resolve_review(item, item["reason"], dry_run=False):
+                            print(f"  [ok] {item.get('title', '')[:60]}")
+                            print(f"     -> {item['reason']}")
+
+        resolved_ids = _llm_judge_reviews(judge_pool, pages, runtime_dir,
+                                          apply_fn=_flush_llm_resolved)
         if resolved_ids:
             kept_pending: List[Dict] = []
             for review in judge_pool:
