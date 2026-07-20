@@ -111,14 +111,17 @@ def enrich_wikilinks_batch(
     if not candidates:
         return {}
 
-    batch_slugs = [Path(rel_path).stem for rel_path, _ in candidates]
+    # Use ALL pages written by this ingest here, not only the zero-outlink
+    # candidates. Linked sibling pages are still batch pages and valid targets.
+    # On resume they also appear in the freshly rescanned ``existing_slugs``;
+    # leaving them there shifts the [:200] window and changes the prompt hash,
+    # which spuriously issues a SECOND enrichment handoff whenever the batch
+    # contains a mix of linked and zero-outlink pages.
+    batch_slugs = [Path(rel_path).stem for rel_path, _ in pages]
     # Exclude this batch's own slugs from the "existing" snapshot so the target
-    # list is identical whether or not these pages are already on disk. On a
-    # conversation-mode resume, list_existing_slugs rescans the wiki and now
-    # includes the just-written pages; without this filter the [:200] window
-    # shifts, changing the prompt hash and spuriously issuing a SECOND
-    # enrichment handoff for the same ingest. batch_slugs are re-added below, so
-    # they remain valid targets. (Also honors the documented "pre-ingest wiki
+    # list is identical whether or not these pages are already on disk. All
+    # batch slugs are re-added below, so linked and zero-outlink sibling pages
+    # remain valid targets. (Also honors the documented "pre-ingest wiki
     # snapshot" intent of existing_slugs.)
     _batch_set = set(batch_slugs)
     existing_pre = [s for s in existing_slugs if s not in _batch_set]
