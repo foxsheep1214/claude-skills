@@ -67,6 +67,46 @@ class TestExistingChecks(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn("size", msg)
 
+    def test_entity_names_do_not_count_as_concepts(self):
+        entities = "\n".join(
+            f'  - name: "entity-{i}"\n    description: "a real entity"'
+            for i in range(10)
+        )
+        body = (
+            "chunk_index: 1\n"
+            f"entities_found:\n{entities}\n"
+            "concepts_found: []\n"
+            f"{SOURCE_QUOTES}"
+            f"{CLAIMS_WITH_EVIDENCE}"
+            f"{PADDING}"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            ok, msg = qc_stage22.check(_write(Path(d), body))
+            self.assertFalse(ok)
+            self.assertIn("0 concepts", msg)
+
+    def test_reported_count_only_uses_concepts_section(self):
+        entities = "\n".join(
+            f'  - name: "entity-{i}"\n    description: "a real entity"'
+            for i in range(4)
+        )
+        concepts_with_blank_lines = CONCEPTS.replace(
+            '    definition: "a genuine definition"\n  - name:',
+            '    definition: "a genuine definition"\n\n  - name:',
+        )
+        body = (
+            "chunk_index: 1\n"
+            f"entities_found:\n{entities}\n"
+            f"concepts_found:\n{concepts_with_blank_lines}\n"
+            f"{SOURCE_QUOTES}"
+            f"{CLAIMS_WITH_EVIDENCE}"
+            f"{PADDING}"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            ok, msg = qc_stage22.check(_write(Path(d), body))
+            self.assertTrue(ok, msg)
+            self.assertIn("6 concepts", msg)
+
 
 class TestSourceQuotesCheck(unittest.TestCase):
     def test_missing_source_quotes_fails(self):
