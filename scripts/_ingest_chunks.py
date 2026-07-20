@@ -116,9 +116,33 @@ def _build_gen_inventory(chunk_meta: list, chunk_analyses: list) -> dict[str, in
     inventory: dict[str, int] = {}
     for meta, analysis in zip(chunk_meta, chunk_analyses):
         i = meta[0]
+        if not isinstance(analysis, dict):
+            continue
         for key in ("concepts_found", "entities_found"):
-            for item in analysis.get(key, []):
-                name = item.get("name", "")
+            items = analysis.get(key, [])
+            if isinstance(items, dict):
+                items = [items]
+            if not isinstance(items, (list, tuple)):
+                continue
+            for item in items:
+                if isinstance(item, dict):
+                    name = item.get("name", "")
+                elif isinstance(item, str):
+                    # Older/malformed Stage 2.2 YAML can deserialize a
+                    # sequence item written as ``- name: "Foo"`` into the
+                    # literal string ``name: "Foo"``. Generation only needs
+                    # the deterministic name for inventory ownership, so
+                    # recover that safe shorthand instead of crashing.
+                    name = item.strip()
+                    if name.lower().startswith("name:"):
+                        name = name.split(":", 1)[1].strip()
+                    if (len(name) >= 2 and name[0] == name[-1]
+                            and name[0] in ("'", '"')):
+                        name = name[1:-1].strip()
+                else:
+                    continue
+                if not isinstance(name, str):
+                    continue
                 if not name or not name.strip():
                     continue
                 stem = slugify(name)

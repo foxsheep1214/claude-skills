@@ -96,6 +96,33 @@ class TestBuildGenInventory(unittest.TestCase):
         self.assertEqual(inv["a"], 5)
         self.assertEqual(inv["b"], 9)
 
+    def test_recovers_string_name_shorthand_from_cached_analysis(self):
+        """Live Fitzgerald regression: malformed YAML cached name lines as strings."""
+        metas = [_meta(0)]
+        analyses = [{
+            "concepts_found": [
+                'name: "Magnetic Circuit Analysis"',
+                "Plain Legacy Concept",
+            ],
+            "entities_found": ["name: 'A. E. Fitzgerald'"],
+        }]
+        inv = _ingest_chunks._build_gen_inventory(metas, analyses)
+        self.assertEqual(inv["magnetic-circuit-analysis"], 0)
+        self.assertEqual(inv["plain-legacy-concept"], 0)
+        self.assertEqual(inv["a-e-fitzgerald"], 0)
+
+    def test_ignores_non_mapping_non_string_inventory_items(self):
+        metas = [_meta(0), _meta(1)]
+        analyses = [
+            {
+                "concepts_found": [None, 7, ["nested"], {"name": "Valid"}],
+                "entities_found": "not-a-sequence",
+            },
+            "not-an-analysis",
+        ]
+        inv = _ingest_chunks._build_gen_inventory(metas, analyses)
+        self.assertEqual(inv, {"valid": 0})
+
 
 class TestOtherChunkSlugs(unittest.TestCase):
     def test_other_slugs_excludes_own_sorted(self):
