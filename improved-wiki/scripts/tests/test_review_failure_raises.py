@@ -98,7 +98,59 @@ class TestReviewFailureRaises(unittest.TestCase):
         review.call_with_retry = lambda fn, **kw: (yaml_resp, "end_turn")
         result = review.stage_3_4_review_suggestions(_BLOCKS, self.raw_file, self.config)
         self.assertEqual(result.get("items"), 1)
+        self.assertEqual(len(result.get("page_refs", [])), 1)
         self.assertTrue(any((self.config.wiki_dir / "REVIEW").rglob("*.md")))
+
+    def test_unknown_type_and_traversal_are_rejected_before_write(self):
+        yaml_resp = (
+            "- id: 1\n"
+            "  type: ../../outside\n"
+            '  title: "unsafe"\n'
+            '  description: "unsafe path"\n'
+            '  affected_pages: ["../secrets.md"]\n'
+            "  severity: high\n"
+            "  search_queries: []\n"
+        )
+        review.call_with_retry = lambda fn, **kw: (yaml_resp, "end_turn")
+
+        with self.assertRaisesRegex(RuntimeError, "schema validation failed"):
+            review.stage_3_4_review_suggestions(
+                _BLOCKS, self.raw_file, self.config)
+        self.assertFalse((self.config.wiki_dir / "REVIEW").exists())
+        self.assertIn("affected_pages", self._log_text())
+
+    def test_research_item_requires_two_or_three_search_queries(self):
+        yaml_resp = (
+            "- id: 1\n"
+            "  type: suggestion\n"
+            '  title: "research gap"\n'
+            '  description: "needs external evidence"\n'
+            '  affected_pages: ["concepts/p0.md"]\n'
+            "  severity: medium\n"
+            '  search_queries: ["only one query"]\n'
+        )
+        review.call_with_retry = lambda fn, **kw: (yaml_resp, "end_turn")
+
+        with self.assertRaisesRegex(RuntimeError, "requires 2-3"):
+            review.stage_3_4_review_suggestions(
+                _BLOCKS, self.raw_file, self.config)
+        self.assertFalse((self.config.wiki_dir / "REVIEW").exists())
+
+    def test_non_research_item_rejects_search_queries(self):
+        yaml_resp = (
+            "- id: 1\n"
+            "  type: confirm\n"
+            '  title: "check value"\n'
+            '  description: "verify value"\n'
+            '  affected_pages: ["concepts/p0.md"]\n'
+            "  severity: low\n"
+            '  search_queries: ["unexpected query"]\n'
+        )
+        review.call_with_retry = lambda fn, **kw: (yaml_resp, "end_turn")
+
+        with self.assertRaisesRegex(RuntimeError, "empty search_queries"):
+            review.stage_3_4_review_suggestions(
+                _BLOCKS, self.raw_file, self.config)
 
 
 if __name__ == "__main__":

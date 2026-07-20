@@ -54,6 +54,31 @@ class _RecomputeReached(Exception):
     pass
 
 
+def _valid_analysis(name: str = "soc", *, index: int = 1, total: int = 1) -> dict:
+    return {
+        "chunk_index": index,
+        "chunk_total": total,
+        "concepts_found": [{
+            "name": name,
+            "importance": "core",
+            "definition": f"definition of {name}",
+            "key_details": [f"detail about {name}"],
+        }],
+        "entities_found": [],
+        "claims": [],
+        "formulas": [],
+        "connections_to_existing_wiki": [],
+        "schema_typed_candidates": [],
+        "updated_global_digest": {
+            "book_meta": {"title": "Book"},
+            "outline": [],
+            "key_entities": [],
+            "key_concepts": [{"name": name, "definition": "definition"}],
+            "key_claims": [],
+        },
+    }
+
+
 class TestUnmarkStageDone(unittest.TestCase):
     """unmark_stage_done clears the marker (and payload) so a stage re-runs."""
 
@@ -80,24 +105,36 @@ class TestChunkPipelineResume(unittest.TestCase):
     """The stage_2_3_done cache branch of _run_chunk_pipeline."""
 
     def setUp(self):
-        # Stub the recompute entry point so the cache-branch decision is
-        # observable without any LLM/network work: if the pipeline falls
-        # through to recompute, _stage_2_1_chunk_text raises _RecomputeReached.
-        self._orig_chunk_text = _ingest_chunks._stage_2_1_chunk_text
+        # Rebuilding the current chunk plan is mandatory on every restore.
+        # Stub only the actual LLM-analysis boundary: a compatible checkpoint
+        # must not reach it; an invalid checkpoint must.
+        self._orig_analyze = _ingest_chunks._analyze_all_chunks
 
         def _boom(*_a, **_k):
             raise _RecomputeReached(_SENTINEL)
 
-        _ingest_chunks._stage_2_1_chunk_text = _boom
+        _ingest_chunks._analyze_all_chunks = _boom
 
     def tearDown(self):
-        _ingest_chunks._stage_2_1_chunk_text = self._orig_chunk_text
+        _ingest_chunks._analyze_all_chunks = self._orig_analyze
 
     def _raw_file(self, tmp: Path) -> Path:
         raw = tmp / "raw" / "book.pdf"
         raw.parent.mkdir(parents=True, exist_ok=True)
         raw.write_bytes(b"%PDF-1.4 fake content for hashing")
         return raw
+
+    def _bind_checkpoint(self, progress: dict, text: str, cfg: _core.Config) -> dict:
+        meta, _ = _ingest_chunks._build_chunk_meta(text, cfg)
+        plan = _ingest_chunks._build_chunk_plan(text, cfg, meta)
+        analyses = progress["chunk_analyses"]
+        self.assertEqual(len(analyses), len(plan["chunks"]))
+        for analysis, planned in zip(analyses, plan["chunks"]):
+            analysis["_chunk_index"] = planned["index"]
+            analysis["_chunk_id"] = planned["chunk_id"]
+            analysis["_chunk_text_sha256"] = planned["text_sha256"]
+        progress["chunk_plan_v2"] = plan
+        return progress
 
     def test_restore_returns_persisted_file_blocks(self):
         """Persisted file_blocks are restored verbatim — NOT re-derived. The
@@ -112,16 +149,17 @@ class TestChunkPipelineResume(unittest.TestCase):
                 ["concepts/state-of-charge.md", "---\ntype: concept\n---\nbody A"],
                 ["entities/bms-ic.md", "---\ntype: entity\n---\nbody B"],
             ]
-            progress = {
-                "chunk_analyses": [{"concepts_found": ["soc"], "entities_found": ["ic"]}],
+            text = "extracted text " * 50
+            progress = self._bind_checkpoint({
+                "chunk_analyses": [_valid_analysis()],
                 "analysis": {"method": "x"},
                 "incremental_associations": {},
                 "file_blocks": persisted,
-            }
+            }, text, cfg)
             _core.mark_stage_done(cfg, h, "stage_2_3_done")
 
             ca, analysis, file_blocks, assoc, _gd = _ingest_chunks._run_chunk_pipeline(
-                "extracted text " * 50, {"key_concepts": ["soc"]}, raw, cfg,
+                text, {"key_concepts": ["soc"]}, raw, cfg,
                 "template", progress, verbose=False)
 
             self.assertEqual(file_blocks, persisted)
@@ -139,16 +177,17 @@ class TestChunkPipelineResume(unittest.TestCase):
             raw = self._raw_file(tmp)
             h = _core.file_sha256(raw)
 
-            progress = {
-                "chunk_analyses": [{"concepts_found": ["soc"]}],
+            text = "extracted text " * 50
+            progress = self._bind_checkpoint({
+                "chunk_analyses": [_valid_analysis()],
                 "analysis": {},
                 "incremental_associations": {"soc": ["concepts/soc.md"]},
                 "file_blocks": [],  # key PRESENT, explicitly empty
-            }
+            }, text, cfg)
             _core.mark_stage_done(cfg, h, "stage_2_3_done")
 
             _ca, _an, file_blocks, _assoc, _gd = _ingest_chunks._run_chunk_pipeline(
-                "extracted text " * 50, {"key_concepts": ["soc"]}, raw, cfg,
+                text, {"key_concepts": ["soc"]}, raw, cfg,
                 "template", progress, verbose=False)
 
             self.assertEqual(file_blocks, [])
@@ -164,22 +203,83 @@ class TestChunkPipelineResume(unittest.TestCase):
             raw = self._raw_file(tmp)
             h = _core.file_sha256(raw)
 
-            progress = {
-                "chunk_analyses": [{"concepts_found": ["soc"]}],
+            text = "extracted text " * 50
+            progress = self._bind_checkpoint({
+                "chunk_analyses": [_valid_analysis()],
                 "analysis": {},
                 "incremental_associations": {},
                 # NO "file_blocks" key — the pre-fix artifact shape.
-            }
+            }, text, cfg)
             _core.mark_stage_done(cfg, h, "stage_2_3_done")
 
             with self.assertRaises(_RecomputeReached):
                 _ingest_chunks._run_chunk_pipeline(
-                    "extracted text " * 50, {"key_concepts": ["soc"]}, raw, cfg,
+                    text, {"key_concepts": ["soc"]}, raw, cfg,
                     "template", progress, verbose=False)
 
             # The marker must have been cleared so the re-run actually redoes
             # generation (and re-persists a real file_blocks artifact).
             self.assertFalse(_core.is_stage_done(cfg, h, "stage_2_3_done"))
+
+    def test_legacy_checkpoint_without_plan_is_invalidated(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            cfg = _make_config(tmp)
+            raw = self._raw_file(tmp)
+            h = _core.file_sha256(raw)
+            progress = {
+                "chunk_analyses": [{
+                    "concepts_found": [{"name": "soc"}],
+                    "_chunk_index": 1,
+                    "_chunk_size": 700,
+                }],
+                "file_blocks": [],
+            }
+            _core.mark_stage_done(cfg, h, "stage_2_2_done")
+            _core.mark_stage_done(cfg, h, "stage_2_3_done")
+
+            with self.assertRaises(_RecomputeReached):
+                _ingest_chunks._run_chunk_pipeline(
+                    "extracted text " * 50, {}, raw, cfg,
+                    "template", progress, verbose=False)
+
+            self.assertFalse(_core.is_stage_done(cfg, h, "stage_2_2_done"))
+            self.assertFalse(_core.is_stage_done(cfg, h, "stage_2_3_done"))
+            cached = _core.load_progress(cfg, h)
+            self.assertNotIn("chunk_analyses", cached)
+
+    def test_changed_chunk_budget_invalidates_exact_old_plan(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            cfg = _make_config(tmp)
+            raw = self._raw_file(tmp)
+            h = _core.file_sha256(raw)
+            text = "section body with enough variety\n\n" * 5000
+            old_meta, _ = _ingest_chunks._build_chunk_meta(text, cfg)
+            old_plan = _ingest_chunks._build_chunk_plan(text, cfg, old_meta)
+            progress = {
+                "chunk_analyses": [
+                    {
+                        **_valid_analysis(
+                            f"c{i}", index=planned["index"],
+                            total=old_plan["chunk_total"]),
+                        "_chunk_index": planned["index"],
+                        "_chunk_id": planned["chunk_id"],
+                        "_chunk_text_sha256": planned["text_sha256"],
+                    }
+                    for i, planned in enumerate(old_plan["chunks"])
+                ],
+                "chunk_plan_v2": old_plan,
+                "file_blocks": [],
+            }
+            cfg.target_chars = 12000
+            cfg.target_tokens = 6000
+            _core.mark_stage_done(cfg, h, "stage_2_2_done")
+
+            with self.assertRaises(_RecomputeReached):
+                _ingest_chunks._run_chunk_pipeline(
+                    text, {}, raw, cfg, "template", progress, verbose=False)
+            self.assertFalse(_core.is_stage_done(cfg, h, "stage_2_2_done"))
 
 
 class TestPrefetchBoundary(unittest.TestCase):
@@ -190,20 +290,17 @@ class TestPrefetchBoundary(unittest.TestCase):
         # Real chunking + heading resolution are irrelevant here; stub the heavy
         # LLM/analysis bits so the cache/boundary decision is observable offline.
         self._orig = {
-            "chunk_text": _ingest_chunks._stage_2_1_chunk_text,
             "analyze": _ingest_chunks._analyze_all_chunks,
             "heading": _ingest_chunks._stage_2_2_resolve_chunk_heading_path,
             "verify": _ingest_chunks._verify_stage_2_2_chunks,
             "generate": _ingest_chunks._generate_from_analyses,
         }
-        _ingest_chunks._stage_2_1_chunk_text = lambda *_a, **_k: ["chunk-0 text"]
         _ingest_chunks._stage_2_2_resolve_chunk_heading_path = lambda *_a, **_k: ""
         _ingest_chunks._verify_stage_2_2_chunks = lambda *_a, **_k: None
-        self._fake_ca = [{"concepts_found": [{"name": "soc"}], "entities_found": []}]
+        self._fake_ca = [_valid_analysis()]
         _ingest_chunks._analyze_all_chunks = lambda *_a, **_k: (self._fake_ca, "")
 
     def tearDown(self):
-        _ingest_chunks._stage_2_1_chunk_text = self._orig["chunk_text"]
         _ingest_chunks._analyze_all_chunks = self._orig["analyze"]
         _ingest_chunks._stage_2_2_resolve_chunk_heading_path = self._orig["heading"]
         _ingest_chunks._verify_stage_2_2_chunks = self._orig["verify"]
@@ -254,7 +351,17 @@ class TestPrefetchBoundary(unittest.TestCase):
             valid_digest = {"book_meta": {"granularity": "book"}, "outline": [],
                             "key_concepts": ["soc"], "key_claims": [],
                             "key_entities": []}
-            _core.save_progress(cfg, h, {"chunk_analyses": self._fake_ca,
+            text = "extracted " * 50
+            meta, _ = _ingest_chunks._build_chunk_meta(text, cfg)
+            plan = _ingest_chunks._build_chunk_plan(text, cfg, meta)
+            bound = [dict(
+                self._fake_ca[0],
+                _chunk_index=plan["chunks"][0]["index"],
+                _chunk_id=plan["chunks"][0]["chunk_id"],
+                _chunk_text_sha256=plan["chunks"][0]["text_sha256"],
+            )]
+            _core.save_progress(cfg, h, {"chunk_plan_v2": plan,
+                                         "chunk_analyses": bound,
                                          "global_digest": valid_digest})
             _core.mark_stage_done(cfg, h, "stage_2_2_done")
 
@@ -269,10 +376,10 @@ class TestPrefetchBoundary(unittest.TestCase):
             _ingest_chunks._generate_from_analyses = _fake_gen
 
             ca, analysis, blocks, assoc, _gd = _ingest_chunks._run_chunk_pipeline(
-                "extracted " * 50, {}, raw, cfg,
+                text, {}, raw, cfg,
                 "template", _core.load_progress(cfg, h), verbose=False)
 
-            self.assertEqual(calls["ca"], self._fake_ca)  # generation got cached 2.2
+            self.assertEqual(calls["ca"], bound)  # generation got cached 2.2
             self.assertEqual(analysis, {"method": "stub"})
             self.assertEqual(blocks, [("concepts/soc.md", "body")])
             self.assertEqual(_gd, valid_digest)  # roll-up digest restored
@@ -287,8 +394,18 @@ class TestPrefetchBoundary(unittest.TestCase):
             raw = self._raw_file(tmp)
             h = _core.file_sha256(raw)
 
-            # Pre-roll-up cache: chunk_analyses persisted, no global_digest.
-            _core.save_progress(cfg, h, {"chunk_analyses": self._fake_ca})
+            # Pre-roll-up cache: valid plan/analyses persisted, no global_digest.
+            text = "extracted " * 50
+            meta, _ = _ingest_chunks._build_chunk_meta(text, cfg)
+            plan = _ingest_chunks._build_chunk_plan(text, cfg, meta)
+            bound = [dict(
+                self._fake_ca[0],
+                _chunk_index=plan["chunks"][0]["index"],
+                _chunk_id=plan["chunks"][0]["chunk_id"],
+                _chunk_text_sha256=plan["chunks"][0]["text_sha256"],
+            )]
+            _core.save_progress(cfg, h, {"chunk_plan_v2": plan,
+                                         "chunk_analyses": bound})
             _core.mark_stage_done(cfg, h, "stage_2_2_done")
 
             class _Reanalyzed(Exception):
@@ -298,7 +415,7 @@ class TestPrefetchBoundary(unittest.TestCase):
 
             with self.assertRaises(_Reanalyzed):
                 _ingest_chunks._run_chunk_pipeline(
-                    "extracted " * 50, {}, raw, cfg,
+                    text, {}, raw, cfg,
                     "template", _core.load_progress(cfg, h), verbose=False)
 
             # Marker invalidated so the fresh 2.2 run persists a valid digest.

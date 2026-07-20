@@ -50,6 +50,12 @@ def _meta(i, text="chunk-text"):
 
 
 class TestBuildGenInventory(unittest.TestCase):
+    def test_count_mismatch_is_a_hard_error_not_zip_truncation(self):
+        metas = [_meta(0), _meta(1), _meta(2)]
+        analyses = [_analysis(concepts=["A"]), _analysis(concepts=["B"])]
+        with self.assertRaisesRegex(RuntimeError, "cardinality mismatch"):
+            _ingest_chunks._build_gen_inventory(metas, analyses)
+
     def test_first_chunk_owns(self):
         metas = [_meta(0), _meta(1), _meta(2)]
         analyses = [
@@ -96,8 +102,8 @@ class TestBuildGenInventory(unittest.TestCase):
         self.assertEqual(inv["a"], 5)
         self.assertEqual(inv["b"], 9)
 
-    def test_recovers_string_name_shorthand_from_cached_analysis(self):
-        """Live Fitzgerald regression: malformed YAML cached name lines as strings."""
+    def test_rejects_string_name_shorthand_from_cached_analysis(self):
+        """Live Fitzgerald regression: malformed YAML must never be masked."""
         metas = [_meta(0)]
         analyses = [{
             "concepts_found": [
@@ -106,12 +112,10 @@ class TestBuildGenInventory(unittest.TestCase):
             ],
             "entities_found": ["name: 'A. E. Fitzgerald'"],
         }]
-        inv = _ingest_chunks._build_gen_inventory(metas, analyses)
-        self.assertEqual(inv["magnetic-circuit-analysis"], 0)
-        self.assertEqual(inv["plain-legacy-concept"], 0)
-        self.assertEqual(inv["a-e-fitzgerald"], 0)
+        with self.assertRaisesRegex(RuntimeError, "Unvalidated"):
+            _ingest_chunks._build_gen_inventory(metas, analyses)
 
-    def test_ignores_non_mapping_non_string_inventory_items(self):
+    def test_rejects_non_mapping_inventory_items(self):
         metas = [_meta(0), _meta(1)]
         analyses = [
             {
@@ -120,8 +124,8 @@ class TestBuildGenInventory(unittest.TestCase):
             },
             "not-an-analysis",
         ]
-        inv = _ingest_chunks._build_gen_inventory(metas, analyses)
-        self.assertEqual(inv, {"valid": 0})
+        with self.assertRaisesRegex(RuntimeError, "Unvalidated"):
+            _ingest_chunks._build_gen_inventory(metas, analyses)
 
 
 class TestOtherChunkSlugs(unittest.TestCase):

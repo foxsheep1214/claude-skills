@@ -66,6 +66,8 @@ from _stage_3_write import (
     _stage_3_1_auto_correct_wiki_path,  # noqa: F401  (referenced in _finalize_book docstring)
 )
 from _stage_3_7_embed import stage_3_7_embed_new_pages
+from _media_integrity import assert_cached_media_complete
+from _task_manifest import assert_task_ready_for_completion
 from _watch import ingest_watch
 
 
@@ -125,7 +127,17 @@ def _finalize_book(raw_file: Path, config: Config,
     the graph is a separate explicit command (NashSU-aligned: NashSU has no
     post-ingest graph rebuild). Run ``python3 scripts/graph.py`` manually.
     """
-    stage_3_7_embed_new_pages(config, files_written)
+    # A cached counter is not completion evidence. Verify manifest, every
+    # image hash, every required caption, and source-page injection immediately
+    # before the authoritative marker is allowed to exist.
+    assert_cached_media_complete(raw_file, config)
+    canonical_files = assert_task_ready_for_completion(
+        raw_file,
+        config,
+        files_written,
+        source_hash,
+    )
+    stage_3_7_embed_new_pages(config, canonical_files)
     mark_stage_done(config, source_hash, "ingested")
 
 

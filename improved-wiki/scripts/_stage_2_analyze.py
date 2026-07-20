@@ -746,6 +746,158 @@ class _YamlNotDictError(RuntimeError):
     raised when retries are exhausted (no-silent-fallback)."""
 
 
+class ChunkAnalysisValidationError(RuntimeError):
+    """Stage 2.2 returned a mapping whose nested schema is unsafe to consume."""
+
+
+_CHUNK_ANALYSIS_LIST_FIELDS = (
+    "entities_found",
+    "concepts_found",
+    "claims",
+    "formulas",
+    "connections_to_existing_wiki",
+    "schema_typed_candidates",
+)
+
+
+def _analysis_nonempty_string(value, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ChunkAnalysisValidationError(
+            f"{field} must be a non-empty string")
+    return value.strip()
+
+
+def normalize_and_validate_chunk_analysis(
+    analysis: dict,
+    *,
+    expected_index: int | None = None,
+    expected_total: int | None = None,
+) -> dict:
+    """Normalize optional fields and strictly validate Stage 2.2's contract.
+
+    The previous boundary accepted any top-level mapping. A malformed YAML
+    fallback could therefore turn ``concepts_found`` into a list of strings
+    while the stage was still cached as complete. Downstream code then either
+    crashed or silently coerced those strings. This function is the one schema
+    gate used both immediately after parsing and when restoring a checkpoint.
+    """
+    if not isinstance(analysis, dict):
+        raise ChunkAnalysisValidationError(
+            f"analysis must be a mapping, got {type(analysis).__name__}")
+    normalized = dict(analysis)
+
+    for field in _CHUNK_ANALYSIS_LIST_FIELDS:
+        value = normalized.get(field, [])
+        if value is None:
+            value = []
+        if not isinstance(value, list):
+            raise ChunkAnalysisValidationError(
+                f"{field} must be a list, got {type(value).__name__}")
+        if any(not isinstance(item, dict) for item in value):
+            bad = next(item for item in value if not isinstance(item, dict))
+            raise ChunkAnalysisValidationError(
+                f"{field} items must be mappings, got "
+                f"{type(bad).__name__}: {str(bad)[:80]}")
+        normalized[field] = [dict(item) for item in value]
+
+    for position, concept in enumerate(normalized["concepts_found"], 1):
+        prefix = f"concepts_found[{position}]"
+        concept["name"] = _analysis_nonempty_string(
+            concept.get("name"), f"{prefix}.name")
+        importance = _analysis_nonempty_string(
+            concept.get("importance"), f"{prefix}.importance").lower()
+        if importance not in {"core", "supporting", "mentioned"}:
+            raise ChunkAnalysisValidationError(
+                f"{prefix}.importance must be core/supporting/mentioned, "
+                f"got {importance!r}")
+        concept["importance"] = importance
+        concept["definition"] = _analysis_nonempty_string(
+            concept.get("definition"), f"{prefix}.definition")
+        details = concept.get("key_details")
+        if not isinstance(details, list) or not details:
+            raise ChunkAnalysisValidationError(
+                f"{prefix}.key_details must be a non-empty list")
+        concept["key_details"] = [
+            _analysis_nonempty_string(item, f"{prefix}.key_details")
+            for item in details
+        ]
+
+    for position, entity in enumerate(normalized["entities_found"], 1):
+        prefix = f"entities_found[{position}]"
+        entity["name"] = _analysis_nonempty_string(
+            entity.get("name"), f"{prefix}.name")
+        entity["significance"] = _analysis_nonempty_string(
+            entity.get("significance"), f"{prefix}.significance")
+
+    for position, claim in enumerate(normalized["claims"], 1):
+        prefix = f"claims[{position}]"
+        claim["claim"] = _analysis_nonempty_string(
+            claim.get("claim"), f"{prefix}.claim")
+        claim["evidence"] = _analysis_nonempty_string(
+            claim.get("evidence"), f"{prefix}.evidence")
+        if "confidence" in claim:
+            confidence = _analysis_nonempty_string(
+                claim["confidence"], f"{prefix}.confidence").lower()
+            if confidence not in {"high", "medium", "low"}:
+                raise ChunkAnalysisValidationError(
+                    f"{prefix}.confidence must be high/medium/low")
+            claim["confidence"] = confidence
+
+    if normalized["claims"]:
+        normalized["source_quotes"] = _analysis_nonempty_string(
+            normalized.get("source_quotes"), "source_quotes")
+
+    for position, formula in enumerate(normalized["formulas"], 1):
+        prefix = f"formulas[{position}]"
+        formula["formula"] = _analysis_nonempty_string(
+            formula.get("formula"), f"{prefix}.formula")
+        formula["meaning"] = _analysis_nonempty_string(
+            formula.get("meaning"), f"{prefix}.meaning")
+
+    for position, connection in enumerate(
+            normalized["connections_to_existing_wiki"], 1):
+        prefix = f"connections_to_existing_wiki[{position}]"
+        connection["existing_page"] = _analysis_nonempty_string(
+            connection.get("existing_page"), f"{prefix}.existing_page")
+        connection["relationship"] = _analysis_nonempty_string(
+            connection.get("relationship"), f"{prefix}.relationship")
+
+    for position, candidate in enumerate(
+            normalized["schema_typed_candidates"], 1):
+        prefix = f"schema_typed_candidates[{position}]"
+        for field in ("type", "name", "folder", "rationale"):
+            candidate[field] = _analysis_nonempty_string(
+                candidate.get(field), f"{prefix}.{field}")
+
+    digest = normalized.get("updated_global_digest")
+    if isinstance(digest, str):
+        if len(digest.strip()) <= 50:
+            raise ChunkAnalysisValidationError(
+                "updated_global_digest must be a substantive string")
+        normalized["updated_global_digest"] = digest.strip()
+    elif not isinstance(digest, dict) or not digest:
+        raise ChunkAnalysisValidationError(
+            "updated_global_digest must be a non-empty string or mapping")
+
+    for field, expected in (
+        ("chunk_index", expected_index),
+        ("chunk_total", expected_total),
+    ):
+        if expected is None:
+            continue
+        try:
+            actual = int(normalized.get(field))
+        except (TypeError, ValueError):
+            raise ChunkAnalysisValidationError(
+                f"{field} must equal {expected}")
+        if actual != expected:
+            raise ChunkAnalysisValidationError(
+                f"{field}={actual}, expected {expected}")
+        normalized[field] = actual
+
+    return normalized
+
+
 def _stage_2_2_chunk_retries() -> int:
     """Max attempts per chunk (1 initial + N retries). Default 2 retries → 3 total attempts."""
     env = os.environ.get("LLM_CHUNK_RETRIES", "")
@@ -793,19 +945,36 @@ def _stage_2_2_analyze_chunk(
         existing_slugs=existing_slugs,
     )
 
+    validation_feedback = ""
     for attempt in range(1 + max_retries):
         try:
             t0 = time.time()
             if attempt == 0:
                 print(f"  [chunk {chunk_idx+1}/{chunk_total}] analyzing ({len(chunk):,} chars)...",
                       flush=True)
+            active_prompt = prompt
+            if validation_feedback:
+                active_prompt += (
+                    "\n\n# REQUIRED CORRECTION FOR THIS RETRY\n"
+                    "The previous answer was rejected by the Stage 2.2 schema "
+                    f"validator: {validation_feedback}\n"
+                    "Return a fresh complete YAML answer following the exact "
+                    "output schema above. Do not omit required nested fields "
+                    "and do not turn mapping items into strings.\n"
+                )
             response, stop_reason = call_anthropic_protocol(
-                prompt, config, max_tokens=config.compute_max_tokens(8192))
+                active_prompt, config,
+                max_tokens=config.compute_max_tokens(8192))
             analysis = parse_yaml_block(response)
             if not isinstance(analysis, dict):
                 raise _YamlNotDictError(
                     f"chunk {chunk_idx+1}/{chunk_total}: parse_yaml_block returned "
                     f"{type(analysis).__name__}, expected a YAML mapping (dict)")
+            analysis = normalize_and_validate_chunk_analysis(
+                analysis,
+                expected_index=chunk_idx + 1,
+                expected_total=chunk_total,
+            )
             analysis["_chunk_index"] = chunk_idx + 1
             analysis["_chunk_size"] = len(chunk)
             analysis["_attempts"] = attempt + 1
@@ -820,8 +989,12 @@ def _stage_2_2_analyze_chunk(
             break  # success — exit retry loop
 
         except Exception as e:
+            schema_error = isinstance(
+                e, (_YamlNotDictError, ChunkAnalysisValidationError))
             if attempt < max_retries and (
-                    _is_retryable_exception(e) or isinstance(e, _YamlNotDictError)):
+                    _is_retryable_exception(e) or schema_error):
+                if schema_error:
+                    validation_feedback = str(e)[:500]
                 _record_rate_limit()
                 wait = _retry_jitter(2.0, attempt)
                 err_label = type(e).__name__
@@ -838,6 +1011,5 @@ def _stage_2_2_analyze_chunk(
                 f"after {attempt+1} attempt(s): {type(e).__name__}: {e}") from e
 
     return analysis
-
 
 

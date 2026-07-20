@@ -38,6 +38,11 @@ import _core  # noqa: E402
 import ingest  # noqa: E402
 from _ingest_skip import _stage_0_2_should_skip  # noqa: E402
 from _stage_3_write import _stage_3_1_wiki_path_for_source  # noqa: E402
+from _task_manifest import (  # noqa: E402
+    TaskManifestError,
+    bind_page_refs,
+    ensure_task_manifest,
+)
 
 
 def _make_config(tmp: Path) -> _core.Config:
@@ -60,6 +65,84 @@ def _raw_file(tmp: Path) -> Path:
     raw.parent.mkdir(parents=True, exist_ok=True)
     raw.write_bytes(b"%PDF-1.4 fake")
     return raw
+
+
+def _seed_zero_media_cache(cfg: _core.Config, raw: Path) -> None:
+    key = _core.source_cache_key(raw, cfg)
+    _core.save_cache(cfg, {
+        "version": "2",
+        "entries": {
+            key: {
+                "hash": _core.file_sha256(raw),
+                "method": "mineru-api",
+                "stages": {
+                    "images_extracted": 0,
+                    "images_captioned": 0,
+                    "images_injected": 0,
+                },
+            },
+        },
+    })
+
+
+def _seed_completion_state(
+    cfg: _core.Config,
+    raw: Path,
+) -> list[str]:
+    """Seed the exact post-write contract consumed by _finalize_book."""
+    source_hash = _core.file_sha256(raw)
+    ensure_task_manifest(raw, cfg)
+
+    source = _stage_3_1_wiki_path_for_source(raw, cfg)
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("# x\n", encoding="utf-8")
+    log = cfg.wiki_dir / "log.md"
+    log.write_text(
+        "# Log\n\n## 2026-01-01 — INGEST\n"
+        "- Source: `raw/Book/x.pdf`\n"
+        f"- Hash: {source_hash[:16]}\n",
+        encoding="utf-8",
+    )
+    index = cfg.wiki_dir / "index.md"
+    index.write_text("# Index\n\n- [[x]]\n", encoding="utf-8")
+    refs = ["wiki/sources/x.md", "wiki/log.md", "wiki/index.md"]
+    bind_page_refs(cfg, source_hash, refs)
+    _core.mark_stage_done(
+        cfg, source_hash, "write_loop_done",
+        payload={"files_written": ["wiki/sources/x.md"]},
+    )
+    _core.mark_stage_done(
+        cfg, source_hash, "write_phase",
+        payload={
+            "files_written": ["wiki/sources/x.md"],
+            "images_injected": 0,
+        },
+    )
+    _core.mark_stage_done(
+        cfg, source_hash, "review_done",
+        payload={"items": 0, "skipped": True, "page_refs": []},
+    )
+    _core.mark_stage_done(
+        cfg, source_hash, "aggregate_done",
+        payload={"page_refs": ["wiki/log.md", "wiki/index.md"]},
+    )
+    _core.save_cache(cfg, {
+        "version": "2",
+        "entries": {
+            _core.source_cache_key(raw, cfg): {
+                "hash": source_hash,
+                "sourceHash": source_hash,
+                "method": "mineru-api",
+                "filesWritten": refs,
+                "stages": {
+                    "images_extracted": 0,
+                    "images_captioned": 0,
+                    "images_injected": 0,
+                },
+            },
+        },
+    })
+    return refs
 
 
 def _raw_query_bridge_file(tmp: Path) -> Path:
@@ -90,9 +173,10 @@ class TestFinalizeBook(unittest.TestCase):
             cfg = _make_config(tmp)
             raw = _raw_file(tmp)
             h = _core.file_sha256(raw)
+            refs = _seed_completion_state(cfg, raw)
 
             self.assertFalse(_core.is_stage_done(cfg, h, "ingested"))
-            ingest._finalize_book(raw, cfg, ["sources/x.md"], h)
+            ingest._finalize_book(raw, cfg, refs, h)
 
             # Order matters: embeddings must precede the completion marker so a
             # failing/missing embed stack pauses BEFORE the book is marked done.
@@ -106,13 +190,46 @@ class TestFinalizeBook(unittest.TestCase):
             cfg = _make_config(tmp)
             raw = _raw_file(tmp)
             h = _core.file_sha256(raw)
+            refs = _seed_completion_state(cfg, raw)
 
             def _boom(*a, **k):
                 raise RuntimeError("Ollama down")
             ingest.stage_3_7_embed_new_pages = _boom
 
             with self.assertRaises(RuntimeError):
-                ingest._finalize_book(raw, cfg, ["sources/x.md"], h)
+                ingest._finalize_book(raw, cfg, refs, h)
+            self.assertFalse(_core.is_stage_done(cfg, h, "ingested"))
+
+    def test_missing_postwrite_marker_refuses_embedding_and_completion(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            cfg = _make_config(tmp)
+            raw = _raw_file(tmp)
+            h = _core.file_sha256(raw)
+            refs = _seed_completion_state(cfg, raw)
+            _core.unmark_stage_done(cfg, h, "aggregate_done")
+
+            with self.assertRaisesRegex(
+                TaskManifestError, "required stage markers"
+            ):
+                ingest._finalize_book(raw, cfg, refs, h)
+            self.assertEqual(self.calls, [])
+            self.assertFalse(_core.is_stage_done(cfg, h, "ingested"))
+
+    def test_missing_bound_page_refuses_embedding_and_completion(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            cfg = _make_config(tmp)
+            raw = _raw_file(tmp)
+            h = _core.file_sha256(raw)
+            refs = _seed_completion_state(cfg, raw)
+            (cfg.wiki_dir / "index.md").unlink()
+
+            with self.assertRaisesRegex(
+                TaskManifestError, "missing written pages"
+            ):
+                ingest._finalize_book(raw, cfg, refs, h)
+            self.assertEqual(self.calls, [])
             self.assertFalse(_core.is_stage_done(cfg, h, "ingested"))
 
 
@@ -136,6 +253,7 @@ class TestStage02ShouldSkip(unittest.TestCase):
             tmp = Path(d)
             cfg, raw, h = self._setup(tmp)
             self._write_source_page(cfg, raw)
+            _seed_zero_media_cache(cfg, raw)
             _core.mark_stage_done(cfg, h, "ingested")
             self.assertTrue(_stage_0_2_should_skip(raw, cfg))
 

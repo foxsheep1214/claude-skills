@@ -130,33 +130,34 @@ Phase 划分：0 前置检查 / 1 提取 / 2 分析生成 / 3 写入富化。
 
 ### Stage 3.1 · Write files（含 source page gate）
 - **作用**：Phase 3 唯一磁盘写入入口。先 source page gate（无 source 页则从 digest 生成 stub 追加），再原子写盘（.tmp → rename）。
-- **go/no-go**：page_blocks 数 == 写盘成功数；source page 已落盘。
+- **go/no-go**：任一 FILE block 或 source placeholder 写失败即停止；只保留成功页用于诊断，不写 `write_loop_done`/`write_phase`。正常 source 的 source page 必须已落盘。
 
 ### Stage 3.2 · 图片注入
 - **作用**：在 source 页末尾追加 `## Embedded Images` 段，列出所有图 + caption。
-- **go/no-go**：source 页含 `## Embedded Images` + ≥1 行图引用。
+- **go/no-go**：`media_policy=required` 时 `images_injected == images_extracted`，否则不写 `write_phase` marker。
 
 ### Stage 3.4 · Review
 - **作用**：满足 NashSU 3 条件（≥4 FILE 块 / ≥10K 字符 / 未闭合 REVIEW）时跑一次 LLM，输出 5 类 review items（confirm/suggestion/missing-page/contradiction/duplicate），写入 `wiki/REVIEW/<type>/<date>-<source>-<slug>.md` + `review-suggestions.json`。运行在已写盘文件上。
-- **go/no-go**：review items 数量 ≥0（prompt 只要求报告真实发现，空数组 `[]` 是合法的"未发现问题"结果——"至少 5 条"的凑数要求已于 2026-07-15 撤销，理由与 Stage 2.6 Main Arguments 数量下限同批修复：硬性数量要求会诱导 LLM 编内容凑数）；`wiki/REVIEW/` 结构合法。
+- **go/no-go**：review items 数量 ≥0（空数组 `[]` 合法）；非空 item 必须完整通过严格 schema：`type`/`severity` 枚举合法，title/description 非空，`affected_pages` 是 wiki 内安全 `.md` 路径，suggestion/missing-page 恰有 2–3 条搜索 query，其余类型 query 为空。整批先校验后写盘，任何非法 item 都 hard-fail，禁止静默跳过和路径穿越。成功后以 `review_done` 绑定 review page refs。
 - **时机偏离 NashSU（有意，audit M2 2026-07-07）**：NashSU 在 `writeFileBlocks` **之前**对 in-memory generation 跑 review；improved-wiki 在 3.1 写盘**之后**对已落盘文件跑。这是刻意选择，理由：(1) review items 本就是非阻断 triage（`resolved: false` 等人工处理），NashSU 的"写盘前"也只是时机不同、并不拦截写盘，故"写盘前拦截能力"在 NashSU 侧也不成立；(2) 写盘后 review 看到 enrichment/wikilink-merge/page-merge 之后的真实 on-disk 内容，finding 反映最终状态，对 lint/cross-source dedup 友好，而写盘前看到的是 pre-enrichment 内容、易产出过时 finding；(3) 真正的结构性失败拦截已由 Stage 2.6 `_stage_2_6_validate_required_sections` 硬门禁（缺 section 直接 raise）覆盖。代价：review 发现问题时页已落盘，需后续修复——但 review items 本就不阻断，该代价可接受。不额外跑 pre-write LLM pass（双倍 review 成本对非阻断 triage 项 ROI 低）。
 
 ### Stage 3.5 · Aggregate Repair + Cache
-- **作用**：log.md 程序化 append（LLM 不参与，防丢历史）+ index.md LLM 整页重写（喂入磁盘扫描的权威页面清单，全分类同步；LLM 失败/超容量门/>250 页时退回 Sources 单行 append 兜底）+ overview.md LLM 重写（改进 prompt：禁止源清单堆砌、按主题综述；5 段结构校验；失败保留当前；超限压缩模式；首次 ingest 创建）+ 写 `ingest-cache.json`。
-- **go/no-go**：每个本次 raw 文件都有 hash 记录；index/log/overview 已更新。
+- **作用**：log.md 程序化 append（同一 source identity + hash 幂等，不重复追加）+ index.md LLM 整页重写（失败/超容量/>250 页时 Sources 单行 append）+ overview.md 尽力重写 + 写 `ingest-cache.json`。
+- **go/no-go**：log.md 必须含本 source/hash 的 INGEST block，index.md 必须含 source link；两页以 `aggregate_done` 绑定。缓存必须在 review/aggregate markers 之后写入，并与 task manifest 的完整 page refs 一致；overview 是可选修复，不作为完成硬门禁。
 
 ### Stage 3.7 · Embeddings
 - **作用**：把 wiki/ 页面 chunk 化 + embed 写到 LanceDB。默认本地 Ollama bge-m3（`http://127.0.0.1:11434/v1`），无需 export 环境变量。
 - **依赖**：lancedb 已装 + Ollama 运行 + bge-m3 已拉取。
 - **产物**：`lancedb/` 表 + `embed-cache.json`。
 - **go/no-go**：LanceDB 表存在 + 已写 ≥N chunk。
-- **无回退**：stack 缺失 → `raise RuntimeError` 暂停。页面已落盘，修好 stack 后重跑从 3.7 恢复（write_phase marker 跳过 3.1-3.5）。
+- **无回退**：stack 缺失 → `raise RuntimeError` 暂停。页面已落盘，修好 stack 后重跑从 3.7 恢复（`write_phase`、`review_done`、`aggregate_done` 分别跳过已完成段）。
+- **最终完成门禁**：embedding 前必须同时证明 media 完整、4 个 post-write markers 齐全、cache/source hash/task manifest/page refs 一致、所有页面存在且非空；否则不得置 `ingested`。
 
 ---
 
 ## （已移除）Phase 4：Validation — 对齐 NashSU
 
-原 Stage 4.1（ingest 末尾自动跑 `validate_ingest.py` 体检）**已移除**：NashSU 无 post-ingest 验证 stage。NashSU 唯一的 ingest 期检查是 schema 路由（`validateWikiPageRouting`），improved-wiki 已在**写盘期 Stage 3.1**（`_stage_3_1_auto_correct_wiki_path`）做了，故自动保留。`validate_ingest.py` 保留为**独立手动工具**（见下文"可选手动验证"）。Stage 3.7（embeddings）现为最后一个 stage，之后 `_finalize_book` 置 `ingested` 完成标记（2026-07-08 从 `stage_4_1` 改名；已消化书的 stages.json 已同步迁移，`_stage_0_2_should_skip` 读 `ingested` 为唯一完整性信号）。
+原 Stage 4.1（ingest 末尾自动跑 `validate_ingest.py` 全量体检）**已移除**：`validate_ingest.py` 保留为独立手动工具。Stage 3.7（embeddings）仍是最后一个生成 stage；之后 `_finalize_book` 仅在轻量、确定性的 artifact completion gate 全通过时置 `ingested`（不是恢复全量内容质量 audit）。`_stage_0_2_should_skip` 仍以该 marker 决定 skip，但 marker 本身已由 media/task/cache/page 一致性门禁保护。
 
 ---
 
@@ -183,11 +184,12 @@ Phase 划分：0 前置检查 / 1 提取 / 2 分析生成 / 3 写入富化。
 
 ## Resume marker 粒度 ≠ stage 编号
 
-上面的 2.1…3.7 编号是**叙事/可观测层**，不是崩溃恢复的实际单位。`<hash>.stages.json` 里真正的 done-marker 更粗：`stage_1_1/1_2/1_3_done`、`stage_2_2_done`（wiki-独立↔依赖的分界点；`stage_2_1_done` 已随 Stage 2.1 于 2026-07-08 移除——存量 stages.json 里残留的该 key 无害，代码不再读）、`stage_2_3_done`（覆盖 2.3+2.4）、`stage_2_9_done`（覆盖 2.5/2.6/2.9 整段；名称在 2.7 移除后保留不变，缓存兼容）、`write_loop_done`、`write_phase`、`ingested`（`ingest.py::_finalize_book` 所置的整书完成标记，非某个 stage 模块自己的标记；2026-07-08 从 `stage_4_1` 改名）。崩溃恢复是从**段边界**重启，不是逐 stage、逐 chunk。
+上面的 2.1…3.7 编号是**叙事/可观测层**，不是崩溃恢复的实际单位。`<hash>.stages.json` 里真正的 done-marker 更粗：`stage_1_1/1_2/1_3_done`、`stage_2_2_done`（wiki-独立↔依赖的分界点）、`stage_2_3_done`（覆盖 2.3+2.4）、`stage_2_9_done`（覆盖 2.5/2.6/2.9 整段；名称为缓存兼容保留）、`write_loop_done`、`write_phase`、`review_done`、`aggregate_done`、`ingested`。后 4 个 post-write marker 都携带 page refs/count payload，崩溃恢复逐段验证并恢复，不把“marker 存在”当作足够证据。
 
 **对未来"合并/拆分 stage"讨论的含义**：任何编号调整默认只是文档层 renumber-only，代码与 marker 不动；但有两条**载荷性边界**碰了就坏，不能移动：
 1. `stage_2_2_done | stage_2_3_done` —— wiki-独立/依赖分界；批量 prefetch 靠在这里精确停住（`raise PrepareStopAfter("1.5")`）才能让下一本书的 prefetch 并行跑。
 2. `write_loop_done | write_phase` —— 中间夹着 wikilink enrichment 的非幂等 handoff；合并会让 resume 重跑非幂等的 Stage 3.1 写盘，重复 merge 每一页。同时要保持 artifact-before-marker 的写序（防 2026-06-25 的静默丢失 bug），碰这段边界时不要打乱写序。
+3. `review_done | aggregate_done` —— review 与 log/index 分别绑定自己的页面集合；cache/finalization 只能消费两者均完成后的并集，避免重跑 review 或重复 append log。
 
 ## 自动验证（ingest.py 内置）
 
@@ -198,8 +200,12 @@ Phase 划分：0 前置检查 / 1 提取 / 2 分析生成 / 3 写入富化。
 | 2.2 | chunk 分析非空（`_verify_stage_2_2_chunks`）；滚动汇总 digest 含 5 必需 key + ≥1 concept（`_verify_stage_2_1_digest`——函数名是 2.1 时代遗留，现在 2.2 汇总后运行；缓存恢复时缺有效 digest 会失效 marker 重跑 2.2） |
 | 2.4 | ≥1 FILE block；source page FILE block 存在；路径正确（`_verify_stage_2_4_file_blocks`，**写盘前** in-memory 检查） |
 | 2.6 | source page 必需 H2 节齐全（`_stage_2_6_validate_required_sections`，doctype-aware） |
+| 3.1–3.2 | 写入无 hard failure；required media 全量注入后才写 `write_phase` |
+| 3.4 | review YAML 严格 schema + wiki 内安全路径；整批先验后写 |
+| 3.5 | log source/hash 与 index source link 两个确定性 postcondition |
+| finalize | media、markers、cache、task manifest、page refs 与磁盘页面交叉一致 |
 
-> 硬 raise 门禁只有以上几处（外加 Phase 0 的 `verify_stage_0` ≥100 字符提取门——1.1 的 `_verify_stage_1_1_text` 质量门已于 2026-07-08 移除）。source page 的**落盘**由 2.4 的写盘前门禁保证；写盘后 `validate_stage_outputs` 只做软校验（返回 warning 列表、**不 raise**），没有 3.1 raise 门。
+> `validate_stage_outputs` 仍是软质量校验（warning，不 raise）；上表新增的 3.x/finalize 检查是 artifact 完整性与安全门禁，不是恢复已移除的全量 post-ingest 内容质量 audit。
 
 可选手动验证（**不再自动运行**——已为对齐 NashSU 移除）：`python3 "$SKILL_DIR/scripts/validate_ingest.py"`（全阶段体检，独立工具）。其它手动补充：
 ```bash

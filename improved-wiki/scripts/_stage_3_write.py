@@ -16,6 +16,7 @@ _script_dir = Path(__file__).resolve().parent
 if str(_script_dir) not in sys.path:
     sys.path.insert(0, str(_script_dir))
 from _paths import atomic_write, WIKI_ARTIFACT_DIRS
+from _page_ref import PageRef
 from _core import (
     Config,
     is_safe_ingest_path, _ILLEGAL_CHARS_RE,
@@ -885,6 +886,48 @@ def rebuild_index_deterministic(wiki_dir: Path) -> str:
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
+def _log_contains_ingest_record(
+    log_text: str,
+    source_identity: str,
+    source_hash: str,
+) -> bool:
+    """True when one INGEST block already binds this source and content hash."""
+    source_line = f"- Source: `{source_identity}`"
+    hash_line = f"- Hash: {source_hash[:16]}"
+    blocks = re.split(
+        r"(?m)(?=^## [^\n]+ — INGEST\s*$)",
+        log_text,
+    )
+    return any(
+        source_line in block and hash_line in block
+        for block in blocks
+    )
+
+
+def _assert_aggregate_outputs(
+    log_path: Path,
+    index_path: Path,
+    source_identity: str,
+    source_hash: str,
+    source_stem: str,
+) -> None:
+    """Hard Stage 3.5 postcondition used before its done marker is written."""
+    if not log_path.is_file():
+        raise RuntimeError(f"Stage 3.5 log artifact is missing: {log_path}")
+    if not index_path.is_file():
+        raise RuntimeError(f"Stage 3.5 index artifact is missing: {index_path}")
+    log_text = log_path.read_text(encoding="utf-8")
+    if not _log_contains_ingest_record(
+        log_text, source_identity, source_hash
+    ):
+        raise RuntimeError(
+            "Stage 3.5 log does not contain the source/hash INGEST record")
+    index_text = index_path.read_text(encoding="utf-8")
+    if f"[[{source_stem}]]" not in index_text:
+        raise RuntimeError(
+            f"Stage 3.5 index does not contain [[{source_stem}]]")
+
+
 def stage_3_5_aggregate_repair(
     source_path: Path,
     raw_file: Path,
@@ -897,6 +940,7 @@ def stage_3_5_aggregate_repair(
     rewrite fed by on-disk inventory, append fallback), overview.md (LLM rewrite
     with structural validation + compress mode, keep-current fallback)."""
     files_written: list[str] = []
+    source_identity = canonical_source_path(raw_file, config)
 
     # log.md
     log_path = config.wiki_dir / "log.md"
@@ -905,16 +949,20 @@ def stage_3_5_aggregate_repair(
     else:
         log_text = "# Log\n"
     source_rel = source_path.relative_to(config.wiki_dir)
-    entry = (
-        f"\n## {time.strftime('%Y-%m-%d %H:%M:%S')} — INGEST\n"
-        f"- Source: `{canonical_source_path(raw_file, config)}`\n"
-        f"- Source page: `wiki/{source_rel}`\n"
-        f"- Hash: {source_hash[:16]}\n"
-        f"- Method: {extract_method}\n"
-    )
-    log_text += entry
-    stage_3_1_write_wiki_file(log_path, log_text, config)
-    files_written.append(str(log_path.relative_to(config.wiki_root)))
+    if _log_contains_ingest_record(log_text, source_identity, source_hash):
+        print("[stage 3.5] Log already contains this source/hash — append skipped")
+    else:
+        entry = (
+            f"\n## {time.strftime('%Y-%m-%d %H:%M:%S')} — INGEST\n"
+            f"- Source: `{source_identity}`\n"
+            f"- Source page: `wiki/{source_rel}`\n"
+            f"- Hash: {source_hash[:16]}\n"
+            f"- Method: {extract_method}\n"
+        )
+        log_text += entry
+        stage_3_1_write_wiki_file(log_path, log_text, config)
+    files_written.append(PageRef.parse(
+        log_path, config.wiki_root, config.wiki_dir).project_relative)
 
     # index.md — LLM whole-page rewrite (NashSU parity, option A: every ingest).
     # Fed by an authoritative on-disk page inventory so ALL categories stay in
@@ -1013,6 +1061,8 @@ Output ONLY the complete new index.md. No commentary.
         except Exception as e:
             print(f"[stage 3.5] Index LLM rewrite failed ({e}) — using append fallback")
             _index_append_fallback()
+    files_written.append(PageRef.parse(
+        index_path, config.wiki_root, config.wiki_dir).project_relative)
 
     # overview.md — LLM rewrite with improved prompt (topic-synthesis, not
     # source-dump) + failure fallback. True NashSU aggregate-repair parity
@@ -1035,6 +1085,13 @@ Output ONLY the complete new index.md. No commentary.
     if current_overview and len(current_overview) > OVERVIEW_MAX_CHARS:
         print(f"[stage 3.5] Overview too large ({len(current_overview)} > {OVERVIEW_MAX_CHARS}) — "
               f"skipping repair (NashSU isAggregateRepairSafe parity), leaving current overview untouched")
+        _assert_aggregate_outputs(
+            log_path,
+            index_path,
+            source_identity,
+            source_hash,
+            source_path.stem,
+        )
         return files_written
 
     source_content = source_path.read_text(encoding="utf-8") if source_path.exists() else ""
@@ -1090,9 +1147,20 @@ ingested source — not just the new source.
                 print("[stage 3.5] Overview LLM response did not start with '#' — keeping current")
             else:
                 stage_3_1_write_wiki_file(overview_path, body + "\n", config)
-                files_written.append(str(overview_path.relative_to(config.wiki_root)))
+                files_written.append(PageRef.parse(
+                    overview_path,
+                    config.wiki_root,
+                    config.wiki_dir,
+                ).project_relative)
                 print(f"[stage 3.5] Overview updated via LLM ({len(response)} chars, stop={stop_reason})")
     except Exception as e:
         print(f"[stage 3.5] Overview LLM update failed ({e}) — keeping current")
 
-    return files_written
+    _assert_aggregate_outputs(
+        log_path,
+        index_path,
+        source_identity,
+        source_hash,
+        source_path.stem,
+    )
+    return list(dict.fromkeys(files_written))

@@ -1263,15 +1263,22 @@ def _stage_2_4_extract_names(chunk_analyses: list[dict]) -> tuple[list[str], lis
     all_entities: list[str] = []
     for a in chunk_analyses:
         for c in a.get("concepts_found") or []:
-            name = c.get("name", c) if isinstance(c, dict) else str(c)
+            if not isinstance(c, dict):
+                raise RuntimeError(
+                    "Stage 2.4 received an unvalidated concepts_found item; "
+                    "re-run Stage 2.2.")
+            name = c.get("name", "")
             all_concepts.append(name)
         for e in a.get("entities_found") or []:
-            name = e.get("name", e) if isinstance(e, dict) else str(e)
+            if not isinstance(e, dict):
+                raise RuntimeError(
+                    "Stage 2.4 received an unvalidated entities_found item; "
+                    "re-run Stage 2.2.")
+            name = e.get("name", "")
             all_entities.append(name)
     seen_c: set[str] = set()
     unique_concepts = [x for x in all_concepts if not (x in seen_c or seen_c.add(x))]  # type: ignore[func-returns-value]
     seen_e: set[str] = set()
     unique_entities = [x for x in all_entities if not (x in seen_e or seen_e.add(x))]  # type: ignore[func-returns-value]
     return unique_concepts, unique_entities
-
 

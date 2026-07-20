@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 from _core import Config
+from _page_ref import PageRef, PageRefError
 
 
 def _stage_3_7_check_embed_capability(base_url: str, model: str) -> tuple[bool, str]:
@@ -86,13 +87,16 @@ def stage_3_7_embed_new_pages(config: Config, files_written: list[str]) -> None:
     # Fall back to wiki_dir for any caller that passes wiki-dir-relative paths.
     new_files = []
     for f in files_written:
-        if Path(f).name in skip_files:
+        try:
+            ref = PageRef.parse(f, config.wiki_root, config.wiki_dir)
+        except PageRefError as exc:
+            raise RuntimeError(
+                f"Stage 3.7 received an invalid page reference {f!r}: {exc}"
+            ) from exc
+        if ref.name in skip_files:
             continue
-        p = config.wiki_root / f
-        if not p.exists():
-            p = config.wiki_dir / f
-        if p.exists():
-            new_files.append(str(p))
+        if ref.absolute_path.exists():
+            new_files.append(str(ref.absolute_path))
     if not new_files:
         return
 

@@ -1,7 +1,19 @@
 
 from _stage_2_base import *
+from _page_ref import PageRef, PageRefError
 from _paths import atomic_write
 from _review_utils import review_id_for, resolve_review_path
+
+
+_REVIEW_TYPES = {
+    "confirm",
+    "suggestion",
+    "missing-page",
+    "contradiction",
+    "duplicate",
+}
+_REVIEW_SEVERITIES = {"high", "medium", "low"}
+_RESEARCH_REVIEW_TYPES = {"suggestion", "missing-page"}
 
 
 def _append_review_failure_log(config: Config, raw_file: Path, messages: list[str]) -> None:
@@ -22,6 +34,114 @@ def _append_review_failure_log(config: Config, raw_file: Path, messages: list[st
             f.write("\n".join(entry_lines) + "\n")
     except OSError as e:
         print(f"  ⚠️  failed to write ingest-warnings.log: {e}")
+
+
+def _validate_review_items(items: list, config: Config) -> list[dict]:
+    """Validate and normalize the complete Stage 3.4 response before writing.
+
+    Review type is used as a directory name and affected pages become
+    wikilinks, so permissive coercion here is unsafe: one malformed item must
+    fail the response before any partial review set reaches disk.
+    """
+    normalized: list[dict] = []
+    errors: list[str] = []
+
+    for index, item in enumerate(items, 1):
+        prefix = f"item {index}"
+        if not isinstance(item, dict):
+            errors.append(f"{prefix}: expected an object")
+            continue
+
+        rtype = item.get("type")
+        if rtype not in _REVIEW_TYPES:
+            errors.append(
+                f"{prefix}: type must be one of "
+                f"{', '.join(sorted(_REVIEW_TYPES))}")
+
+        severity = item.get("severity")
+        if severity not in _REVIEW_SEVERITIES:
+            errors.append(
+                f"{prefix}: severity must be one of "
+                f"{', '.join(sorted(_REVIEW_SEVERITIES))}")
+
+        title = item.get("title")
+        if not isinstance(title, str) or not title.strip():
+            errors.append(f"{prefix}: title must be a non-empty string")
+            title = ""
+        else:
+            title = title.strip()
+
+        description = item.get("description")
+        if not isinstance(description, str) or not description.strip():
+            errors.append(
+                f"{prefix}: description must be a non-empty string")
+            description = ""
+        else:
+            description = description.strip()
+
+        affected_raw = item.get("affected_pages")
+        affected: list[str] = []
+        if not isinstance(affected_raw, list):
+            errors.append(f"{prefix}: affected_pages must be a list")
+        else:
+            for page_index, value in enumerate(affected_raw, 1):
+                if not isinstance(value, str) or not value.strip():
+                    errors.append(
+                        f"{prefix}: affected_pages[{page_index}] must be "
+                        "a non-empty string")
+                    continue
+                try:
+                    ref = PageRef.parse(
+                        value, config.wiki_root, config.wiki_dir)
+                except PageRefError as exc:
+                    errors.append(
+                        f"{prefix}: affected_pages[{page_index}] is unsafe: "
+                        f"{exc}")
+                    continue
+                if ref.wiki_relative not in affected:
+                    affected.append(ref.wiki_relative)
+
+        queries_raw = item.get("search_queries")
+        queries: list[str] = []
+        if not isinstance(queries_raw, list):
+            errors.append(f"{prefix}: search_queries must be a list")
+        else:
+            for query_index, value in enumerate(queries_raw, 1):
+                if not isinstance(value, str) or not value.strip():
+                    errors.append(
+                        f"{prefix}: search_queries[{query_index}] must be "
+                        "a non-empty string")
+                    continue
+                query = value.strip()
+                if query not in queries:
+                    queries.append(query)
+
+        if rtype in _RESEARCH_REVIEW_TYPES:
+            if not 2 <= len(queries) <= 3:
+                errors.append(
+                    f"{prefix}: {rtype} requires 2-3 unique "
+                    "search_queries")
+        elif queries:
+            errors.append(
+                f"{prefix}: {rtype or 'this review type'} must use an empty "
+                "search_queries list")
+
+        normalized.append({
+            "id": item.get("id"),
+            "type": rtype,
+            "title": title,
+            "description": description,
+            "affected_pages": affected,
+            "severity": severity,
+            "search_queries": queries,
+        })
+
+    if errors:
+        preview = "; ".join(errors[:12])
+        if len(errors) > 12:
+            preview += f"; +{len(errors) - 12} more"
+        raise ValueError(f"invalid Stage 3.4 review schema: {preview}")
+    return normalized
 
 
 def _render_review_page(rtype: str, title: str, desc: str, affected: list[str],
@@ -246,6 +366,13 @@ def stage_3_4_review_suggestions(file_blocks: list[tuple[str, str]], raw_file: P
         _append_review_failure_log(config, raw_file, [msg])
         raise RuntimeError(msg)
 
+    try:
+        items = _validate_review_items(items, config)
+    except ValueError as exc:
+        msg = f"stage 3.4 review schema validation failed: {exc}"
+        _append_review_failure_log(config, raw_file, [msg])
+        raise RuntimeError(msg) from exc
+
     # Write review pages to wiki/REVIEW/<review_type>/ (分子目录，一目了然).
     # Filename is human-readable <type>-<topic>-<YYYYMMDD>.md (see
     # _review_utils.review_filename); the canonical identity stays the
@@ -254,24 +381,18 @@ def stage_3_4_review_suggestions(file_blocks: list[tuple[str, str]], raw_file: P
     date_compact = time.strftime("%Y%m%d")    # filename segment
 
     written = 0
+    page_refs: list[str] = []
     for it in items:
-        if not isinstance(it, dict):
-            continue
-        rtype = it.get("type", "suggestion")
-        title = it.get("title", "Untitled")
-        desc = it.get("description", "")
-        affected = it.get("affected_pages", [])
-        if isinstance(affected, str):
-            affected = [affected]
-        severity = it.get("severity", "medium")
+        rtype = it["type"]
+        title = it["title"]
+        desc = it["description"]
+        affected = it["affected_pages"]
+        severity = it["severity"]
         # NashSU searchQueries parity — 2-3 web search queries for Deep Research,
         # populated by the LLM for suggestion/missing-page reviews. Surfaced on
         # the review page so deep-research can seed its queries without a separate
         # optimize-research-topic LLM call.
-        queries = it.get("search_queries", [])
-        if isinstance(queries, str):
-            queries = [queries]
-        queries = [str(q).strip() for q in queries if str(q).strip()]
+        queries = it["search_queries"]
 
         reviews_dir = config.wiki_dir / "REVIEW" / rtype
         reviews_dir.mkdir(parents=True, exist_ok=True)
@@ -281,6 +402,8 @@ def stage_3_4_review_suggestions(file_blocks: list[tuple[str, str]], raw_file: P
         md = _render_review_page(rtype, title, desc, affected, queries,
                                  severity, date_str, raw_file.stem)
         atomic_write(page_path, md)
+        page_refs.append(PageRef.parse(
+            page_path, config.wiki_root, config.wiki_dir).project_relative)
         written += 1
 
     print(f"[stage 3.4] {written} review pages -> wiki/REVIEW/")
@@ -297,4 +420,8 @@ def stage_3_4_review_suggestions(file_blocks: list[tuple[str, str]], raw_file: P
     }
     atomic_write(sugg_path, json.dumps(sugg_data, ensure_ascii=False, indent=2))
 
-    return {"items": written, "stop_reason": stop_reason}
+    return {
+        "items": written,
+        "stop_reason": stop_reason,
+        "page_refs": page_refs,
+    }

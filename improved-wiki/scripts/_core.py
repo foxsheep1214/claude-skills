@@ -329,6 +329,7 @@ class Config:
     caption_fallback_protocol: str = ""
     caption_timeout_seconds: int = 180
     caption_fallback_timeout_seconds: int = 180
+    media_policy: str = "required"
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -345,6 +346,12 @@ class Config:
         context_size = None
         source_budget = _CONTEXT_SIZE_DEFAULT
         target_tokens, target_chars = _compute_chunk_targets(source_budget, _CONTEXT_SIZE_DEFAULT)
+        media_policy = os.environ.get(
+            "IMPROVED_WIKI_MEDIA_POLICY", "required").strip().lower()
+        if media_policy not in {"required", "best_effort", "off"}:
+            raise RuntimeError(
+                "IMPROVED_WIKI_MEDIA_POLICY must be one of: "
+                "required, best_effort, off")
 
         return cls(
             wiki_root=wiki_root,
@@ -371,6 +378,7 @@ class Config:
             target_tokens=target_tokens,
             max_tokens=16384,
             context_size=context_size,
+            media_policy=media_policy,
         )
 
     def apply_context(self, context_size: int) -> None:
@@ -744,6 +752,10 @@ def mark_stage_done(config: Config, source_hash: str, stage: str,
             stages[f"{stage}__payload"] = payload
         sp = stages_path(config, source_hash)
         atomic_write(sp, json.dumps(stages, ensure_ascii=False, indent=2))
+    # Keep the source-bound task envelope in sync after the authoritative
+    # marker write. Legacy/unit-test flows without a manifest are a no-op.
+    from _task_manifest import sync_task_manifest
+    sync_task_manifest(config, source_hash)
 
 
 def get_stage_payload(config: Config, source_hash: str, stage: str) -> dict:
@@ -767,6 +779,8 @@ def unmark_stage_done(config: Config, source_hash: str, stage: str) -> None:
         stages.pop(f"{stage}__payload", None)
         sp = stages_path(config, source_hash)
         atomic_write(sp, json.dumps(stages, ensure_ascii=False, indent=2))
+    from _task_manifest import sync_task_manifest
+    sync_task_manifest(config, source_hash)
 
 
 def is_stage_done(config: Config, source_hash: str, stage: str) -> bool:

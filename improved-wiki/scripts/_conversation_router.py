@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from pathlib import Path
 
 from _core import Config
@@ -109,8 +110,10 @@ def _conversation_llm_call(prompt: str, config: Config, max_tokens=None) -> tupl
         conv_dir, slug, prompt,
         label=slug,
         stale_check=_is_stale_result,
-        on_cached=lambda _response: _mark_task_done(config, slug),
-        on_prompt_written=lambda: _mark_task_pending(config, slug),
+        on_cached=lambda _response: _mark_task_done(
+            config, slug, prompt, _response),
+        on_prompt_written=lambda: _mark_task_pending(
+            config, slug, prompt, max_tokens),
     )
     return response, "end_turn"
 
@@ -119,36 +122,133 @@ def _task_manifest_path(config: Config) -> Path:
     return config.runtime_dir / "conversation" / config.conversation_prefix / "tasks.json"
 
 
+_TASK_MANIFEST_SCHEMA_VERSION = 2
+
+
+def _empty_task_manifest(config: Config) -> dict:
+    return {
+        "schema_version": _TASK_MANIFEST_SCHEMA_VERSION,
+        "conversation_prefix": config.conversation_prefix,
+        "tasks": {},
+        "pending": [],
+        "completed": [],
+    }
+
+
+def _normalize_task_manifest(config: Config, manifest: dict) -> dict:
+    """Migrate v1 arrays and derive unique compatibility lists from records."""
+    if manifest.get("schema_version") != _TASK_MANIFEST_SCHEMA_VERSION:
+        migrated = _empty_task_manifest(config)
+        pending = list(dict.fromkeys(manifest.get("pending", [])))
+        completed = list(dict.fromkeys(manifest.get("completed", [])))
+        completed_set = set(completed)
+        for slug in pending + completed:
+            migrated["tasks"][slug] = {
+                "slug": slug,
+                "status": "completed" if slug in completed_set else "pending",
+                "prompt_file": f"{slug}.md",
+                "result_file": f"{slug}.txt",
+                "attempts": 0,
+                "migrated_from_v1": True,
+            }
+        manifest = migrated
+    manifest["schema_version"] = _TASK_MANIFEST_SCHEMA_VERSION
+    manifest["conversation_prefix"] = config.conversation_prefix
+    tasks = manifest.get("tasks")
+    if not isinstance(tasks, dict):
+        tasks = {}
+        manifest["tasks"] = tasks
+    manifest["pending"] = [
+        slug for slug, task in tasks.items()
+        if isinstance(task, dict) and task.get("status") == "pending"
+    ]
+    manifest["completed"] = [
+        slug for slug, task in tasks.items()
+        if isinstance(task, dict) and task.get("status") == "completed"
+    ]
+    return manifest
+
+
 def _load_task_manifest(config: Config) -> dict:
     p = _task_manifest_path(config)
     if p.exists():
         try:
-            return json.loads(p.read_text(encoding="utf-8"))
+            raw = json.loads(p.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ValueError(
+                    f"expected JSON object, got {type(raw).__name__}")
+            return _normalize_task_manifest(config, raw)
         except Exception as e:
             # Corrupted manifest is not a silent reset — warn loudly so the
             # user knows why pending-task reporting restarted (policy 2026-06-24).
             print(f"⚠️  [conversation] {p} corrupted ({type(e).__name__}: {e}) "
                   f"— resetting task manifest.", flush=True)
-    return {"pending": [], "completed": []}
+    return _empty_task_manifest(config)
 
 
 def _save_task_manifest(config: Config, manifest: dict) -> None:
     p = _task_manifest_path(config)
     p.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write(p, json.dumps(manifest, ensure_ascii=False, indent=2))
+    normalized = _normalize_task_manifest(config, manifest)
+    atomic_write(p, json.dumps(normalized, ensure_ascii=False, indent=2))
 
 
-def _mark_task_pending(config: Config, slug: str) -> None:
+def _mark_task_pending(
+    config: Config,
+    slug: str,
+    prompt: str,
+    max_tokens: int | None,
+) -> None:
     m = _load_task_manifest(config)
-    if slug not in m.get("pending", []):
-        m.setdefault("pending", []).append(slug)
+    now = int(time.time() * 1000)
+    prior = m.setdefault("tasks", {}).get(slug, {})
+    attempts = int(prior.get("attempts", 0) or 0) + 1
+    prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    created_at = prior.get("created_at", now)
+    m["tasks"][slug] = {
+        **prior,
+        "slug": slug,
+        "status": "pending",
+        "prompt_file": f"{slug}.md",
+        "result_file": f"{slug}.txt",
+        "prompt_sha256": prompt_hash,
+        "prompt_chars": len(prompt),
+        "max_tokens": max_tokens,
+        "attempts": attempts,
+        "created_at": created_at,
+        "updated_at": now,
+    }
     _save_task_manifest(config, m)
 
 
-def _mark_task_done(config: Config, slug: str) -> None:
+def _mark_task_done(
+    config: Config,
+    slug: str,
+    prompt: str,
+    response: str,
+) -> None:
     m = _load_task_manifest(config)
-    m["pending"] = [s for s in m.get("pending", []) if s != slug]
-    m.setdefault("completed", []).append(slug)
+    now = int(time.time() * 1000)
+    prior = m.setdefault("tasks", {}).get(slug, {})
+    m["tasks"][slug] = {
+        **prior,
+        "slug": slug,
+        "status": "completed",
+        "prompt_file": f"{slug}.md",
+        "result_file": f"{slug}.txt",
+        "prompt_sha256": prior.get(
+            "prompt_sha256",
+            hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        ),
+        "prompt_chars": prior.get("prompt_chars", len(prompt)),
+        "response_sha256": hashlib.sha256(
+            response.encode("utf-8")).hexdigest(),
+        "response_chars": len(response),
+        "attempts": max(1, int(prior.get("attempts", 0) or 0)),
+        "created_at": prior.get("created_at", now),
+        "updated_at": now,
+        "completed_at": prior.get("completed_at", now),
+    }
     _save_task_manifest(config, m)
 
 
