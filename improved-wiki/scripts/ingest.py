@@ -243,7 +243,14 @@ def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
         return True
-    except (OSError, ProcessLookupError):
+    except PermissionError:
+        # Sandboxed runtimes may deny signal probes even for a live child.
+        # EPERM proves neither death nor PID reuse; treating it as dead causes
+        # every conversation-mode re-invoke to launch a duplicate extractor.
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
         return False
 
 
@@ -277,6 +284,29 @@ def _launch_bg_extract(file: Path, config: Config, state: dict) -> None:
     state[h] = {"pid": proc.pid, "file": file.name}
     _save_bg_state(config, state)
     print(f"[batch] bg extract launched (pid {proc.pid}) — {file.name}", flush=True)
+
+
+def _launch_next_pending_extract(
+    raw_files: list[Path],
+    start_index: int,
+    config: Config,
+    state: dict,
+) -> Path | None:
+    """Launch the first not-yet-extracted source at or after ``start_index``.
+
+    A resumed batch commonly starts with several books whose Phase 0/1 markers
+    are already cached. Looking only at the immediately adjacent book leaves a
+    later fresh source idle until every cached book's LLM spine finishes. Scan
+    past cached entries while still launching at most one background process,
+    preserving extraction order among the remaining sources.
+    """
+    for file in raw_files[start_index:]:
+        h = file_sha256(file)
+        if is_stage_done(config, h, "stage_1_3_done"):
+            continue
+        _launch_bg_extract(file, config, state)
+        return file
+    return None
 
 
 def _wait_extract_done(config: Config, h: str, bg_pid: int = 0,
@@ -341,15 +371,12 @@ def batch_ingest(
         raise RuntimeError("Could not acquire project lock for batch write phase")
 
     bg_state = _load_bg_state(config)
-    # Launch ONLY the spine head's (book 1) bg extract upfront so it wins the
-    # minerU flock and the spine can start ASAP. Later books are launched
-    # PIPELINED — each right after the prior book's extraction completes (see the
-    # loop) — so they extract in spine order. Launching all upfront let them race
-    # for the flock: a non-head book could grab it first and delay book 1's spine
-    # (observed 2026-06-29). _launch_bg_extract is idempotent (skips alive PIDs),
-    # so re-invocations after a handoff don't relaunch.
-    if raw_files and not is_stage_done(config, file_sha256(raw_files[0]), "stage_1_3_done"):
-        _launch_bg_extract(raw_files[0], config, bg_state)
+    # Launch the first source that still needs Phase 0/1. This is normally the
+    # spine head. On a resumed batch, however, several leading books may already
+    # be extracted; scanning past them lets the first fresh source overlap with
+    # the cached books' LLM spines. Only one process is launched, so remaining
+    # extraction order and the minerU flock invariant stay unchanged.
+    _launch_next_pending_extract(raw_files, 0, config, bg_state)
 
     results: list[dict] = []
     try:
@@ -381,14 +408,13 @@ def batch_ingest(
                             print(f"⚠️  [batch] could not kill pid {bg_pid}: {e}", flush=True)
                     print(f"[batch] bg extract unavailable — falling back to sync — {f.name}", flush=True)
 
-            # Pipeline: this book's Phase 0/1 is done — launch the NEXT book's bg
-            # extract now so it runs (flock-serialized, in spine order) during this
-            # book's LLM spine. Launched AFTER this book's extraction so ordering is
-            # strict (no flock race). Idempotent: skips if already done/alive.
+            # Pipeline: this book's Phase 0/1 is done — launch the first future
+            # book that still needs extraction. Cached adjacent books are skipped,
+            # allowing a later fresh source to overlap with the current LLM spine.
+            # At most one background process is launched; idempotency prevents
+            # re-invocations from duplicating an already-running extract.
             if i < total_books:
-                nxt = raw_files[i]  # i is 1-based → raw_files[i] is book i+1
-                if not is_stage_done(config, file_sha256(nxt), "stage_1_3_done"):
-                    _launch_bg_extract(nxt, config, bg_state)
+                _launch_next_pending_extract(raw_files, i, config, bg_state)
 
             # 2.1/2.2 (Phase 0/1 cached). Raises ConversationPending on an LLM
             # handoff (chunk prompt); PrepareStopAfter at the 2.2/2.3 boundary.
@@ -704,4 +730,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
