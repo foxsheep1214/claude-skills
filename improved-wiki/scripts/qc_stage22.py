@@ -64,10 +64,37 @@ def _chunk_num(p: Path):
     return int(m.group(1)) if m else None
 
 
+def _indented_yaml_block(text: str, key: str) -> str:
+    """Return an indented top-level YAML field body, preserving blank lines."""
+    lines = text.splitlines()
+    start = None
+    key_line = re.compile(rf"^{re.escape(key)}:\s*(?:\[\])?\s*$")
+    for index, line in enumerate(lines):
+        if key_line.fullmatch(line):
+            start = index + 1
+            if line.rstrip().endswith("[]"):
+                return ""
+            break
+    if start is None:
+        return ""
+
+    body = []
+    for line in lines[start:]:
+        if line and not line[0].isspace():
+            break
+        body.append(line)
+    return "\n".join(body)
+
+
 def check(txt_file: Path) -> tuple[bool, str]:
     text = txt_file.read_text(encoding="utf-8", errors="replace")
     size = len(text)
-    concepts = re.findall(r"^\s*-\s*name:\s*[\"']?(.+?)[\"']?\s*$", text, re.MULTILINE)
+    concepts_body = _indented_yaml_block(text, "concepts_found")
+    concepts = re.findall(
+        r"^\s*-\s*name:\s*[\"']?(.+?)[\"']?\s*$",
+        concepts_body,
+        re.MULTILINE,
+    )
     placeholders = [c for c in concepts if PLACEHOLDER.search(c)]
     if size < MIN_BYTES:
         return False, f"size {size} < {MIN_BYTES}"
