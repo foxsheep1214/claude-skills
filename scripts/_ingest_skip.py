@@ -3,7 +3,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from _core import Config, file_sha256, is_stage_done, is_query_bridge_source
+from _core import (
+    Config,
+    file_sha256,
+    is_stage_done,
+    is_query_bridge_source,
+    mark_stage_done,
+    unmark_stage_done,
+)
 from _stage_3_write import _stage_3_1_wiki_path_for_source
 
 def _should_stop_after(config: Config, stage: str, result: dict) -> bool:
@@ -63,6 +70,24 @@ def _stage_0_2_should_skip(raw_file: Path, config: Config) -> bool:
             from _core import stages_path as _sp
             _sp(config, h).unlink(missing_ok=True)
             return False
+        from _media_integrity import (
+            assert_cached_media_complete,
+            audit_cached_media,
+            repair_completed_media,
+        )
+        valid, reason, _details = audit_cached_media(raw_file, config)
+        if not valid:
+            print(
+                "  [skip] ⚠️ ingested marker has incomplete media "
+                f"({reason}) — repairing media before this source may be "
+                "considered complete")
+            # Clear the authoritative marker before any I/O/API work. If the
+            # repair pauses, the next run cannot silently skip the source.
+            unmark_stage_done(config, h, "ingested")
+            repair_completed_media(raw_file, config)
+            assert_cached_media_complete(raw_file, config)
+            mark_stage_done(config, h, "ingested")
+            print("  [skip] Media repaired and re-verified")
         print(f"  [skip] Ingest complete (ingested marker present)")
         return True
 

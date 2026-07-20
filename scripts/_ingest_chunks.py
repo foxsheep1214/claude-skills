@@ -1,6 +1,7 @@
 """_ingest_chunks.py — chunk analysis pipeline 2.2→2.4 (extracted from ingest.py)."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -15,16 +16,19 @@ from _core import (
     mark_stage_done,
     unmark_stage_done,
     save_progress,
+    delete_progress_keys,
     list_existing_slugs,
     slugify,
     PrepareStopAfter,
 )
 from _stage_2_base import file_block_slug
 from _stage_2_analyze import (
+    ChunkAnalysisValidationError,
     _stage_2_1_chunk_text,
     _stage_2_2_analyze_chunk,
     _stage_2_2_chunk_retries,
     _stage_2_2_resolve_chunk_heading_path,
+    normalize_and_validate_chunk_analysis,
 )
 from _stage_2_4_generation import (
     stage_2_4_generate_chunk,
@@ -33,6 +37,197 @@ from _stage_2_4_generation import (
     _stage_2_4_per_concept_fallback,
 )
 from _stage_validators import _verify_stage_2_2_chunks, _verify_stage_2_1_digest
+from _task_manifest import bind_chunk_plan
+
+CHUNK_PLAN_SCHEMA_VERSION = 2
+CHUNKER_VERSION = "token-bounded-heading-aware-v2"
+
+_STAGE_2_2_DOWNSTREAM_MARKERS = (
+    "stage_2_2_done",
+    "stage_2_3_done",
+    "stage_2_9_done",
+    "write_loop_done",
+    "write_phase",
+    "ingested",
+)
+
+_STAGE_2_2_DOWNSTREAM_ARTIFACTS = (
+    "chunk_plan_v2",
+    "chunk_analyses",
+    "global_digest",
+    "analysis",
+    "incremental_associations",
+    "file_blocks",
+    "source_page_response",
+    "comp_count",
+    "concept_merge_stats",
+    "dedup_was_run",
+)
+
+
+def _text_sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _resolve_chunk_spans(
+    extracted_text: str,
+    chunk_meta: list,
+    overlap_cap: int,
+) -> list[tuple[int, int]]:
+    """Resolve chunk spans monotonically, never with an unscoped ``find``.
+
+    Chunk text is produced from overlapping source slices and stripped at the
+    edges. Searching every chunk from byte zero binds repeated passages to the
+    first occurrence in the book. Instead, each lookup starts near the prior
+    chunk's end, allowing the configured overlap plus a small whitespace
+    margin. Exact chunk text is still required; failure is a checkpoint error,
+    not a guessed position.
+    """
+    spans: list[tuple[int, int]] = []
+    previous_end = 0
+    for position, meta in enumerate(chunk_meta):
+        chunk = meta[1]
+        search_from = 0
+        if position:
+            search_from = max(0, previous_end - max(0, overlap_cap) - 4096)
+        start = extracted_text.find(chunk, search_from)
+        if start < 0:
+            raise RuntimeError(
+                f"[Stage 2.2] Cannot bind chunk {position + 1} back to the "
+                "post-caption extracted text. Refusing to create an unstable "
+                "checkpoint plan."
+            )
+        end = start + len(chunk)
+        if spans and start <= spans[-1][0]:
+            raise RuntimeError(
+                f"[Stage 2.2] Non-monotonic chunk binding at chunk "
+                f"{position + 1}: start={start}, prior_start={spans[-1][0]}."
+            )
+        spans.append((start, end))
+        previous_end = end
+    return spans
+
+
+def _build_chunk_plan(
+    extracted_text: str,
+    config: Config,
+    chunk_meta: list,
+) -> dict:
+    """Build the exact, versioned Stage 2.2 checkpoint compatibility envelope."""
+    spans = _resolve_chunk_spans(extracted_text, chunk_meta, config.chunk_overlap)
+    chunks: list[dict] = []
+    for meta, (start, end) in zip(chunk_meta, spans):
+        index, chunk, overlap_before, heading_path = meta
+        text_hash = _text_sha256(chunk)
+        chunks.append({
+            "index": index + 1,
+            "chunk_id": f"{index + 1:04d}-{text_hash[:16]}",
+            "start": start,
+            "end": end,
+            "size": len(chunk),
+            "text_sha256": text_hash,
+            "overlap_sha256": _text_sha256(overlap_before),
+            "heading_path": heading_path,
+        })
+    return {
+        "schema_version": CHUNK_PLAN_SCHEMA_VERSION,
+        "chunker_version": CHUNKER_VERSION,
+        "source_text_sha256": _text_sha256(extracted_text),
+        "source_text_length": len(extracted_text),
+        "context_size": config.context_size,
+        "source_budget": config.source_budget,
+        "target_tokens": config.target_tokens,
+        "target_chars": config.target_chars,
+        "overlap_chars": config.chunk_overlap,
+        "chunk_total": len(chunks),
+        "chunks": chunks,
+    }
+
+
+def _chunk_checkpoint_mismatch(progress: dict, current_plan: dict) -> str | None:
+    """Return an incompatibility reason, or ``None`` for an exact safe restore."""
+    saved_plan = progress.get("chunk_plan_v2")
+    if not isinstance(saved_plan, dict):
+        return "legacy checkpoint has no ChunkPlanV2"
+    if saved_plan != current_plan:
+        for key in (
+            "schema_version",
+            "chunker_version",
+            "source_text_sha256",
+            "source_text_length",
+            "context_size",
+            "source_budget",
+            "target_tokens",
+            "target_chars",
+            "overlap_chars",
+            "chunk_total",
+            "chunks",
+        ):
+            if saved_plan.get(key) != current_plan.get(key):
+                return f"ChunkPlanV2 field changed: {key}"
+        return "ChunkPlanV2 differs"
+
+    analyses = progress.get("chunk_analyses")
+    if not isinstance(analyses, list):
+        return "chunk_analyses is not a list"
+    plan_chunks = current_plan["chunks"]
+    if len(analyses) != len(plan_chunks):
+        return (
+            f"analysis count {len(analyses)} != planned chunk count "
+            f"{len(plan_chunks)}"
+        )
+    seen_ids: set[str] = set()
+    for position, (analysis, planned) in enumerate(zip(analyses, plan_chunks), 1):
+        if not isinstance(analysis, dict):
+            return f"analysis {position} is not a mapping"
+        try:
+            normalized = normalize_and_validate_chunk_analysis(
+                analysis,
+                expected_index=planned["index"],
+                expected_total=current_plan["chunk_total"],
+            )
+        except ChunkAnalysisValidationError as exc:
+            return f"analysis {position} failed schema validation: {exc}"
+        analyses[position - 1] = normalized
+        analysis = normalized
+        chunk_id = analysis.get("_chunk_id")
+        if chunk_id != planned["chunk_id"]:
+            return f"analysis {position} chunk_id does not match its planned chunk"
+        if analysis.get("_chunk_text_sha256") != planned["text_sha256"]:
+            return f"analysis {position} text hash does not match its planned chunk"
+        if analysis.get("_chunk_index") != planned["index"]:
+            return f"analysis {position} index does not match its planned chunk"
+        if chunk_id in seen_ids:
+            return f"duplicate analysis chunk_id: {chunk_id}"
+        seen_ids.add(chunk_id)
+    return None
+
+
+def _invalidate_stage_2_2_checkpoint(
+    config: Config,
+    source_hash: str,
+    reason: str,
+) -> None:
+    """Invalidate Stage 2.2 and every artifact/marker derived from it."""
+    print(
+        "  [stage 2.2] ⚠️  cached checkpoint is incompatible "
+        f"({reason}) — invalidating Stage 2.2 and downstream only."
+    )
+    delete_progress_keys(
+        config, source_hash, list(_STAGE_2_2_DOWNSTREAM_ARTIFACTS))
+    for marker in _STAGE_2_2_DOWNSTREAM_MARKERS:
+        unmark_stage_done(config, source_hash, marker)
+
+
+def _assert_chunk_count_alignment(chunk_meta: list, chunk_analyses: list) -> None:
+    """Prevent ``zip`` from silently truncating generation input."""
+    if len(chunk_meta) != len(chunk_analyses):
+        raise RuntimeError(
+            "[Stage 2.4] Chunk plan/analysis cardinality mismatch: "
+            f"{len(chunk_meta)} planned chunks vs "
+            f"{len(chunk_analyses)} analyses. Stage 2.2 must be re-run."
+        )
+
 
 def _parse_accumulated_to_dict(accumulated) -> dict:
     """Parse the rolled-up accumulated_digest back to a dict for 2.4/2.6/2.9.
@@ -113,6 +308,7 @@ def _build_gen_inventory(chunk_meta: list, chunk_analyses: list) -> dict[str, in
     map, matching how the serial loop mixes both kinds of stems into
     ``generated_slugs``. Blank names are skipped.
     """
+    _assert_chunk_count_alignment(chunk_meta, chunk_analyses)
     inventory: dict[str, int] = {}
     for meta, analysis in zip(chunk_meta, chunk_analyses):
         i = meta[0]
@@ -120,27 +316,16 @@ def _build_gen_inventory(chunk_meta: list, chunk_analyses: list) -> dict[str, in
             continue
         for key in ("concepts_found", "entities_found"):
             items = analysis.get(key, [])
-            if isinstance(items, dict):
-                items = [items]
-            if not isinstance(items, (list, tuple)):
-                continue
+            if not isinstance(items, list):
+                raise RuntimeError(
+                    f"[Stage 2.4] Unvalidated Stage 2.2 field {key}: "
+                    f"{type(items).__name__}. Re-run Stage 2.2.")
             for item in items:
-                if isinstance(item, dict):
-                    name = item.get("name", "")
-                elif isinstance(item, str):
-                    # Older/malformed Stage 2.2 YAML can deserialize a
-                    # sequence item written as ``- name: "Foo"`` into the
-                    # literal string ``name: "Foo"``. Generation only needs
-                    # the deterministic name for inventory ownership, so
-                    # recover that safe shorthand instead of crashing.
-                    name = item.strip()
-                    if name.lower().startswith("name:"):
-                        name = name.split(":", 1)[1].strip()
-                    if (len(name) >= 2 and name[0] == name[-1]
-                            and name[0] in ("'", '"')):
-                        name = name[1:-1].strip()
-                else:
-                    continue
+                if not isinstance(item, dict):
+                    raise RuntimeError(
+                        "[Stage 2.4] Unvalidated Stage 2.2 inventory item: "
+                        f"{type(item).__name__}. Re-run Stage 2.2.")
+                name = item.get("name", "")
                 if not isinstance(name, str):
                     continue
                 if not name or not name.strip():
@@ -181,6 +366,7 @@ def _generate_all_chunks(
     so the extra per-chunk calls on big books are an accepted cost. ``existing_refs``
     + ``related_pages`` (Stage 2.3) are threaded so cross-chunk wikilinks resolve.
     """
+    _assert_chunk_count_alignment(chunk_meta, chunk_analyses)
     if len(chunk_meta) <= 1:
         source_context = chunk_meta[0][1] if chunk_meta else ""
         all_file_blocks, generated_slugs, stop_reason = stage_2_4_generate_all(
@@ -265,6 +451,7 @@ def _generate_all_chunks_parallel(
     replay no chunk raises, so we return ``(blocks, slug_union, None)`` exactly
     like the serial path's contract.
     """
+    _assert_chunk_count_alignment(chunk_meta, chunk_analyses)
     inventory = _build_gen_inventory(chunk_meta, chunk_analyses)
     all_file_blocks: list = []
     generated_slugs: list = []
@@ -320,10 +507,33 @@ def _run_chunk_pipeline(
     2.2 is restored later (under ``stage_2_2_done``) when the book reaches the
     spine and runs 2.3+ for real.
     """
+    # Rebuild the CURRENT plan before accepting any Stage 2.2-derived cache.
+    # The source/config/chunker in this run are authoritative. A legacy or
+    # drifted checkpoint is locally invalidated rather than paired to new
+    # chunks by list position.
+    chunk_meta, chunk_total = _build_chunk_meta(extracted_text, config)
+    chunk_plan = _build_chunk_plan(extracted_text, config, chunk_meta)
+
+    _h = file_sha256(raw_file)
+    _has_stage_2_cache = bool(
+        progress
+        and "chunk_analyses" in progress
+        and (
+            is_stage_done(config, _h, "stage_2_2_done")
+            or is_stage_done(config, _h, "stage_2_3_done")
+        )
+    )
+    if _has_stage_2_cache:
+        mismatch = _chunk_checkpoint_mismatch(progress, chunk_plan)
+        if mismatch:
+            _invalidate_stage_2_2_checkpoint(config, _h, mismatch)
+    # Once any incompatible cache has been invalidated, bind the current plan
+    # before a cached restore or a new Stage 2.2 marker can be accepted.
+    bind_chunk_plan(config, _h, chunk_plan)
+
     # Cached: chunk analysis already complete. Stage-completion is the single
     # source of truth in stages.json (stage_2_3_done); chunk_analyses presence
     # in the artifact store guards against a missing artifact.
-    _h = file_sha256(raw_file)
     if (progress and "chunk_analyses" in progress
             and is_stage_done(config, _h, "stage_2_3_done")):
         # Restore file_blocks DIRECTLY from the artifact store. The retired
@@ -347,7 +557,8 @@ def _run_chunk_pipeline(
         else:
             chunk_analyses = progress["chunk_analyses"]
             print(f"  [stage 2.2] (cached) Chunk Analysis \u2014 {len(chunk_analyses)} chunks")
-            _verify_stage_2_2_chunks(chunk_analyses, extracted_text)
+            _verify_stage_2_2_chunks(
+                chunk_analyses, extracted_text, chunk_plan=chunk_plan)
             # 2.3 is already done \u2014 prefetch (2.2) is a no-op, stop before any
             # wiki-dependent work re-runs.
             if analyze_only:
@@ -366,7 +577,8 @@ def _run_chunk_pipeline(
         chunk_analyses = progress["chunk_analyses"]
         print(f"  [stage 2.2] (cached) Chunk Analysis \u2014 {len(chunk_analyses)} chunks "
               f"(prefetched)")
-        _verify_stage_2_2_chunks(chunk_analyses, extracted_text)
+        _verify_stage_2_2_chunks(
+            chunk_analyses, extracted_text, chunk_plan=chunk_plan)
         if analyze_only:
             raise PrepareStopAfter("1.5")
         # Restore the persisted roll-up digest. A pre-roll-up cache (no valid
@@ -389,7 +601,6 @@ def _run_chunk_pipeline(
             return (*result, global_digest)
 
     # \u2500\u2500 Stage 2.2: build chunk plan + analyze all chunks (wiki-independent) \u2500\u2500
-    chunk_meta, chunk_total = _build_chunk_meta(extracted_text, config)
     est_sec = chunk_total * 75
     print(f"  [stage 2.2] Analyze \u2014 {chunk_total} chunk(s), "
           f"target {config.target_chars:,} chars/chunk (est. {est_sec/60:.0f} min)")
@@ -416,6 +627,13 @@ def _run_chunk_pipeline(
         template_content, chunk_total, t_start, verbose,
         existing_slugs=slugs_snapshot)
 
+    for analysis, planned in zip(chunk_analyses, chunk_plan["chunks"]):
+        analysis["_chunk_index"] = planned["index"]
+        analysis["_chunk_id"] = planned["chunk_id"]
+        analysis["_chunk_text_sha256"] = planned["text_sha256"]
+    _verify_stage_2_2_chunks(
+        chunk_analyses, extracted_text, chunk_plan=chunk_plan)
+
     # Persist 2.2 on its own + mark stage_2_2_done so a prefetch (analyze_only)
     # can stop here and the later spine run restores chunk_analyses without
     # re-analyzing. 2.2 is wiki-independent \u2014 safe to cache before 2.3+ runs.
@@ -430,8 +648,10 @@ def _run_chunk_pipeline(
     if chunk_analyses and not analyze_only:
         _verify_stage_2_1_digest(global_digest, raw_file)
 
-    save_progress(config, _h, {"chunk_analyses": chunk_analyses,
+    save_progress(config, _h, {"chunk_plan_v2": chunk_plan,
+                               "chunk_analyses": chunk_analyses,
                                "global_digest": global_digest})
+    bind_chunk_plan(config, _h, chunk_plan)
     mark_stage_done(config, _h, "stage_2_2_done")
     if analyze_only:
         raise PrepareStopAfter("1.5")
@@ -452,14 +672,17 @@ def _build_chunk_meta(extracted_text: str, config: Config):
                                    target_tokens=config.target_tokens)
     chunk_total = len(chunks)
     chunk_meta: list[tuple[int, str, str, str]] = []
+    spans = _resolve_chunk_spans(
+        extracted_text,
+        [(i, chunk, "", "") for i, chunk in enumerate(chunks)],
+        config.chunk_overlap,
+    )
     for i in range(chunk_total):
         chunk = chunks[i]
         overlap_before = chunks[i - 1][-config.chunk_overlap:] if i > 0 else ""
-        chunk_pos = extracted_text.find(chunk)
-        if chunk_pos == -1:
-            chunk_pos = i * config.target_chars
+        chunk_pos, chunk_end = spans[i]
         heading_path = _stage_2_2_resolve_chunk_heading_path(
-            extracted_text, chunk_pos, chunk_pos + len(chunk))
+            extracted_text, chunk_pos, chunk_end)
         chunk_meta.append((i, chunk, overlap_before, heading_path))
     return chunk_meta, chunk_total
 

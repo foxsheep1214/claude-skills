@@ -64,7 +64,12 @@ def _verify_stage_2_1_digest(global_digest: dict, raw_file: Path) -> None:
                    f"Book may be too short or LLM output was incomplete.")
 
 
-def _verify_stage_2_2_chunks(chunk_analyses: list[dict], extracted_text: str) -> None:
+def _verify_stage_2_2_chunks(
+    chunk_analyses: list[dict],
+    extracted_text: str,
+    *,
+    chunk_plan: dict | None = None,
+) -> None:
     """Verify chunk analysis produced results for all chunks."""
     _verify_or_die(len(chunk_analyses) >= 1, "Stage 2.2",
                    f"Chunk analysis produced 0 results. "
@@ -78,6 +83,38 @@ def _verify_stage_2_2_chunks(chunk_analyses: list[dict], extracted_text: str) ->
                    f"{len(error_chunks)}/{len(chunk_analyses)} chunk(s) carry an "
                    f"'error' key (chunks {error_chunks}) — stale pre-fix cached "
                    f"analyses. Clear the cached chunk_analyses and re-run Stage 2.2.")
+    if chunk_plan is not None:
+        planned = chunk_plan.get("chunks", [])
+        _verify_or_die(
+            len(chunk_analyses) == len(planned),
+            "Stage 2.2",
+            f"{len(chunk_analyses)} analyses != {len(planned)} planned chunks.",
+        )
+        seen_ids: set[str] = set()
+        for position, (analysis, plan_item) in enumerate(
+                zip(chunk_analyses, planned), 1):
+            _verify_or_die(
+                isinstance(analysis, dict),
+                "Stage 2.2",
+                f"Chunk analysis {position} is not a mapping.",
+            )
+            chunk_id = analysis.get("_chunk_id")
+            _verify_or_die(
+                chunk_id == plan_item.get("chunk_id"),
+                "Stage 2.2",
+                f"Chunk analysis {position} has wrong chunk_id.",
+            )
+            _verify_or_die(
+                analysis.get("_chunk_text_sha256") == plan_item.get("text_sha256"),
+                "Stage 2.2",
+                f"Chunk analysis {position} has wrong source-text hash.",
+            )
+            _verify_or_die(
+                chunk_id not in seen_ids,
+                "Stage 2.2",
+                f"Duplicate chunk_id in analysis cache: {chunk_id}.",
+            )
+            seen_ids.add(chunk_id)
     # Warn if any chunk is suspiciously empty
     empty_chunks = [i for i, c in enumerate(chunk_analyses) if not c.get("concepts_found") and not c.get("entities_found")]
     if empty_chunks:

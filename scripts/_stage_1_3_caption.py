@@ -782,6 +782,56 @@ def _stage_1_3_pending_images(images: list[dict], media_dir: Path) -> list[dict]
     return pending
 
 
+def validate_stage_1_3_artifact(
+    stage_1_2_result: dict,
+    config: Config,
+) -> tuple[bool, str, dict]:
+    """Validate real caption sidecars according to the explicit media policy."""
+    policy = getattr(config, "media_policy", "required")
+    if policy not in {"required", "best_effort", "off"}:
+        return False, f"unknown media policy: {policy}", {}
+    images = stage_1_2_result.get("images", [])
+    if not isinstance(images, list):
+        return False, "Stage 1.2 images is not a list", {}
+    media_dir_value = stage_1_2_result.get("media_dir")
+    if not images:
+        return True, "", {
+            "captioned": 0,
+            "total": 0,
+            "complete": 0,
+            "pending": 0,
+            "policy": policy,
+        }
+    if not media_dir_value:
+        return False, "Stage 1.2 has images but no media_dir", {}
+    media_dir = Path(media_dir_value)
+    pending = _stage_1_3_pending_images(images, media_dir)
+    complete = len(images) - len(pending)
+    result = {
+        "captioned": 0,
+        "total": len(images),
+        "complete": complete,
+        "pending": len(pending),
+        "policy": policy,
+        "degraded": bool(pending),
+    }
+    if policy == "off":
+        result["skipped"] = True
+        result["reason"] = "media-policy-off"
+        return True, "", result
+    if pending and policy == "required":
+        names = ", ".join(
+            str(image.get("filename", "?")) for image in pending[:5])
+        more = f" (+{len(pending) - 5} more)" if len(pending) > 5 else ""
+        return (
+            False,
+            f"{len(pending)}/{len(images)} captions missing or invalid: "
+            f"{names}{more}",
+            result,
+        )
+    return True, "", result
+
+
 # C-caption (2026-07-08): rounds + backoff before Stage 1.3 is allowed to hand
 # off to Stage 2. Diagnosed on "EW and Radar Systems Handbook" — a single pass
 # left 17/331 images as `[待重试]` placeholders, and nothing forced a retry
@@ -949,17 +999,59 @@ def stage_1_3_caption_images(config: Config, stage_1_2_result: dict) -> dict:
     Thin wrapper around _stage_1_3_caption_images_batch() for the Stage 1.3
     pipeline checkpoint."""
     images = stage_1_2_result.get("images", [])
+    policy = getattr(config, "media_policy", "required")
+    if policy == "off":
+        print("[stage 1.3] Media policy is off — captioning intentionally skipped")
+        return {
+            "captioned": 0,
+            "total": len(images),
+            "complete": 0,
+            "pending": len(images),
+            "policy": "off",
+            "skipped": True,
+            "reason": "media-policy-off",
+        }
     if not images:
         print("[stage 1.3] No images to caption — skipping")
-        return {"captioned": 0, "total": 0}
+        return {
+            "captioned": 0,
+            "total": 0,
+            "complete": 0,
+            "pending": 0,
+            "policy": policy,
+        }
     if not config.caption_api_key:
         media_dir = Path(stage_1_2_result.get("media_dir", "."))
         already = sum(1 for img in images
                       if (media_dir / (img["filename"] + ".caption.txt")).exists())
+        if policy == "best_effort":
+            print(
+                "  [stage 1.3] ⚠️ best_effort media degraded: caption "
+                "provider API key is missing")
+            valid, _reason, actual = validate_stage_1_3_artifact(
+                stage_1_2_result, config)
+            actual["captioned"] = 0
+            actual["reason"] = "no-api-key"
+            return actual
         _caption_no_key_pause(config, "stage-1.3", media_dir, len(images), already)
         return {"captioned": 0, "total": len(images), "skipped": True, "reason": "no-api-key"}
 
     media_dir = Path(stage_1_2_result["media_dir"])
-    captioned = _stage_1_3_caption_images_batch(images, config, media_dir,
-                                source_label="stage-1.3")
-    return {"captioned": captioned, "total": len(images)}
+    try:
+        captioned = _stage_1_3_caption_images_batch(
+            images, config, media_dir, source_label="stage-1.3")
+    except RuntimeError as exc:
+        if policy != "best_effort":
+            raise
+        print(f"  [stage 1.3] ⚠️ best_effort media degraded: {exc}")
+        valid, _reason, actual = validate_stage_1_3_artifact(
+            stage_1_2_result, config)
+        actual["captioned"] = 0
+        actual["error"] = str(exc)
+        return actual
+    valid, reason, actual = validate_stage_1_3_artifact(
+        stage_1_2_result, config)
+    if not valid:
+        raise RuntimeError(f"[Stage 1.3] caption artifact validation failed: {reason}")
+    actual["captioned"] = captioned
+    return actual

@@ -23,7 +23,7 @@ from pathlib import Path
 _script_dir = Path(__file__).resolve().parent
 if str(_script_dir) not in sys.path:
     sys.path.insert(0, str(_script_dir))
-from _core import Config  # noqa: E402
+from _core import Config, file_sha256  # noqa: E402
 
 from _stage_1_2_images import (  # noqa: E402
     _stage_1_2_harvest_images,
@@ -410,6 +410,42 @@ def _stage_1_1_extract_text_scanned_locked(file_path: Path, config: Config) -> s
 def _stage_1_1_extract_text_scanned(file_path: Path, config: Config) -> str:
     """Alias for _stage_1_1_extract_text_scanned_locked (entry point for OCR)."""
     return _stage_1_1_extract_text_scanned_locked(file_path, config)
+
+
+def _stage_1_1_reharvest_media(file_path: Path, config: Config) -> Path:
+    """Re-run minerU into an isolated cache solely to recover lost figures.
+
+    The normal OCR cache is deliberately left untouched: completed books may
+    still have valid per-page text and downstream wiki pages even when the
+    canonical media directory and minerU's transient API output were removed.
+    A source-hash-qualified directory makes this path resumable without ever
+    accepting another file with the same stem as a cache hit.
+    """
+    source_hash = file_sha256(file_path)
+    repair_dir = (
+        config.extract_tmp_dir
+        / file_path.stem
+        / f"_media_reharvest_v1_{source_hash[:16]}"
+    )
+    lock_state = {"fd": _stage_1_1_acquire_mineru_lock()}
+
+    def _release_lock() -> None:
+        fd = lock_state["fd"]
+        if fd is not None:
+            lock_state["fd"] = None
+            _stage_1_1_release_mineru_lock(fd)
+
+    try:
+        _stage_1_1_extract_text_scanned_impl(
+            file_path,
+            config,
+            release_mineru_lock=_release_lock,
+            out_dir_override=repair_dir,
+            finalize_media=False,
+        )
+    finally:
+        _release_lock()
+    return repair_dir
 
 
 _log_file: Path | None = None
@@ -896,7 +932,12 @@ def _stage_1_1_scanned_assemble_manifest(
 
 
 def _stage_1_1_extract_text_scanned_impl(
-    file_path: Path, config: Config, release_mineru_lock=None,
+    file_path: Path,
+    config: Config,
+    release_mineru_lock=None,
+    *,
+    out_dir_override: Path | None = None,
+    finalize_media: bool = True,
 ) -> str:
     """Extract a PDF (any type) via the local minerU API server (hybrid-engine).
 
@@ -910,7 +951,10 @@ def _stage_1_1_extract_text_scanned_impl(
     (see stage_1_1_extract_text docstring for the rationale).
 
     Splits PDF into MINERU_CHUNK_SIZE-page chunks. Each chunk runs minerU independently.
-    Results persisted to extract_tmp_dir/<stem>/ with _mineru_stats.json for crash recovery.
+    Results normally persist to extract_tmp_dir/<stem>/ with
+    _mineru_stats.json for crash recovery. ``out_dir_override`` is reserved
+    for the isolated media-reharvest path; it prevents lost image bytes from
+    forcing deletion or mutation of a still-valid OCR text cache.
     Extracted images go to wiki/media/<raw-subpath>/<slug>/ for Stage 3.2 (mirrors raw/).
 
     Note: File-based lock managed by wrapper function _stage_1_1_extract_text_scanned_locked().
@@ -926,7 +970,7 @@ def _stage_1_1_extract_text_scanned_impl(
 
     doc = fitz.open(file_path)
     total_pages = len(doc)
-    out_dir = config.extract_tmp_dir / file_path.stem
+    out_dir = out_dir_override or (config.extract_tmp_dir / file_path.stem)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Route the minerU API server's output root into the runtime temp dir
@@ -1012,7 +1056,11 @@ def _stage_1_1_extract_text_scanned_impl(
     if release_mineru_lock is not None:
         release_mineru_lock()
 
-    return _stage_1_1_scanned_assemble_manifest(out_dir, stats, file_path, config, total_pages)
+    if finalize_media:
+        return _stage_1_1_scanned_assemble_manifest(
+            out_dir, stats, file_path, config, total_pages)
+    return _stage_1_1_assemble_ocr_text(
+        out_dir, list(range(total_pages)))
 
 def _stage_1_1_save_mineru_stats(stats_path: Path, stats: dict) -> None:
     """Atomically persist minerU stats for crash recovery."""

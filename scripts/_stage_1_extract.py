@@ -42,6 +42,7 @@ from _core import Config
 #   images → {}
 from _stage_1_1_scanned import (  # noqa: F401
     _stage_1_1_extract_text_scanned,
+    _stage_1_1_reharvest_media,
     log_event,
 )
 from _stage_1_2_images import (  # noqa: F401
@@ -288,4 +289,3 @@ def _stage_1_1_detect_pdf_type(file_path: Path, sample_pages: int = 15) -> tuple
     if avg < 50:
         return ("scanned", avg)
     return ("mixed", avg)
-

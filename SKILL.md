@@ -39,7 +39,7 @@ Ingest: 1.1→1.2→1.3→2.2→2.3→2.4→2.6→2.9→3.1→3.2→3.4→3.5→
 Phase 0: Pre-processing gates  (raw naming, source dedup)
 Phase 1: Extraction            (text extraction, image extract, caption)
 Phase 2: Analysis & Generation (chunk analysis + rolling global digest, concept/entity gen, comparisons, quality review)
-Phase 3: Write & Enrich        (file write + same-slug page-merge, image injection, review, aggregate repair, embeddings — last stage; sets completion marker)
+Phase 3: Write & Enrich        (file write + same-slug page-merge, required-media injection, strict review, idempotent aggregate repair, artifact completion gate, embeddings — last stage; then sets completion marker)
 
 Single-pass: 2.2 analyze ALL chunks (global digest rolls up across chunks, empty seed — standalone 2.1 removed 2026-07-08) → 2.3 associate (existing wiki) → 2.4 generate per-chunk, grounded (unified, all chunk counts)
 Parallel (I/O only): 1.3 per-image caption dispatch (×4 workers)

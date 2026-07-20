@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import _llm_api
 import ingest  # noqa: F401  (import side-effect: registers the router)
 from _core import Config, ConversationPending
-from _conversation_router import _infer_stage
+from _conversation_router import _infer_stage, _load_task_manifest
 
 
 def _make_config(tmp: Path) -> Config:
@@ -80,6 +80,13 @@ class TestConversationHandoff(unittest.TestCase):
             text, stop = _llm_api.call_anthropic_protocol("build a digest", cfg, max_tokens=2048)
             self.assertEqual(text, "digest: ready")
             self.assertEqual(stop, "end_turn")
+            manifest = _load_task_manifest(cfg)
+            self.assertEqual(manifest["schema_version"], 2)
+            self.assertEqual(len(manifest["completed"]), 1)
+            task = manifest["tasks"][manifest["completed"][0]]
+            self.assertEqual(task["status"], "completed")
+            self.assertEqual(task["attempts"], 1)
+            self.assertEqual(task["response_chars"], len("digest: ready"))
 
     def test_cached_result_survives_replay_for_multi_stage_resume(self):
         # Regression: ingest.py replays every stage from the top on each
@@ -103,6 +110,31 @@ class TestConversationHandoff(unittest.TestCase):
             self.assertEqual(t2, "digest: ready")
             # The .txt must still exist for future replays.
             self.assertTrue(md.with_suffix(".txt").exists())
+            # Replaying a cached result must not grow completed[] forever.
+            manifest = _load_task_manifest(cfg)
+            self.assertEqual(len(manifest["completed"]), 1)
+
+    def test_v1_task_arrays_migrate_and_deduplicate(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            cfg = _make_config(tmp)
+            manifest_path = (
+                cfg.runtime_dir / "conversation"
+                / cfg.conversation_prefix / "tasks.json"
+            )
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest_path.write_text(
+                '{"pending":["a","a","b"],'
+                '"completed":["b","b","c"]}',
+                encoding="utf-8",
+            )
+
+            manifest = _load_task_manifest(cfg)
+
+            self.assertEqual(manifest["schema_version"], 2)
+            self.assertEqual(manifest["pending"], ["a"])
+            self.assertEqual(manifest["completed"], ["b", "c"])
+            self.assertEqual(manifest["tasks"]["b"]["status"], "completed")
 
     def test_distinct_prompts_get_distinct_slugs(self):
         # Regression: _infer_stage maps several distinct Stage-2 calls

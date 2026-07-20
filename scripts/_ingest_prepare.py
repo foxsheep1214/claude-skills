@@ -30,6 +30,8 @@ from _stage_1_extract import (
     stage_1_3_caption_images,
 )
 from _stage_1_3_caption import _stage_1_3_inline_captions
+from _stage_1_2_images import validate_stage_1_2_artifact
+from _stage_1_3_caption import validate_stage_1_3_artifact
 from _stage_2_6_source_page import stage_2_6_source_page
 from _stage_2_9_comparison import (
     stage_2_9_comparison_generation,
@@ -43,6 +45,7 @@ from _stage_validators import (
 from _ingest_skip import _stage_0_2_should_skip, _stop_after_stage
 from _ingest_chunks import _run_chunk_pipeline
 from normalize_raw_names import stage_0_1_check_file
+from _task_manifest import ensure_task_manifest
 
 # ── A6 (audit H2): big-book grounding de-bias ──
 # 2.9 grounding was `extracted_text[:source_budget]` — a pure front
@@ -56,6 +59,11 @@ except ImportError:  # keep prepare importable if analyze internals move
         re.MULTILINE | re.IGNORECASE)
 
 _CHAPTER_SAMPLE_SEP = "\n\n[…]\n\n"
+
+
+def _stage_2_2_only_requested(config: Config, prefetch_only: bool) -> bool:
+    """Whether prepare must stop before wiki-dependent Stage 2.3/2.4."""
+    return prefetch_only or _stop_after_stage(config, "1.5")
 
 
 def _split_source_chapters(text: str) -> list[str]:
@@ -190,12 +198,16 @@ def _do_prepare(
                 + "；".join(_naming_errors)
                 + " — 先重命名（normalize_raw_names.py --fix）再 ingest。")
 
+        # Bind this run to one source identity + pipeline contract before any
+        # cache or marker is allowed to influence control flow.
+        h = file_sha256(raw_file)
+        ensure_task_manifest(raw_file, config)
+
         # Dedup check — skip only if the ingest is truly complete (the
         # ``ingested`` completion marker is set); otherwise resume or re-ingest.
         if _stage_0_2_should_skip(raw_file, config):
             return None
 
-        h = file_sha256(raw_file)
         progress = load_progress(config, h)
 
         # ── Issue 1 fix (cross-pipeline cache reuse, 2026-06-25) ──
@@ -283,10 +295,28 @@ def _do_prepare(
         # Helper: run 1.2→1.3 together (1.3 depends on 1.2 output)
         def _run_image_pipeline():
             stage_1_2_result: dict = {"count": 0}
+            stage_1_2_cached = False
             if progress and "stage_1_2" in progress:
-                stage_1_2_result = progress["stage_1_2"]
-                print(f"  [stage 1.2] (cached) {stage_1_2_result.get('count', 0)} images")
-            elif method.startswith("mineru"):
+                valid, reason, normalized = validate_stage_1_2_artifact(
+                    progress["stage_1_2"], config, raw_file)
+                if valid:
+                    stage_1_2_result = normalized
+                    stage_1_2_cached = True
+                    print(
+                        f"  [stage 1.2] (cached+verified) "
+                        f"{stage_1_2_result.get('count', 0)} images")
+                else:
+                    print(
+                        "  [stage 1.2] ⚠️ cached media artifact invalid "
+                        f"({reason}) — rebuilding Stage 1.2/1.3 only")
+                    progress.pop("stage_1_2", None)
+                    progress.pop("stage_1_3", None)
+                    delete_progress_keys(
+                        config, h, ["stage_1_2", "stage_1_3"])
+                    unmark_stage_done(config, h, "stage_1_2_done")
+                    unmark_stage_done(config, h, "stage_1_3_done")
+
+            if not stage_1_2_cached and method.startswith("mineru"):
                 # method is "mineru-api" for all PDFs (extraction quality gate
                 # removed 2026-07-08; all minerU runs produce images on disk).
                 ocr_out = config.extract_tmp_dir / raw_file.stem
@@ -300,11 +330,38 @@ def _do_prepare(
                         f"Re-run extraction (clear the cached extracted_text/"
                         f"extract_method for {raw_file.name}) instead of "
                         f"silently recording 0 images.")
-                stage_1_2_result = _stage_1_2_extract_from_mineru(ocr_out, config, raw_file)
+                # Surviving per-chunk indexes are evidence that the source is
+                # not image-free. If minerU's transient byte tree and canonical
+                # media were cleaned, rebuild locally instead of accepting a
+                # new empty manifest for an unfinished ingest.
+                from _media_integrity import (
+                    mineru_figure_names,
+                    restore_or_reharvest_mineru_media,
+                )
+                expected_media = len(mineru_figure_names(ocr_out))
+                stage_1_2_result, authoritative_count = (
+                    restore_or_reharvest_mineru_media(
+                        raw_file,
+                        config,
+                        ocr_out,
+                        expected_hint=expected_media,
+                    )
+                )
+                valid, reason, stage_1_2_result = (
+                    validate_stage_1_2_artifact(
+                        stage_1_2_result,
+                        config,
+                        raw_file,
+                        expected_count=authoritative_count,
+                    )
+                )
+                if not valid:
+                    raise RuntimeError(
+                        f"[Stage 1.2] rebuilt media artifact invalid: {reason}")
                 # Save progress immediately after 1.2 completes
                 save_progress(config, h, {"stage_1_2": stage_1_2_result})
                 mark_stage_done(config, h, "stage_1_2_done")
-            elif raw_file.suffix.lower() in (".pptx", ".docx"):
+            elif not stage_1_2_cached and raw_file.suffix.lower() in (".pptx", ".docx"):
                 # Covers "zipfile-pptx", "zipfile-docx". PDFs no longer reach
                 # here since 2026-06-23: all PDF extraction routes through
                 # minerU (pipeline or VLM) and is handled by the branch above.
@@ -312,7 +369,7 @@ def _do_prepare(
                 stage_1_2_result = stage_1_2_extract_images(raw_file, config)
                 save_progress(config, h, {"stage_1_2": stage_1_2_result})
                 mark_stage_done(config, h, "stage_1_2_done")
-            elif raw_file.suffix.lower() in (".md", ".markdown"):
+            elif not stage_1_2_cached and raw_file.suffix.lower() in (".md", ".markdown"):
                 # .md sources (method="plain-text"): extract local images referenced
                 # via ![[ref]] / ![alt](ref) — NashSU extractAndSaveMarkdownImages parity.
                 stage_1_2_result = stage_1_2_extract_images(raw_file, config)
@@ -321,17 +378,39 @@ def _do_prepare(
 
             # Stage 1.3: Caption extracted images (runs if 1.2 found images)
             stage_1_3_result = {"captioned": 0}
-            needs_caption = (not progress or "stage_1_3" not in progress) and stage_1_2_result.get("count", 0) > 0
+            stage_1_3_cached = False
+            if progress and "stage_1_3" in progress:
+                valid, reason, actual = validate_stage_1_3_artifact(
+                    stage_1_2_result, config)
+                if valid:
+                    stage_1_3_result = dict(progress["stage_1_3"])
+                    stage_1_3_result.update(actual)
+                    stage_1_3_cached = True
+                    print(
+                        f"  [stage 1.3] (cached+verified) "
+                        f"{actual.get('complete', 0)}/{actual.get('total', 0)} "
+                        "captions complete")
+                else:
+                    print(
+                        "  [stage 1.3] ⚠️ cached caption artifact invalid "
+                        f"({reason}) — resuming pending captions")
+                    progress.pop("stage_1_3", None)
+                    delete_progress_keys(config, h, ["stage_1_3"])
+                    unmark_stage_done(config, h, "stage_1_3_done")
+
+            needs_caption = (
+                not stage_1_3_cached
+                and stage_1_2_result.get("count", 0) > 0
+            )
             if needs_caption:
                 stage_1_3_result = stage_1_3_caption_images(config, stage_1_2_result)
-            elif progress and "stage_1_3" in progress:
-                stage_1_3_result = progress["stage_1_3"]
-                # `captioned` is NEW captions written in the prior run (0 when
-                # all were already captioned). Report it as "new" so a cached
-                # re-ingest doesn't misleadingly print "0 captions" when every
-                # image actually has a .caption.txt on disk.
-                print(f"  [stage 1.3] (cached) {stage_1_3_result.get('total', 0)} images, "
-                      f"{stage_1_3_result.get('captioned', 0)} new captions")
+
+            valid, reason, actual = validate_stage_1_3_artifact(
+                stage_1_2_result, config)
+            if not valid:
+                raise RuntimeError(
+                    f"[Stage 1.3] caption artifact validation failed: {reason}")
+            stage_1_3_result.update(actual)
 
             return stage_1_2_result, stage_1_3_result
 
@@ -343,13 +422,15 @@ def _do_prepare(
 
         stage_1_2_result, stage_1_3_result = _run_image_pipeline()
 
-        # Persist Stage 1.2/1.3 immediately.
-        if not progress or "stage_1_2" not in progress:
-            save_progress(config, h, {
-                "stage_1_2": stage_1_2_result,
-                "stage_1_3": stage_1_3_result,
-            })
-            mark_stage_done(config, h, "stage_1_3_done")
+        # Persist the VERIFIED artifact view, even on a cache hit. The media
+        # directory + manifest/caption files, not stale counters, are
+        # authoritative.
+        save_progress(config, h, {
+            "stage_1_2": stage_1_2_result,
+            "stage_1_3": stage_1_3_result,
+        })
+        mark_stage_done(config, h, "stage_1_2_done")
+        mark_stage_done(config, h, "stage_1_3_done")
 
         if stop_after_0:
             print(f"\n[stop-after-stage] Stage 0 complete — "
@@ -374,13 +455,15 @@ def _do_prepare(
                 print(f"  [caption] Inlined VLM captions as alt text into "
                       f"extracted_text ({len(extracted_text):,} chars)")
 
-        # Stage 2.2 → 2.3 → 2.4 chunk pipeline. ``analyze_only=prefetch_only``
-        # stops at the 2.2/2.3 boundary (wiki-independent prefetch) by raising
-        # PrepareStopAfter("1.5"); the spine run (prefetch_only=False) reuses the
-        # cached 2.2 and runs the wiki-dependent 2.3+ tail.
+        # Stage 2.2 → 2.3 → 2.4 chunk pipeline. Both batch prefetch and an
+        # explicit single-book ``--stop-after-stage=1.5`` stop at the
+        # wiki-independent 2.2/2.3 boundary. Previously only ``prefetch_only``
+        # was forwarded, so the single-book flag was accepted by argparse but
+        # silently ran into 2.3/2.4 and emitted generation handoffs.
+        analyze_only = _stage_2_2_only_requested(config, prefetch_only)
         chunk_analyses, analysis, file_blocks, incremental_associations, global_digest = _run_chunk_pipeline(
             extracted_text, global_digest, raw_file, config, template_content,
-            progress, verbose, analyze_only=prefetch_only)
+            progress, verbose, analyze_only=analyze_only)
 
         # Persist 2.2/2.4 results + mark stage_2_3_done. Without this, a
         # mid-flight resume (e.g. an enrich conversation handoff) re-enters
