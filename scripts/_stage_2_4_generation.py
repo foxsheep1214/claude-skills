@@ -548,6 +548,9 @@ Rules:
 6. Math: ALWAYS write formulas in LaTeX — inline $...$, display $$...$$. Transcribe
    each formula from the source / Formulas list verbatim (same variables, same form);
    never paraphrase a formula into prose or swap in a generic textbook version.
+7. Result-file integrity: every LaTeX command must retain a literal reverse-solidus
+   (U+005C) before its command name in the final .txt file. Never emit C0 control
+   characters in math (especially form-feed, carriage-return, or tab).
 {extra_rules}
 {_CONCEPT_SKELETON_SECTION}{tags_section}
 # Output Format — EXACT
@@ -1079,6 +1082,9 @@ Rules:
 6. Math: ALWAYS write formulas in LaTeX — inline $...$, display $$...$$. Transcribe
    each formula from the source / Formulas list verbatim (same variables, same form);
    never paraphrase a formula into prose or swap in a generic textbook version.
+7. Result-file integrity: every LaTeX command must retain a literal reverse-solidus
+   (U+005C) before its command name in the final .txt file. Never emit C0 control
+   characters in math (especially form-feed, carriage-return, or tab).
 {extra_rules}
 {_CONCEPT_SKELETON_SECTION}{tags_section}
 # Output Format — EXACT
@@ -1281,4 +1287,3 @@ def _stage_2_4_extract_names(chunk_analyses: list[dict]) -> tuple[list[str], lis
     seen_e: set[str] = set()
     unique_entities = [x for x in all_entities if not (x in seen_e or seen_e.add(x))]  # type: ignore[func-returns-value]
     return unique_concepts, unique_entities
-

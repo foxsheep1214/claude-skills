@@ -18,6 +18,11 @@ fallback, and re-ingesting an old file once cleans it up permanently.
 
 Public API:
   - sanitize_ingested_file_content(content) -> str
+
+In conversation-mode handoffs, an agent can accidentally write a LaTeX
+command through an escaping layer that interprets ``\\f``, ``\\r``, or ``\\t``
+as C0 characters.  The repair below is deliberately limited to math spans so
+ordinary body indentation remains byte-for-byte unchanged.
 """
 from __future__ import annotations
 
@@ -95,6 +100,54 @@ _WIKILINK_LIST_LINE_RE = re.compile(
 )
 
 
+# Only repair controls which are the standard one-character escapes for a
+# literal LaTeX command prefix.  ``read_text()`` normalizes CRLF line endings,
+# so a carriage return that survives inside a math span is not a line ending.
+_MATH_SPAN_RE = re.compile(
+    r"\$\$.*?\$\$|(?<!\$)\$(?!\$)[^$\n]+\$(?!\$)",
+    re.DOTALL,
+)
+_LATEX_CONTROL_ESCAPES = {
+    "\x07": r"\a",  # \alpha, \angle, \approx
+    "\x08": r"\b",  # \beta, \begin
+    "\x0b": r"\v",  # \vec
+    "\x0c": r"\f",  # \frac
+    "\r": r"\r",    # \rho, \right, \mathrm
+    "\t": r"\t",    # \theta, \tag, \text
+}
+_LATEX_COMMANDS = (
+    "alpha", "angle", "approx", "begin", "beta", "cdot", "circ", "cos",
+    "Delta", "dfrac", "end", "epsilon", "eta", "exp", "frac", "gamma",
+    "ge", "hat", "infty", "lambda", "left", "le", "log", "max", "min",
+    "mu", "neq", "Omega", "operatorname", "partial", "Phi", "pi", "pm",
+    "propto", "rho", "right", "Sigma", "sin", "sqrt", "sum", "tag",
+    "text", "theta", "times", "underline", "vec", "widehat", "omega",
+)
+_MISSING_LATEX_COMMAND_RE = re.compile(
+    r"(?<!\\)\b(" + "|".join(_LATEX_COMMANDS) + r")\b",
+)
+
+
+def _repair_latex_control_escapes(content: str) -> str:
+    """Restore literal LaTeX backslashes swallowed as C0 escapes.
+
+    A result file may contain ``form-feed + 'rac'`` instead of ``\\frac`` or
+    ``tab + 'ag'`` instead of ``\\tag``.  Restricting the repair to ``$``/``$$``
+    spans keeps legitimate tabs in Markdown prose intact and makes the
+    transformation idempotent.
+    """
+    def _repair_span(match: re.Match[str]) -> str:
+        repaired = "".join(_LATEX_CONTROL_ESCAPES.get(ch, ch) for ch in match.group(0))
+        # Some handoff writers drop a backslash rather than converting it to a
+        # control byte (for example hat or sqrt). These are only command names
+        # inside math, and the negative lookbehind avoids double-prefixing
+        # commands which were already intact.
+        return _MISSING_LATEX_COMMAND_RE.sub(
+            lambda command: "\\" + command.group(1), repaired)
+
+    return _MATH_SPAN_RE.sub(_repair_span, content)
+
+
 def _repair_wikilink_lists_in_frontmatter(content: str) -> str:
     m = _FM_BLOCK_RE.match(content)
     if not m:
@@ -129,4 +182,5 @@ def sanitize_ingested_file_content(content: str) -> str:
     cleaned = _strip_frontmatter_key_prefix(cleaned)
     cleaned = _add_missing_opening_frontmatter_fence(cleaned)
     cleaned = _repair_wikilink_lists_in_frontmatter(cleaned)
+    cleaned = _repair_latex_control_escapes(cleaned)
     return cleaned
