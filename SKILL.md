@@ -61,6 +61,13 @@ Text generation has exactly one path, routed by
   each call exits the process. Wikilink enrichment also routes through this path now (batched: one
   round-trip per ingest covering every page written, not one per page).
 
+  **Driver completion invariant**: exit 101 is an internal handoff, never a terminal
+  result. After the fresh subagent writes and the driver validates the response, the
+  driver must immediately re-invoke `ingest.py`. For a user-confirmed ingest or batch,
+  the driver must not send a final response or otherwise abandon the run until every
+  requested source returns exit 0, the user explicitly asks to pause, or a real external
+  blocker has been reported. A cached prompt/result is resumable, but is not completion.
+
 There is no direct-API text-gen path: this skill only runs from a CLI session
 with an agent present, so a separate paid text-gen API key has no use case.
 

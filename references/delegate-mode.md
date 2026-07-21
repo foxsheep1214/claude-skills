@@ -235,7 +235,8 @@ same-slug collision merge，不是冗余。如再见到重复 merge 任务，属
    `scripts/qc_stage22.py --file <current-Stage-2-2-result.txt>`，防退化响应蒙混过关。
    `--conv` 会审计同一本书目录中的全部历史 prompt hash，可能被已废弃响应干扰，
    不用于逐 handoff 放行。
-7. 仅限单书串行；跨书 2.3+ 并行仍然禁止（不变量不变）。
-8. **为什么**：上下文累积（每 chunk prompt ~250K 字符）稀释注意力，模型退化成"凭记忆答题"；结构隔离是唯一根治，等价 NashSU per-call 无状态 `streamChat`。代价 ~5-7 次/书交接死区（≈30% 墙钟），质量优先，接受。
+7. **运行生命周期（强制）**：`ConversationPending` / exit 101 只是内部交接，绝不是一次 ingest 的完成或可对用户结案的状态。只要用户已经确认启动/继续，主对话必须按“派发 → 验证 → re-invoke”循环自行推进；不得在已有 pending prompt、待消费 `.txt`、或仍未完成的批次源文件时发送 final。仅当所有确认范围内的源文件 exit 0、用户明确要求暂停，或确有外部依赖阻塞且已报告时，循环才能结束。
+8. 仅限单书串行；跨书 2.3+ 并行仍然禁止（不变量不变）。
+9. **为什么**：上下文累积（每 chunk prompt ~250K 字符）稀释注意力，模型退化成"凭记忆答题"；结构隔离是唯一根治，等价 NashSU per-call 无状态 `streamChat`。代价 ~5-7 次/书交接死区（≈30% 墙钟），质量优先，接受。
 
 事故索引（一句话存档，细节不再展开）：**Skolnik（2026-07-07）**连答 14 个 chunk 不退出，后期输出退化成占位内容——催生 per-chunk 隔离；**EW and Radar Systems Handbook（2026-07-08）**主对话逐个直答 5 个 chunk 仍退化，证明累积本身（而非连答）是根因——政策当晚扩展到全部 handoff；**Hansen（2026-07-09）**subagent 内部自行拆分 handoff 并行提取，回报 completed 但从未写出完整 `<stage-slug>.txt`——催生规则 4/5。
