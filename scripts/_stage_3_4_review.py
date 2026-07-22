@@ -16,6 +16,44 @@ _REVIEW_SEVERITIES = {"high", "medium", "low"}
 _RESEARCH_REVIEW_TYPES = {"suggestion", "missing-page"}
 
 
+def _review_preview(content: str, max_chars: int) -> str:
+    """Return a bounded review preview without fabricating a broken file tail.
+
+    Stage 3.4 used to pass ``content[:max_chars]`` to the reviewer.  That hard
+    slice routinely ended in the middle of a word, wikilink, formula, or table
+    row.  Because the prompt called the result a "page", the reviewer quite
+    reasonably reported the synthetic preview boundary as source truncation.
+
+    Keep a line-boundary prefix and the real file tail, separated by an
+    explicit omission marker.  The tail lets the reviewer assess how the page
+    actually ends while the marker makes it impossible to confuse the preview
+    gap with content written to disk.
+    """
+    if max_chars <= 0 or len(content) <= max_chars:
+        return content
+
+    marker = (
+        "\n\n> [!note] REVIEW PREVIEW GAP — 中间内容仅因审查上下文预算而省略；"
+        f"原文件共 {len(content)} 字符，磁盘文件并未在此处结束。"
+        "下面继续展示文件的真实结尾。\n\n"
+    )
+    tail_budget = min(400, max(240, max_chars // 4))
+    head_budget = max(240, max_chars - tail_budget - len(marker))
+
+    # End the prefix before a complete line, so a long wikilink/table row is
+    # omitted rather than presented as a corrupt fragment.
+    head_end = content.rfind("\n", 0, head_budget + 1)
+    head = content[:head_end if head_end >= 0 else 0].rstrip()
+
+    # Start the tail on a line boundary for the same reason.  If there is no
+    # boundary in the tail window, omit the tail instead of manufacturing a
+    # partial line.
+    tail_start_floor = max(0, len(content) - tail_budget)
+    tail_start = content.find("\n", tail_start_floor)
+    tail = content[tail_start + 1:].lstrip() if tail_start >= 0 else ""
+    return head + marker + tail
+
+
 def _append_review_failure_log(config: Config, raw_file: Path, messages: list[str]) -> None:
     """Persist Stage 3.4 failure info to runtime_dir/ingest-warnings.log.
 
@@ -246,7 +284,9 @@ def stage_3_4_review_suggestions(file_blocks: list[tuple[str, str]], raw_file: P
     # Collect new page contents
     new_pages: list[str] = []
     for path, content in file_blocks:
-        new_pages.append(f"### {path}\n{content[:1500]}")
+        new_pages.append(
+            f"### {path} (完整文件 {len(content)} 字符；以下是带真实结尾的审查预览)\n"
+            f"{_review_preview(content, 1500)}")
 
     # Sample existing wiki pages (up to 40)
     existing_pages: list[str] = []
@@ -263,7 +303,9 @@ def stage_3_4_review_suggestions(file_blocks: list[tuple[str, str]], raw_file: P
                 body = content[end + 4:] if end != -1 else content
             else:
                 body = content
-            existing_pages.append(f"### {sub}/{f.name}\n{body[:1000]}")
+            existing_pages.append(
+                f"### {sub}/{f.name} (完整文件 {len(body)} 字符；以下是带真实结尾的审查预览)\n"
+                f"{_review_preview(body, 1000)}")
             if len(existing_pages) >= 40:
                 break
         if len(existing_pages) >= 40:
@@ -307,6 +349,10 @@ def stage_3_4_review_suggestions(file_blocks: list[tuple[str, str]], raw_file: P
 对 suggestion 和 missing-page 类型，search_queries 必填：2-3 条关键词式 web 搜索查询
 （用于 Deep Research——关键词丰富、具体、面向搜索引擎，不是标题或整句）；
 其它类型用空数组 []。
+输入中的页面可能是“开头 + REVIEW PREVIEW GAP + 文件真实结尾”的有界预览。
+PREVIEW GAP 是审查上下文主动省略的中间内容，不是磁盘文件的截断点；不得把预览开头的末尾、
+省略标记或其附近的半句话当成页面损坏。判断页面是否在结尾截断时，只能依据标记之后明确注明的
+“文件真实结尾”。
 只报告真实发现的问题；如果确实没有发现任何可疑项，输出空数组 []。不要为了凑数量而编造问题或写"未发现问题"类的确认项。数字、参数、公式要严格。"""
 
     prompt = f"{system_prompt}\n\n{user_content}"
