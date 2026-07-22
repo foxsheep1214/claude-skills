@@ -304,21 +304,21 @@ def _launch_next_pending_extract(
     config: Config,
     state: dict,
 ) -> Path | None:
-    """Launch the first not-yet-extracted source at or after ``start_index``.
+    """Launch only the immediately adjacent source's Phase 0/1 work.
 
-    A resumed batch commonly starts with several books whose Phase 0/1 markers
-    are already cached. Looking only at the immediately adjacent book leaves a
-    later fresh source idle until every cached book's LLM spine finishes. Scan
-    past cached entries while still launching at most one background process,
-    preserving extraction order among the remaining sources.
+    Batch overlap is deliberately bounded to ``minerU[N+1] ∥ spine[N]``.
+    Do not scan past an already-ready adjacent source: doing so starts N+2
+    early on resumed runs, wasting OCR/caption capacity and violating the
+    one-book look-ahead contract.
     """
-    for file in raw_files[start_index:]:
-        h = file_sha256(file)
-        if is_stage_done(config, h, "stage_1_3_done"):
-            continue
-        _launch_bg_extract(file, config, state)
-        return file
-    return None
+    if start_index >= len(raw_files):
+        return None
+    file = raw_files[start_index]
+    h = file_sha256(file)
+    if is_stage_done(config, h, "stage_1_3_done"):
+        return None
+    _launch_bg_extract(file, config, state)
+    return file
 
 
 def _wait_extract_done(config: Config, h: str, bg_pid: int = 0,
@@ -383,11 +383,8 @@ def batch_ingest(
         raise RuntimeError("Could not acquire project lock for batch write phase")
 
     bg_state = _load_bg_state(config)
-    # Launch the first source that still needs Phase 0/1. This is normally the
-    # spine head. On a resumed batch, however, several leading books may already
-    # be extracted; scanning past them lets the first fresh source overlap with
-    # the cached books' LLM spines. Only one process is launched, so remaining
-    # extraction order and the minerU flock invariant stay unchanged.
+    # Seed only book 1. Later iterations launch their immediate successor, so
+    # the overlap remains strictly minerU[N+1] ∥ spine[N] even after resume.
     _launch_next_pending_extract(raw_files, 0, config, bg_state)
 
     results: list[dict] = []
@@ -420,11 +417,8 @@ def batch_ingest(
                             print(f"⚠️  [batch] could not kill pid {bg_pid}: {e}", flush=True)
                     print(f"[batch] bg extract unavailable — falling back to sync — {f.name}", flush=True)
 
-            # Pipeline: this book's Phase 0/1 is done — launch the first future
-            # book that still needs extraction. Cached adjacent books are skipped,
-            # allowing a later fresh source to overlap with the current LLM spine.
-            # At most one background process is launched; idempotency prevents
-            # re-invocations from duplicating an already-running extract.
+            # Pipeline: this book's Phase 0/1 is done — launch only its immediate
+            # successor.  Do not skip a cached neighbor to prefetch N+2.
             if i < total_books:
                 _launch_next_pending_extract(raw_files, i, config, bg_state)
 
