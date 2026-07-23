@@ -11,12 +11,12 @@ import json, shutil, time
 from pathlib import Path
 
 from _paths import detect_runtime_dir, media_slug
-from _core import (
+from _core import source_cache_key
+from _schema import (
     source_slug_from_raw_path,
     load_schema_md,
     schema_folders,
     BASE_PAGE_DIRS,
-    source_cache_key,
 )
 from _frontmatter_array import parse_frontmatter_array
 
@@ -171,5 +171,4 @@ def _cleanup_orphan_pages(wiki_root: Path, source_stem: str, config, dry_run: bo
                 print(f"{tag} Deleted orphan page: {page_type}/{page.name}")
                 removed += 1
     return removed
-
 

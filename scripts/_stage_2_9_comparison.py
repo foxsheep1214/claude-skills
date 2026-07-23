@@ -1,5 +1,14 @@
 
-from _stage_2_base import *
+from __future__ import annotations
+
+import time
+from pathlib import Path
+
+from _config import Config
+from _core import canonical_source_path
+from _llm_api import call_anthropic_protocol
+from _parse import parse_file_blocks
+from _stage_2_base import _stage_2_frontmatter_title
 from _language import build_language_directive, get_output_language
 
 # Stage 2.9: in-source concept comparison pages.

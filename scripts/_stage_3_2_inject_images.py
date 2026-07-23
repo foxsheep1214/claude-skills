@@ -10,7 +10,7 @@ import os
 import re
 from pathlib import Path
 
-from _core import Config
+from _config import Config
 from _language import get_output_language
 from _paths import media_slug, atomic_write
 

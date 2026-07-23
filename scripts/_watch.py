@@ -3,23 +3,28 @@
 Extracted from ingest.py on 2026-06-23. Reads ingest-queue.json, feeds
 pending entries through the batch pipeline, and updates their status.
 wiki-monitor.sh adds files to the queue; ``ingest.py --watch`` consumes
-them. ``batch_ingest`` is imported lazily because it lives in ingest.py
-(which imports this module), breaking the cycle at runtime.
+them. The batch supervisor is independent of the CLI facade.
 """
 from __future__ import annotations
 
 import fcntl
-import json
 import os
 import time
 from pathlib import Path
 
-from _core import BATCH_MAX_CONCURRENT, Config, ConversationPending
+from _config import Config
+from _core import BATCH_MAX_CONCURRENT, ConversationPending
+from _batch_supervisor import batch_ingest
 from _batch_coordination import (
     BatchCoordinatorBusy,
     SpineReservationConflict,
 )
-from _paths import atomic_write
+from _queue_store import (
+    load_queue,
+    merge_entry_updates,
+    queue_lock,
+    save_queue,
+)
 
 
 def _read_queue(config: Config) -> list[dict]:
@@ -30,35 +35,40 @@ def _read_queue(config: Config) -> list[dict]:
     would otherwise clobber it, losing whatever entries it still held.
     """
     qpath = config.runtime_dir / "ingest-queue.json"
-    if not qpath.exists():
-        return []
-    try:
-        queue = json.loads(qpath.read_text(encoding="utf-8"))
-        if not isinstance(queue, list):
-            raise ValueError(f"expected a JSON list, got {type(queue).__name__}")
+    with queue_lock(config.runtime_dir, wait=True):
+        try:
+            queue = load_queue(qpath)
+        except RuntimeError as e:
+            corrupt = qpath.with_name(
+                f"{qpath.name}.corrupt-{int(time.time())}"
+            )
+            print(
+                f"⚠️  [watch] {e} Preserving it as {corrupt.name} and "
+                "starting with an empty queue.",
+                flush=True,
+            )
+            try:
+                qpath.rename(corrupt)
+            except OSError as rename_err:
+                print(
+                    "⚠️  [watch] could not preserve corrupt queue file: "
+                    f"{rename_err}",
+                    flush=True,
+                )
+            queue = []
         # Sort: priority first, then oldest addedAt
         return sorted(queue, key=lambda e: (
             0 if e.get("priority") else 1,
             e.get("addedAt", 0),
         ))
-    except Exception as e:
-        corrupt = qpath.with_name(f"{qpath.name}.corrupt-{int(time.time())}")
-        print(f"⚠️  [watch] {qpath} corrupted ({type(e).__name__}: {e}) — "
-              f"preserving it as {corrupt.name} and starting with an empty queue.",
-              flush=True)
-        try:
-            qpath.rename(corrupt)
-        except OSError as rename_err:
-            print(f"⚠️  [watch] could not preserve corrupt queue file: {rename_err}",
-                  flush=True)
-        return []
 
 
 def _write_queue(config: Config, queue: list[dict]) -> None:
-    """Atomically write ingest-queue.json."""
+    """Merge status updates atomically, preserving concurrently appended work."""
     qpath = config.runtime_dir / "ingest-queue.json"
-    qpath.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write(qpath, json.dumps(queue, ensure_ascii=False, indent=2))
+    with queue_lock(config.runtime_dir, wait=True):
+        current = load_queue(qpath)
+        save_queue(qpath, merge_entry_updates(current, queue))
 
 
 def _queue_entry_to_file(entry: dict, config: Config) -> Path | None:
@@ -99,7 +109,6 @@ def ingest_watch(
     wiki-monitor.sh (cron or manual) adds new files to the queue;
     ingest.py --watch picks them up in the next cycle.
     """
-    from ingest import batch_ingest  # lazy: breaks ingest <-> _watch import cycle
     # A watcher needs singleton protection, but it must not monopolize the
     # wiki write lock while sleeping, extracting, or waiting for handoffs.
     # batch_ingest acquires ProjectLock only around each active 2.3+ call and

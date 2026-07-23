@@ -108,7 +108,9 @@ _script_dir = os.path.dirname(os.path.abspath(__file__))
 if _script_dir not in sys.path:
     sys.path.insert(0, _script_dir)
 from _language import build_language_directive  # noqa: E402 (titles, descriptions, PAGES list) MUST be in English."
-from _core import ConversationPending, _compute_chunk_targets, _CONTEXT_SIZE_DEFAULT  # noqa: E402
+from _config import _compute_chunk_targets, _CONTEXT_SIZE_DEFAULT  # noqa: E402
+from _core import ConversationPending  # noqa: E402
+from _exit_codes import HANDOFF_PENDING  # noqa: E402
 from _llm_call import make_conversation_llm_call  # noqa: E402
 from _paths import iter_wiki_pages, atomic_write  # noqa: E402
 from _lint_suggest import STATE_FILES  # noqa: E402
@@ -376,7 +378,7 @@ def main() -> int:
     if pending > 0:
         print(f"[semantic-lint] {pending}/{len(batches)} batch(es) pending — "
               f"awaiting parallel conversation answers", file=sys.stderr)
-        return 101
+        return HANDOFF_PENDING
 
     findings = dedup_findings(findings)
     # Renumber ids: parse_lint_blocks numbers per-batch from 0, so cross-batch

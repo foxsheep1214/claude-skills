@@ -10,15 +10,12 @@ import hashlib
 import json
 import os
 import shutil
-import sys
 import time
 from pathlib import Path
 
 # Shared infrastructure
-_script_dir = Path(__file__).resolve().parent
-if str(_script_dir) not in sys.path:
-    sys.path.insert(0, str(_script_dir))
-from _core import Config, file_sha256  # noqa: E402
+from _config import Config  # noqa: E402
+from _progress import file_sha256  # noqa: E402
 from _paths import media_slug  # noqa: E402
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -20,7 +20,7 @@ import re
 import time
 from pathlib import Path
 
-from _core import Config
+from _config import Config
 from _llm_api import conversation_handoff, set_conversation_router
 from _paths import atomic_write
 

@@ -48,6 +48,7 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 from _core import ConversationPending  # noqa: E402
+from _exit_codes import HANDOFF_PENDING  # noqa: E402
 from _paths import detect_runtime_dir, atomic_write  # noqa: E402
 from _llm_call import make_conversation_llm_call  # noqa: E402
 
@@ -233,7 +234,7 @@ def main(argv: list[str] | None = None) -> int:
     if pending_batches:
         print(f"[lint-verify] {pending_batches}/{len(batches)} batch(es) pending "
               f"— awaiting parallel conversation answers", file=sys.stderr)
-        return 101
+        return HANDOFF_PENDING
 
     lint_dir = runtime / "lint"
     for finding_id, v in verdicts.items():

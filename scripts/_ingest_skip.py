@@ -3,11 +3,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from _core import (
-    Config,
+from _config import Config
+from _core import is_query_bridge_source
+from _progress import (
     file_sha256,
     is_stage_done,
-    is_query_bridge_source,
     mark_stage_done,
     unmark_stage_done,
 )
@@ -67,7 +67,7 @@ def _stage_0_2_should_skip(raw_file: Path, config: Config) -> bool:
     if is_stage_done(config, h, "ingested"):
         if not _stage_3_1_wiki_path_for_source(raw_file, config).exists():
             # Stale marker (source page deleted externally) — clear and re-ingest.
-            from _core import stages_path as _sp
+            from _progress import stages_path as _sp
             _sp(config, h).unlink(missing_ok=True)
             return False
         from _media_integrity import (

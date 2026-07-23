@@ -7,14 +7,13 @@ from pathlib import Path
 from _paths import atomic_write
 from _page_ref import PageRef, canonical_page_refs
 from _task_manifest import bind_page_refs
+from _config import Config
 from _core import (
-    Config,
-    is_safe_ingest_path,
-    list_existing_slugs,
-    load_schema_md,
-    schema_folders,
-    parse_wiki_schema_routing,
-    BASE_PAGE_DIRS,
+    canonical_source_path,
+    is_query_bridge_source,
+    source_cache_key,
+)
+from _progress import (
     is_stage_done,
     get_stage_payload,
     mark_stage_done,
@@ -23,9 +22,14 @@ from _core import (
     save_cache,
     clear_progress,
     load_progress,
-    canonical_source_path,
-    is_query_bridge_source,
-    source_cache_key,
+)
+from _schema import (
+    BASE_PAGE_DIRS,
+    is_safe_ingest_path,
+    list_existing_slugs,
+    load_schema_md,
+    parse_wiki_schema_routing,
+    schema_folders,
 )
 from _stage_3_write import (
     _stage_3_1_wiki_path_for_source,

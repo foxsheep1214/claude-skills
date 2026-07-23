@@ -9,19 +9,16 @@ Extracted as separate module 2026-06-18. Refactored 2026-06-21 for explicit stag
 """
 from __future__ import annotations
 
-import re, sys, time
+import re, time
 from pathlib import Path
 
-_script_dir = Path(__file__).resolve().parent
-if str(_script_dir) not in sys.path:
-    sys.path.insert(0, str(_script_dir))
 from _paths import atomic_write, WIKI_ARTIFACT_DIRS
 from _page_ref import PageRef
-from _core import (
-    Config,
+from _config import Config
+from _core import canonical_source_path
+from _schema import (
     is_safe_ingest_path, _ILLEGAL_CHARS_RE,
     source_slug_from_raw_path, schema_route_dir,
-    canonical_source_path,
 )
 from _llm_api import call_anthropic_protocol
 from _frontmatter_array import parse_frontmatter_array, write_frontmatter_array

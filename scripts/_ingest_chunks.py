@@ -7,21 +7,23 @@ import os
 import time
 from pathlib import Path
 
+from _config import Config
 from _core import (
     BATCH_MAX_CONCURRENT,
-    Config,
     ConversationPending,
     stage_begin as _stage_begin,
+    slugify,
+    PrepareStopAfter,
+)
+from _progress import (
     file_sha256,
     is_stage_done,
     mark_stage_done,
     unmark_stage_done,
     save_progress,
     delete_progress_keys,
-    list_existing_slugs,
-    slugify,
-    PrepareStopAfter,
 )
+from _schema import list_existing_slugs
 from _stage_2_base import file_block_slug
 from _stage_2_analyze import (
     ChunkAnalysisValidationError,

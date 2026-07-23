@@ -55,6 +55,7 @@ import _dedup  # noqa: E402
 # NashSU dedup-runner.ts parity. --no-embedding-prefilter falls back to a single
 # full-wiki LLM scan; --token-only uses deterministic token/CJK-bigram matching.
 from _core import ConversationPending  # noqa: E402
+from _exit_codes import HANDOFF_PENDING  # noqa: E402
 from _paths import detect_runtime_dir, iter_wiki_pages, atomic_write  # noqa: E402
 from _llm_call import make_conversation_llm_call  # noqa: E402
 from _dedup_embedding import (  # noqa: E402
@@ -873,7 +874,7 @@ def main(argv: list[str] | None = None) -> int:
     except ConversationPending:
         print("[dedup] conversation handoff — answer prompt under "
               "<runtime>/conversation/dedup/ and re-invoke.", file=sys.stderr)
-        return 101
+        return HANDOFF_PENDING
 
     print("[dedup] done.")
     return 0

@@ -1,217 +1,150 @@
 ---
 name: improved-wiki
-description: "Class-level umbrella for the Karpathy/NashSU LLM-Wiki ingestion pipeline (three peer commands: Ingest, Lint, Graph). 15 active ingest Stages across 4 Phases (0-3). Three modes: auto-ingest (batch), chat-ingest (interactive), deep-research (closed-loop web→wiki, 参考 NashSU deep-research.ts). Use when ingesting a PDF/PPTX/DOCX, researching a topic into the wiki, validating an ingest, debugging failed tasks, or auditing wiki completeness. All text-generation LLM work runs in conversation mode (the only path — no external API key): the calling agent answers each prompt with the current conversation model. Phase 0 OCR uses local minerU (free); image captioning (Stage 1.3) uses a configurable VLM provider. Graph (knowledge-graph command) is separate from lint — NashSU graph-view CLI parity, four-signal weighted graph + Louvain communities, deterministic (no LLM)."
-tags: [ingest, mandatory, nashsu, pipeline, scan-pdf, mineru, local-ocr, knowledge-graph, louvain]
+description: "Ingest, lint, graph, validate, or repair a Karpathy/NashSU-style LLM Wiki. Use for PDF/PPTX/DOCX ingestion, multi-book batches, conversation handoffs, OCR/caption troubleshooting, deep research, review processing, and wiki completeness audits. Text LLM work uses conversation-mode prompt files; Phase 1 uses minerU plus a configured caption VLM."
+tags: [ingest, nashsu, mineru, local-ocr, knowledge-graph, louvain]
 related_skills: [karpathy-llm-wiki, llm-wiki-local]
 ---
 
 # improved-wiki
 
-Karpathy LLM-Wiki pattern，参考 NashSU 最新版本。 Three peer commands: **Ingest** (15 active Stages across 4 Phases — Phase 0 included: 0 pre-processing → 1 extraction → 2 analysis/generation → 3 write & enrich), **Lint** (structural + semantic), **Graph** (knowledge graph — full rules under Key features). (No post-ingest validation phase — see "Standalone validation" under Key features.)
-
-## Quick routing & command convention
-
-Run shell commands from the target wiki project. The project does **not** contain a
-`scripts/` directory; invoke the installed skill in place. Before using any command
-below, set this once for the current shell:
+Use this skill as three peer commands: **Ingest**, **Lint**, and **Graph**. Run
+commands from the target wiki project; project data stays there, while scripts
+run from the installed skill:
 
 ```bash
 export SKILL_DIR="${SKILL_DIR:-$HOME/.agents/skills/improved-wiki}"
 ```
 
-| User intent | Route | Preconditions / stop point |
+## Route the request
+
+| Intent | Command or route | Required confirmation |
 |---|---|---|
-| Ingest one source | `python3 "$SKILL_DIR/scripts/ingest.py" <file>` | Proceed directly; answer each conversation handoff. |
-| Ingest 2+ sources | same command with all files | 🔴 Confirm the complete file list and target project first. |
-| Re-ingest with `--delete` | ingest command with `--delete` | 🔴 Confirm source slug and full-redo vs `--keep-media`. |
-| Research a topic into the wiki | `/improved-wiki deep-research <topic>` | 🔴 Confirm scope; require a web-search capability before claiming web research. |
-| Lint / graph / retrieve | respective script below | Read-only unless an explicit fix/apply option is requested. |
+| Ingest one source | `python3 "$SKILL_DIR/scripts/ingest.py" <file>` | None |
+| Ingest 2+ sources | same command with the complete ordered file list | Confirm list and target project |
+| Re-ingest | `ingest.py --delete <file>`, then ingest again | Confirm source and full redo vs `--keep-media` |
+| Deep research | `/improved-wiki deep-research <topic>` | Confirm one-topic scope; require web search |
+| Lint | `"$SKILL_DIR/scripts/wiki-lint.sh"` | Read-only unless fixes are requested |
+| Graph | `python3 "$SKILL_DIR/scripts/graph.py"` | None |
+| Validate | `python3 "$SKILL_DIR/scripts/validate_ingest.py" ...` | Read-only |
 
-Use the calling agent and the runtime's available tools. Never assume a vendor-specific
-agent, browser, MCP server, or shell helper exists; when a required capability is absent,
-pause and tell the user what is missing rather than silently substituting lower-quality work.
+Do not assume a particular vendor agent, browser, MCP server, or shell helper.
+If a required capability is missing, report it instead of silently degrading.
 
-```
-Phase 0: [0.1 raw-naming] → [0.2 source dedup]  (pre-processing gates)
-Ingest: 1.1→1.2→1.3→2.2→2.3→2.4→2.6→2.9→3.1→3.2→3.4→3.5→3.7
-        (execution order per _ingest_prepare.py::_do_prepare / _ingest_write.py::_do_write; 2.3 = existing-wiki association detection (between analysis and generation); 2.4 includes an in-source concept-dedup closing sub-step (former Stage 2.5); 2.6 = source page; 3.4 = review, runs after 3.2 on already-written files; 3.7 = embeddings; same-slug collisions merged at 3.1 write. Stage 2.7 query generation + cross-source resolution removed 2026-07-12 for NashSU parity — ingest never generates query pages; the open-question signal flows through Stage 3.4 REVIEW suggestion items, processed via process-reviews)
+## Ingest contract
 
-Phase 0: Pre-processing gates  (raw naming, source dedup)
-Phase 1: Extraction            (text extraction, image extract, caption)
-Phase 2: Analysis & Generation (chunk analysis + rolling global digest, concept/entity gen, comparisons, quality review)
-Phase 3: Write & Enrich        (file write + same-slug page-merge, required-media injection, strict review, idempotent aggregate repair, artifact completion gate, embeddings — last stage; then sets completion marker)
+Active order:
 
-Single-pass: 2.2 analyze ALL chunks (global digest rolls up across chunks, empty seed — standalone 2.1 removed 2026-07-08) → 2.3 associate (existing wiki) → 2.4 generate per-chunk, grounded (unified, all chunk counts)
-Parallel: 1.3 per-image caption dispatch (×4 workers); independent Stage 2.4
-          handoffs in bounded waves (up to --parallel). Stage 2.2 stays serial.
-
-Lint:  [structural] → [semantic (LLM, conversation mode)]
-Graph: [Build Graph (4-signal)] → [Louvain communities] → [cohesion + gaps + clusters]
+```text
+0.1 raw naming → 0.2 source dedup
+1.1 text/OCR → 1.2 images → 1.3 captions
+2.2 serial chunk analysis + rolling digest
+→ 2.3 existing-wiki association
+→ 2.4 grounded page generation + in-source dedup
+→ 2.6 source page → 2.9 comparisons
+→ 3.1 write/merge → 3.2 media injection → 3.4 review
+→ 3.5 aggregate repair → 3.7 embeddings → ingested marker
 ```
 
-## LLM execution model
+Stage 2.7 query generation is retired. Review suggestions are handled by
+`process-reviews`; Graph remains a separate explicit command. The authoritative
+stage gates are in `references/ingest-stages-mandatory.md`.
 
-Text generation has exactly one path, routed by
-`_llm_api.call_anthropic_protocol`:
+### Parallelism
 
-- **Conversation mode** (the only mode, no flag needed) — `ingest.py` writes a prompt
-  file at each LLM step and hands off (exit 101); the calling agent dispatches a
-  **fresh subagent per handoff** to answer it (1 handoff, then exit — NashSU per-call
-  statelessness; the main conversation only orchestrates and re-invokes; sole
-  exception: the context probe. See `references/delegate-mode.md` L4). Stage 2.2
-  handoffs are serial because chunk N+1 consumes chunk N's rolling digest. Stage 2.4
-  chunk handoffs have no rolling content dependency and are emitted/answered in
-  parallel waves capped by `--parallel` (`N=1` is the explicit serial mode).
-  Wikilink enrichment also routes through this path now (batched: one round-trip
-  per ingest covering every page written, not one per page).
+- Stage 2.2 is serial: chunk N+1 consumes chunk N's validated rolling digest.
+- Stage 2.4 chunks are independent and run in bounded parallel waves up to
+  `--parallel`; `--parallel 1` is the explicit serial mode.
+- Across books, Phase 1 overlaps with the current book, but minerU has one
+  resource slot and captioning has one coordinated slot.
+- Stage 2.3+ is one ordered write spine across books. Never parallelize it.
 
-  **Driver completion invariant**: exit 101 is an internal handoff, never a terminal
-  result. After the fresh subagent writes and the driver validates the response, the
-  driver must immediately re-invoke `ingest.py`. For a user-confirmed ingest or batch,
-  the driver must not send a final response or otherwise abandon the run until every
-  requested source returns exit 0, the user explicitly asks to pause, or a real external
-  blocker has been reported. A cached prompt/result is resumable, but is not completion.
+`references/batch-parallel-prefetch.md` is authoritative for worker leases,
+pause markers, reservations, ordering, and recovery.
 
-There is no direct-API text-gen path: this skill only runs from a CLI session
-with an agent present, so a separate paid text-gen API key has no use case.
+## Conversation handoffs
 
-**Context-window probe (2026-06-27)**: at ingest start, one conversation round-trip asks the live model for its context window (`_context_probe.resolve_context`); the result drives all chunk/budget sizing via `Config.apply_context`, replacing the former `LLM_CONTEXT_SIZE` env convention. Budgets now adapt to whatever model the agent runs this session (chunk-token ceiling is 64K by default — 1M or 200K ctx → 64K-token chunks, a 128K model → ~42K; override via `IMPROVED_WIKI_TARGET_TOKENS_CEIL`). The probed value is cached per-model in `.llm-wiki/probed-context.json` (7-day TTL) so resumes and repeat ingests pay zero round-trips; a model change triggers exactly one probe. **No fallback**: an implausible probe response (outside [8K, 10M]) pauses the ingest rather than guessing. See `references/context-probe.md`.
+Text generation has one route: `ingest.py` writes a prompt and exits
+`101` (`HANDOFF_PENDING`). That is an internal yield, not completion.
 
-Two other external-API dependencies (not text generation):
-- **Stage 1.3 image captioning** → configurable VLM provider via `~/.agents/config.json` (`caption_provider` + optional `caption_fallback_provider`, 2026-07-08; no env-var alternative). One image per call with a context-aware prompt (NashSU `captionImage` parity). Primary: **GLM-5v-turbo**; optional fallback: local **Ollama qwen3-vl:8b-instruct** — tried only after the primary exhausts its own retries, loudly logged, never silent. **No fallback below that**: no provider configured, or every configured provider failing consecutively after retries, **pauses** the ingest (raises) — it never silently degrades to OCR figure-text (policy 2026-06-24). Endpoint/retry/serialization details and recommended config: `references/image-caption-strategy.md` (authoritative).
-- **Stage 3.7 embeddings** → mandatory (2026-06-21): defaults to local Ollama bge-m3 (`http://127.0.0.1:11434/v1`), no env var export required. **No fallback**: if Ollama isn't running, the model isn't pulled, or `lancedb` isn't installed, the ingest **pauses** (raises) — it never silently continues with keyword-only retrieval (policy 2026-06-24).
+For every handoff except the tiny context probe:
 
-> **No-silent-fallback policy (2026-06-24)**: the ingest path allows NO silent fallback. If a main path cannot run (missing API key, missing service, LLM call failure after retries, broken config), the pipeline **warns and pauses** (raises `RuntimeError`) rather than degrading quality. Extraction/page writes are cached, so re-running after fixing the dependency resumes from the failed stage. This applies to: caption key missing, caption batch failure, embedding stack missing, LLM page-merge failure, broken `~/.agents/config.json`. (Corrupted cache/stage-progress files are the one exception: they warn loudly and reset, since re-ingesting is correct recovery, not quality degradation.)
+1. Dispatch one fresh worker/subagent for exactly one self-contained prompt.
+2. The main conversation orchestrates; it does not answer the prompt itself.
+3. Produce a complete `<stage>.txt.tmp`; validate it; atomically rename to
+   `<stage>.txt`.
+4. For Stage 2.2, run
+   `scripts/qc_stage22.py --file <current-result.txt>` before publication.
+5. Re-run the exact ingest command immediately.
 
-## 🔴 Checkpoints (human-gated)
+Continue until all confirmed sources exit `0`, the user explicitly pauses, or
+a real external blocker is reported. A pending prompt, cached answer, or
+source waiting behind the spine is not a terminal result.
 
-The pipeline is autonomous by design — most stages run without confirmation. These are the **only** decision points where the calling agent MUST stop and confirm with the user before proceeding (autonomous-runaway or destructive):
+Stage 2.4 may expose several independent prompts in one bounded wave. Answer
+them concurrently with separate fresh workers, validate every result, then
+re-invoke for the next wave. Do not convert Stage 2.4 to serial execution.
 
-🔴 **STOP · Batch ingest (≥2 files)** — before launching `ingest.py f1.pdf f2.pdf ...`, confirm the file list and target project with the user. Auto-parallelism spawns up to two Phase-1 workers (one minerU slot + one caption slot); the calling agent must also keep simultaneously answered handoffs within `--parallel`. A wrong file list or wrong project is expensive to unwind.
-🔴 **STOP · `--delete` re-ingest** — `--delete` removes the source page + cache + orphan concepts/entities + media (images/captions). Before running, confirm with the user BOTH (1) the source slug, and (2) whether to do a **full redo** (also re-extract OCR/images/captions) or an **analysis-only re-ingest** (`--keep-media`, reuse existing OCR/images/captions — the media directory is untouched). Do not assume: media (images/captions) has no separate cache — minerU's image harvest runs inline with the same API call as text extraction, so a full redo is the only way to regenerate them once removed. `--delete` now backs up `wiki/media/<slug>/` to `page-history/media/` before removing it (2026-07-10) even without `--keep-media`, but ask first regardless — don't default to a full wipe. See `references/re-ingest-comparison.md` for both flows.
-🔴 **STOP · Deep research** — `/improved-wiki deep-research <topic>` runs a closed web→wiki loop that auto-grows the KB (entity/concept pages + review items). Confirm the topic scope with the user first; one topic per invocation, no auto-chain.
+Policy and rationale: `references/delegate-mode.md`. Per-stage result formats:
+`references/conversation-mode-agent-workflow.md`.
 
-Single-file auto-ingest, lint, graph, and save-chat-to-wiki are NOT gated — proceed directly.
+## Quality and failure policy
+
+There is no silent quality fallback:
+
+- Captioning requires the configured VLM provider; optional VLM-to-VLM failover
+  is allowed only when explicitly configured and logged.
+- Embeddings require the configured local stack.
+- LLM, merge, config, schema, and required-media failures pause the source.
+- Corrupt cache/checkpoint files may warn and rebuild because re-derivation is
+  the correct recovery.
+
+Extraction, prompt results, task manifests, and stage markers are resumable.
+Do not delete lock files to break a live run. Use:
+
+```bash
+python3 "$SKILL_DIR/scripts/ingest.py" --batch-status
+python3 "$SKILL_DIR/scripts/ingest.py" --pause-prefetch
+python3 "$SKILL_DIR/scripts/ingest.py" --pause-batch
+```
+
+Resume prefetch with `--resume-prefetch`. Resume a full batch only with the
+same confirmed ordered file list plus `--resume-batch`. Abandon a reserved
+spine only after inspecting partial writes with `--abandon-spine <hash>`.
+
+## Destructive and human-gated actions
+
+- **Batch ingest:** confirm the complete ordered source list and target project.
+- **Re-ingest/delete:** confirm source identity and choose full redo or
+  analysis-only `--keep-media`. See `references/re-ingest-comparison.md`.
+- **Deep research:** confirm one-topic scope before the web→wiki loop.
+
+Single-source ingest, read-only lint/validate, Graph, and save-chat-to-wiki are
+not gated.
 
 ## Entry points
 
-- **Auto Ingest**: `python3 "$SKILL_DIR/scripts/ingest.py" file.pdf […]` — fully automated pipeline; the calling agent does each LLM step with the current model
-- **Chat Ingest** ⭐: `/improved-wiki chat-ingest <file>` — interactive human-guided ingest (CLI revival of the interactive ingest NashSU later removed; a skill enhancement on the FILE-block write path, not current `executeIngestWrites` parity). See `references/chat-ingest.md`.
-- **Deep Research** ⭐: `/improved-wiki deep-research <topic>` — closed-loop web→wiki research pipeline (参考 NashSU `deep-research.ts`). See `references/deep-research.md`.
-- **Save Chat to Wiki** ⭐: say "保存到 wiki" after any conversation — captures chat insight as wiki page + auto-ingests (参考 NashSU `chat-save-to-wiki.ts`). See `references/save-chat-to-wiki.md`.
-- **Review Sweep** ⭐: `/improved-wiki sweep-reviews` — auto-resolves review items satisfied by subsequent ingests (参考 NashSU `sweep-reviews.ts`). See `references/review-sweep.md`.
-- **Process Reviews** ⭐: `/improved-wiki process-reviews` — human adjudication of pending review items, per-item [Deep Research / Create Page / Skip] (参考 NashSU `review-view.tsx` 审核面板). This is where query pages are born post-2.7-removal. See `references/process-reviews.md`.
-- **Graph** ⭐: `python3 "$SKILL_DIR/scripts/graph.py"` — build/refresh the knowledge graph (full rules under Key features).
-- **Stage Checklist**: `references/ingest-stages-mandatory.md` — authoritative ingest-stage checklist with go/no-go gates.
+- Auto ingest: `scripts/ingest.py`
+- Queue scan/run: `scripts/wiki-monitor.sh`, `scripts/run-queue.sh`
+- Chat ingest: `references/chat-ingest.md`
+- Deep research: `references/deep-research.md`
+- Save chat: `references/save-chat-to-wiki.md`
+- Review sweep/process: `references/review-sweep.md`,
+  `references/process-reviews.md`
+- Lint/Graph and all utilities: `references/scripts-reference.md`
 
 ## Reference map
 
-**Pipeline core**:
-- `references/ingest-stages-mandatory.md` — ingest stage checklist (Phase 0-3 + Lint + Graph; stages are code-enforced by `ingest.py` — the checklist is a behavior spec, not agent discipline)
-- `references/query-generation.md` — RETIRED (2026-07-12): Stage 2.7 removed for NashSU parity; tombstone points to the query-page successors
-- `references/comparison-generation.md` — Stage 2.9: auto-generate `wiki/comparisons/` (in-source concept pairs AND systematic multi-way 3+ comparisons)
-- `references/dedup-design.md` — two dedup tiers: intra-source (Stage 2.4 closing sub-step, ingest-time) vs cross-source (CLI, lint-time); distinct responsibilities, not interchangeable
-- `references/scanned-pdf-ocr-pipeline.md` — minerU local API extraction pipeline (all PDFs: text/scanned/mixed unified)
-- `references/raw-naming-conventions.md` — raw 文件命名规范检查机制（项目级 `schema.md` 命名规则 + auto-check）
-- `references/chat-ingest.md` ⭐ — interactive human-guided ingest (CLI revival of interactive ingest removed in a later NashSU version)
-- `references/deep-research.md` ⭐ — closed-loop web→wiki research pipeline (参考 NashSU deep-research.ts)
-- `references/save-chat-to-wiki.md` ⭐ — save any conversation as wiki page + auto-ingest (参考 NashSU chat-save-to-wiki.ts)
-- `references/review-sweep.md` ⭐ — auto-resolve review items satisfied by new ingests (参考 NashSU sweep-reviews.ts)
-- `references/process-reviews.md` ⭐ — human adjudication of pending review items: [Deep Research / Create Page / Skip] per item (参考 NashSU review-view.tsx)
-- `references/review-file-naming.md` — naming convention for all review items (contradiction/suggestion/missing-page/confirm/duplicate/orphan): filename `<type>-<topic>-<YYYYMMDD>.md` (human-readable) + frontmatter `review_id` = NashSU content hash `review_id_for(type,title)` (canonical identity; sweep/process-reviews key on it). Single code entry point: `_review_utils.resolve_review_path()`. NashSU itself stores reviews in one `review.json` keyed by that hash — no per-file names; improved-wiki forks to per-file .md.
-- `references/context-probe.md` — live context-window probe at ingest start (replaces `LLM_CONTEXT_SIZE` env); per-model cache, sanity gate, no-silent-fallback
-- `references/delegate-mode.md` — **agent invocation** via `ingest.py`: how a calling agent answers each LLM step. Includes operational pitfalls: venv Python requirement, OCR timeout handling, wikilink merge task batching, re-ingest `--delete` pattern.
-- `references/conversation-mode-agent-workflow.md` — concrete per-step prompt-file cheat sheet for a single-book ingest (Stage 2.2/2.4/2.9 prompt patterns, merge-loop subagent dispatch). Companion to `delegate-mode.md` (concept) with the hands-on detail.
-- `references/nashsu-search-architecture.md` — NashSU 源码实证：graph-relevance.ts（纯确定性 4 信号）+ search.rs（hybrid keyword+vector+RRF，远程 embedding API，无本地模型）。澄清 "NashSU parity" 在搜索侧的实际覆盖范围
+- Pipeline: `ingest-stages-mandatory.md`, `batch-parallel-prefetch.md`,
+  `batch-digest-loop.md`, `scanned-pdf-ocr-pipeline.md`
+- Agent driving: `delegate-mode.md`, `conversation-mode-agent-workflow.md`,
+  `context-probe.md`
+- Generation: `comparison-generation.md`, `dedup-design.md`,
+  `image-caption-strategy.md`, `language-directive.md`
+- Conventions: `naming-conventions.md`, `raw-naming-conventions.md`,
+  `raw-layout-compat.md`, `review-file-naming.md`
+- Operations: `initial-setup.md`, `re-ingest-comparison.md`,
+  `maintenance-cleanup.md`, `known-issues.md`, `cron-installation.md`
+- Retrieval and search: `kb-retrieval.md`, `nashsu-search-architecture.md`
 
-**Conventions**:
-- `references/naming-conventions.md` — file naming, frontmatter, wikilink, directory conventions (NashSU-aligned)
-- `references/raw-layout-compat.md` — raw/ layout convention (type subdirs, nested, template mapping)
-- `references/language-directive.md` — output-language policy (NashSU `outputLanguage` parity): auto-detect per source vs lock the whole KB, injection sites, proper-noun preservation
-
-**Operations**:
-- `references/scripts-reference.md` — full script inventory by category
-- `references/kb-retrieval.md` — 4-step knowledge retrieval (search → read → cite → declare)
-- `references/image-caption-strategy.md` — unified caption pipeline (minerU images, one VLM call per image with NashSU-style context-aware prompt), parallel dispatch, no-fallback (2026-06-24); includes VLM endpoint/retry pitfalls
-- `references/known-issues.md` — current bugs and workarounds
-- `references/roadmap.md` — planned enhancements not yet built (e.g. cross-source Synthesize command)
-- `references/initial-setup.md` — first-time project bootstrap
-- `references/batch-digest-loop.md` — batch ingest with resume + pitfalls (why `claude -p` cannot drive the 15-stage pipeline, source-page dedup, failure modes)
-- `references/batch-parallel-prefetch.md` — batch_ingest 内部设计: Phase A 预取 / Phase B 串行 spine, 并行边界
-- `references/re-ingest-comparison.md` — re-ingest a book to compare old vs new pipeline results (backup → delete → re-ingest → compare); authoritative `--delete` re-ingest flow
-- `references/maintenance-cleanup.md` — periodic cleanup of stale files (`.digested`, temp dirs, `.DS_Store`, empty-slug `.md` bug residual)
-- `references/cron-installation.md` — cron-based automation
-- `references/mineru-version-tracking.md` — pinned minerU pip version + VLM model, upgrade notes
-- `references/nashsu-lint-source-analysis.md` — NashSU lint.json internals
-- `references/scripting-pitfalls.md` — Python + agent tool pitfalls
-
-**Templates** (8 by file type):
-`templates/digest-{book,paper,datasheet,applicationnote,designexample,presentation,standard,news}.md`
-
-**Aggregate templates**:
-`templates/{overview,schema,index,log}.md`
-
-## Key features
-
-- **Auto-ingest**: `python3 "$SKILL_DIR/scripts/ingest.py" file.pdf [file2.pdf ...]` — NashSU Step 2 parity: Stage 2.4 generation produces concept/entity pages (per-chunk) + source page (from digest). LLM steps run in conversation mode (current model).
-- **Chat ingest** ⭐ (CLI revival of interactive ingest — NashSU **removed** the entry point in a later version; skill enhancement, not current parity): `/improved-wiki chat-ingest <file>` — interactive two-step: the calling agent presents a digest → you provide guidance → the agent generates guided wiki pages. Human relevance judgment remains in the loop. See `references/chat-ingest.md`.
-- **Deep research** ⭐ (参考 NashSU `deep-research.ts`): `/improved-wiki deep-research <topic>` — closed-loop: web search → LLM synthesis → wiki query page → auto-ingest → entity/concept pages → new review items. Knowledge base grows itself. Verbatim synthesis + code-generated References; `tags: [research]`; one topic per invocation (no review-derived auto-chain). See `references/deep-research.md`.
-- **Save chat to wiki** ⭐ (参考 NashSU `chat-save-to-wiki.ts`): say "保存到 wiki" after any conversation — cleans the assistant answer and writes it verbatim to `wiki/queries/<slug>-<date>-<HHMMSS>.md` (frontmatter `type/title/created/tags` only) + updates index/log + auto-ingests. Conversations become permanent knowledge. See `references/save-chat-to-wiki.md`.
-- **Review sweep** ⭐ (参考 NashSU `sweep-reviews.ts`): `/improved-wiki sweep-reviews` — scans pending review items, auto-resolves those satisfied by subsequent ingests (rule-based pass, then a conversation-mode LLM judge; resolved pages are kept on disk). Details in `references/review-sweep.md`.
-- **Process reviews** ⭐ (参考 NashSU `review-view.tsx` 审核面板): `/improved-wiki process-reviews` — the human side of the review queue: present each pending suggestion/missing-page item with NashSU's predefined options [Deep Research / Create Page / Skip]; Deep Research uses the item's pre-generated `search_queries` to seed the deep-research flow, whose result becomes the query page. Since the 2026-07-12 Stage 2.7 removal this is the canonical birthplace of `wiki/queries/` pages (alongside save-chat-to-wiki). Details in `references/process-reviews.md`.
-- **Batch ingest**: `python3 "$SKILL_DIR/scripts/ingest.py" f1.pdf f2.pdf ...` — pass all books in **one command**. The automatic two-stage Phase-1 pipeline overlaps one book's minerU OCR with another book's captioning (at most two detached workers; minerU itself remains single-instance), while the main conversation advances one book's Stage 2.2 and the wiki-dependent Stage 2.3→write spine at a time. Cross-book Stage 2.2 prefetch remains an explicit advanced single-source flow; it is not silently spawned by the batch CLI. **Do not manually split normal OCR into separate commands**, and never run two books' 2.3+ in parallel. `--parallel=1` disables Phase-1 overlap and makes Stage 2.4 handoffs serial; values ≥2 enable both resource slots and Stage 2.4 waves of up to N independent prompts. Worker leases, durable spine reservation, pause/status semantics, and exact boundaries: `references/batch-parallel-prefetch.md` (authoritative).
-- **Graph** (separate command, peer of Ingest/Lint): `python3 "$SKILL_DIR/scripts/graph.py"` builds the knowledge graph (NashSU graph-view CLI parity — four-signal weighted graph + Louvain communities + cohesion + gaps + cluster hubs). Deterministic, no LLM. Run explicitly only — ingest/lint never auto-trigger it (NashSU-aligned: NashSU has no post-ingest graph rebuild). `--mode query --slug <s>` for read-only per-page wikilink suggestions (manual; not wired into any ingest stage).
-- **Unified single-pass pipeline**: Stage 2.2 analyzes ALL chunks (rolling global digest, empty seed — the standalone Stage 2.1 whole-book digest was removed 2026-07-08 for NashSU parity) → Stage 2.3 detects existing-wiki associations → Stage 2.4 generates pages (per-chunk, source-grounded; single-shot for ≤1 chunk). Works for all chunk counts (1 to N), with per-chunk checkpoints for crash recovery. Legacy multi-round synthesis retired.
-- **Parallel I/O**: per-image caption dispatch (×4 workers, `CAPTION_MAX_WORKERS`; 4 stays under GLM-5v-turbo free-tier 429 limit). Caption rounds are protected by a cross-process per-user flock, so two batch workers cannot multiply that pool into eight requests; the next book's single minerU job may still overlap the current caption round.
-- **Caption request timeout**: per-VLM-call HTTP timeout, default 180s; configurable per provider via `~/.agents/config.json` `providers.<name>.timeout_seconds`, or per-run via `CAPTION_TIMEOUT_SECONDS` env (NashSU parity: llm_wiki 0.6.4 made its request timeout configurable for slow local/CPU-inference models, 2026-07-16).
-- **Heading path tracking** (NashSU parity): each chunk analysis prompt includes full heading hierarchy (`Chapter 3 > Section 3.2 > Subsec 3.2.1`)
-- **Overlap context** (NashSU parity): paragraph/sentence-aware overlap text passed between chunks for continuity
-- **Page merge**: three-layer merge on re-ingest — frontmatter array union + LLM body merge + locked fields. Sources field uses union-merge (preserves multi-source provenance).
-- **CJK slug rewriting** (NashSU parity): auto-detects Chinese/Japanese/Korean titles and generates readable CJK slugs
-- **PPTX/DOCX support** (NashSU parity): text extraction + image extraction from Office formats via stdlib zipfile
-- **Aggregate repair safety** (NashSU parity): proportional size caps for index + overview, FILE block output filtering
-- **Wikilink enrichment**: auto-adds `[[wikilinks]]` after page write (NashSU enrich-wikilinks parity)
-- **Source lifecycle**: `--delete` removes source page + cache + orphan concepts/entities + media; `--delete --keep-media` keeps media for an analysis-only re-ingest. Always ask the user which flow first (see the 🔴 Checkpoints entry above); authoritative flow (backup → delete → re-ingest → compare, media-backup behavior): `references/re-ingest-comparison.md`.
-- **Lint auto-fix**: `wiki-lint.sh --fix` repairs missing-frontmatter; `--fix-links` applies the suggestion engine's `suggested_target`/`suggested_source` (rewrites broken `[[wikilinks]]`, appends `## Related` links for orphan/no-outlinks). **2026-07-10 hardening (user-approved)**: broken-link rewrites only auto-apply when `suggested_score` ≥ 0.9 (exact/same-basename tier); contains-tier (0.82) and fuzzy suggestions become `REVIEW/suggestion` items naming the proposed target — string-similar ≠ meaning-similar, and a headless batch multiplies one bad suggestion. `--delete-orphans` is now **preview + one REVIEW item per orphan, never an automatic delete** (an orphan may be a freshly-ingested page not yet enriched with links); these land in their own `REVIEW/orphan/` category (2026-07-12, user-requested — kept separate from `REVIEW/suggestion/` so orphans can be paged through on their own) rather than mixed into general suggestions. The real cascade-delete (file + index entry + inbound `[[links]]` + `related:` refs, NashSU `cascadeDeleteWikiPagesWithRefs` parity) requires an explicit `wiki-lint-fix.py --delete-orphans --apply`. **2026-07-12**: bulk stub-creation for unsuggestable broken links is now default-OFF in `wiki-lint-fix.py` too (they become `REVIEW/missing-page` items; explicit `--stub` restores bulk stubs) — NashSU builds stubs only from a human-clicked per-item Fix, and headless batch stubbing is what produced the 23 empty `queries/` stubs cleaned from RadarWiki on 2026-07-12
-- **Semantic lint batching**: `wiki-lint-semantic.py` splits page summaries into context-derived char-budget batches (2026-07-10; replaces the old fixed 200-page split — reuses ingest's `_compute_chunk_targets` formula with its own 256K-token hard ceiling, `IMPROVED_WIKI_LINT_TARGET_TOKENS_CEIL` env override) so it scales to large wikis without blowing context; batches are disjoint by page and only deduped once at the end, so a single invocation eager-drains and emits prompts for ALL currently-uncached lint batches at once. Unlike ingest Stage 2.4's `--parallel`-bounded waves, semantic lint does not yet impose that ceiling — dispatch one subagent per emitted prompt.
-- **Lint parity scope** (NashSU app interop): structural lint 的 `orphan`/`no-outlinks`/`broken-link` 三类 + semantic lint 的四子类 + `review.json` 5 类与 NashSU byte-compatible（detail 字符串、severity、双索引、shape 逐字对齐，见 `references/nashsu-lint-source-analysis.md` §2/§3/§4）。`missing-frontmatter`（error 级）是 **improved-wiki 扩展**，非 NashSU `lint.json` 一部分——与 NashSU app 互操作时 app 端可能不识别该类型，需注意。
-- **Queue watch**: `--watch --drain` daemon mode consuming `ingest-queue.json`
-- **Standalone validation** (no longer auto-run): `validate_ingest.py` is a manual post-ingest check (the auto-run Stage 4.1 was removed for NashSU alignment). In-pipeline go/no-go gates still run per-stage via `_stage_validators.py` (`_verify_stage_2_2_chunks`, `_verify_stage_2_4_file_blocks`, etc.).
-- **Persistent warning log** (2026-07-09, NashSU v0.6.0 parity): `validate_stage_outputs()`'s go/no-go warnings are now also appended to `runtime_dir/ingest-warnings.log` (one `## timestamp | file` entry per source), not just printed — mirrors NashSU's new `projectPath/.llm-wiki/ingest-warnings.log`. See `_append_ingest_warning_log()` in `_ingest_write.py`.
-- **🔒 项目锁冲突诊断**：single/batch/watch 只在当前书的 Stage 2.3+ spine 的每次活动调用中持有 `ProjectLock`；exit 101 时 kernel flock 会释放，但 `.llm-wiki/spine-reservation.json` 继续把逻辑主干保留给同一本书。Phase 1 OCR/caption、Stage 2.2 和等待阶段均不持 flock。不要删除 lock/reservation 文件或抢锁；先用 `--batch-status` 确认 owner，再恢复该书。详见 `maintenance-cleanup.md`。
-- **NashSU parity**: aligned with NashSU `ingest.ts` on heading path, overlap suffix, accumulating digest, CJK slug, PPTX/DOCX, sources union merge, schema routing, aggregate repair caps, page merge, wikilink enrichment, source lifecycle. **Chunk generation diverges from NashSU's single-call Step 2**: NashSU makes one LLM call producing all FILE blocks for the whole book; improved-wiki generates per-chunk (2.2 analyzes ALL chunks → 2.3 associate → 2.4 generate per-chunk) to scale to long sources that would overflow a single call. Output shape is aligned; the generation mechanism is not — do not read "single-pass" as "single-call parity".
-- **Graph 四信号权重** (built-in): `graph.py` uses NashSU's four-signal model (direct link ×3.0, source overlap ×4.0, Adamic-Adar ×1.5, type affinity ×1.0) for weighted Louvain community detection
-- **Per-page 语言门禁** (built-in): `ingest.py` Stage 3.2 detects body language per FILE block, warns on mismatch with expected source language (NashSU contentMatchesTargetLanguage parity)
-- **Schema routing validation** (built-in): `ingest.py` validates `type:` frontmatter against file path directory, auto-corrects mismatches (NashSU validateWikiPageRouting parity)
-- **Path safety validation** (built-in): `ingest.py` rejects FILE blocks with `..` segments, absolute paths, Windows-invalid names, and non-wiki/ destinations (NashSU isSafeIngestPath parity)
-- **Local extraction**: minerU via a persistent local API server (`mineru.cli.fast_api`) + `/file_parse` per 32-page chunk (`MINERU_CHUNK_SIZE`; free, serial, one book at a time via `fcntl.flock`). All PDFs (text/scanned/mixed) take one unified path: backend=`hybrid-engine`, `parse_method=auto`, which routes per-page to txt or VLM OCR internally (garbled-font pre-detection and the extraction quality gate were removed 2026-07-08 for NashSU alignment). `/file_parse` accepts a per-request `backend` Form field, but hybrid-engine is the verified default (pipeline loses inline-formula recall; the `mineru -b pipeline` CLI also still hits a 502 bug in 3.4.0). txt/md/pptx/docx bypass minerU.
-
-## Scripts
-
-Full script inventory: `references/scripts-reference.md`. Entry points (bold in the reference): `ingest.py`, `graph.py`, `wiki-lint.sh`, `build_embeddings.py`, `search_wiki.py`, `validate_ingest.py`, `cross_source_dedup.py`, `sweep_reviews.py`.
-
-Scripts are owned by this skill; wiki projects **invoke** them in place（`~/.agents/skills/improved-wiki/scripts/<name>`），never copy/fork them into the project tree — a project without its own `scripts/` dir is expected. Per-project choices (VLM backend, batch size) go in the project's `wiki/methodology/` as decisions, not forked code.
-
-## Trigger this skill
-
-**Auto Ingest**: User mentions wiki ingest / PDF OCR / batch ingest / validate-ingest / image caption / local minerU. Ingest runs in conversation mode (see "LLM execution model"); a single book advances stages in order, with one deliberate in-stage exception: independent Stage 2.4 chunk handoffs may run in a bounded parallel wave. Batch parallelism rules: see "Batch ingest" under Key features. **Dedup rule**: before selecting any file, pre-check `wiki/sources/<path>.md` exists (agent-side quick check); the code's Stage 0.2 makes the final call with the `ingested` marker as the primary signal, source-page existence as auxiliary. Never rely on `ingest-cache.json` for dedup.
-
-**Chat Ingest** ⭐: User mentions chat ingest / interactive ingest / 交互消化 / 对话消化 / 人工引导消化 / 重点消化. User provides a source file and wants to discuss it before generating wiki pages. See `references/chat-ingest.md`.
-
-**Deep Research** ⭐: User mentions deep research / 深度研究 / 研究并消化 / research and ingest / 调查并写入 wiki / 补充知识空缺. User provides a topic (not a source file) and wants web research synthesized into wiki pages via auto-ingest. Also triggered when wiki can't answer a question, or from review items / lint gaps. See `references/deep-research.md`.
-
-**Save Chat to Wiki** ⭐: User says 保存到 wiki / save to wiki / 记住这个 / add to wiki / wiki this after a substantive conversation. Captures chat insight as wiki page + auto-ingests. See `references/save-chat-to-wiki.md`.
-
-**Review Sweep** ⭐: User says sweep reviews / 清理 review / 扫 review / auto-resolve reviews. Triggered after batch ingests to clear stale review items. See `references/review-sweep.md`.
-
-**Process Reviews** ⭐: User says process reviews / 处理 review / 裁决 review / 过一遍 review. Presents each pending suggestion/missing-page review item for a human [Deep Research / Create Page / Skip] decision (NashSU review-panel parity). Natural follow-up after sweep. See `references/process-reviews.md`.
-
-**Retrieval**: User asks to search wiki / cite knowledge base / query technical content. See `references/kb-retrieval.md`.
-
-## Projects
-
-| Project | Path |
-|---------|------|
-| HardwareWiki | `~/Documents/知识库/HardwareWiki` |
-| RadarWiki | `~/Documents/知识库/RadarWiki` |
-| 自然科学知识库 | `~/Documents/知识库/自然科学知识库` |
+Templates live under `templates/`. Ingest templates are selected by source
+type; aggregate templates cover schema, index, log, and overview.

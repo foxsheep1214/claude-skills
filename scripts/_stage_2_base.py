@@ -1,37 +1,10 @@
-"""Phase 2 common imports — shared by all Stage 2.x modules.
-
-Reduces 15-line import blocks duplicated across 6 files to a single import.
-Created 2026-06-21 as part of Phase 2 consolidation.
-"""
+"""Small domain helpers shared by Stage 2 modules."""
 from __future__ import annotations
 
-import json, os, re, sys, time, unicodedata
+import re
+import unicodedata
 from pathlib import Path
 
-_script_dir = Path(__file__).resolve().parent
-if str(_script_dir) not in sys.path:
-    sys.path.insert(0, str(_script_dir))
-
-from _core import (
-    Config,
-    record_rate_limit as _record_rate_limit,
-    list_existing_slugs,
-    load_schema_md,
-    schema_folders,
-    BASE_PAGE_DIRS,
-    parse_yaml_block,
-    parse_file_blocks,
-    parse_simple_yaml,
-    slugify,
-    atomic_write,
-    call_with_retry,
-    canonical_source_path,
-)
-from _llm_api import (
-    _retry_jitter,
-    _is_retryable_exception,
-    call_anthropic_protocol,
-)
 from _frontmatter import extract_frontmatter_title as _extract_fm_title
 
 # Folders that may appear in schema.md but are not LLM-generated page types.
@@ -119,10 +92,3 @@ def file_block_slug(path) -> str:
     Shared by _ingest_chunks and _stage_2_4_generation (was 6 verbatim copies).
     """
     return Path(path).stem.lower().replace(" ", "-").replace("/", "-")
-
-
-# Explicitly re-export underscore-prefixed helpers. Without __all__, the
-# `from _stage_2_base import *` used by every Stage 2.x module EXCLUDES
-# _-prefixed names (Python default), so _retry_jitter / _is_retryable_exception
-# / _record_rate_limit would NameError on retry paths.
-__all__ = [n for n in dir() if not n.startswith("__")]

@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from _stage_2_base import *
+import json
+import re
+import time
+from pathlib import Path
+
+from _config import Config
+from _llm_api import call_anthropic_protocol
 from _language import build_language_directive
 from _stage_2_4_generation import _rank_linkable_fill
 

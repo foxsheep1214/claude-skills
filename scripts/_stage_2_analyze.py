@@ -1,6 +1,30 @@
 from __future__ import annotations
 
-from _stage_2_base import *
+import json
+import os
+import re
+import time
+from pathlib import Path
+
+from _config import Config
+from _core import record_rate_limit as _record_rate_limit
+from _schema import (
+    BASE_PAGE_DIRS,
+    list_existing_slugs,
+    load_schema_md,
+    schema_folders,
+)
+from _llm_api import (
+    _is_retryable_exception,
+    _retry_jitter,
+    call_anthropic_protocol,
+)
+from _parse import parse_yaml_block
+from _stage_2_base import (
+    SCHEMA_NON_PAGE_DIRS,
+    _stage_2_title_cjk_bigrams,
+    _stage_2_title_words,
+)
 from _language import build_language_directive
 
 # ── Token estimation (tiktoken if installed, else CJK-aware heuristic) ──
@@ -1011,5 +1035,3 @@ def _stage_2_2_analyze_chunk(
                 f"after {attempt+1} attempt(s): {type(e).__name__}: {e}") from e
 
     return analysis
-
-

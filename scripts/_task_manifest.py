@@ -15,13 +15,15 @@ from urllib.parse import urlparse
 
 from _core import (
     canonical_source_path,
-    file_sha256,
     is_query_bridge_source,
+    source_cache_key,
+)
+from _progress import (
+    file_sha256,
     load_cache,
     load_progress,
     load_stages,
     progress_path,
-    source_cache_key,
     stages_path,
 )
 from _page_ref import PageRef, canonical_page_refs

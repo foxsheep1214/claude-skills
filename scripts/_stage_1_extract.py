@@ -22,16 +22,12 @@ from __future__ import annotations
 import hashlib
 import random
 import re
-import sys
 import time
 import zipfile
 from pathlib import Path
 
 # Shared infrastructure
-_script_dir = Path(__file__).resolve().parent
-if str(_script_dir) not in sys.path:
-    sys.path.insert(0, str(_script_dir))
-from _core import Config
+from _config import Config
 
 # ── Re-exports from split sub-stage modules (facade back-compat) ──────────────
 # External importers (ingest.py, _ingest_prepare.py) import these names from

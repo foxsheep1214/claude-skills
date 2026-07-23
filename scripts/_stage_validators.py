@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from _core import Config
+from _config import Config
 from _paths import media_slug
 
 

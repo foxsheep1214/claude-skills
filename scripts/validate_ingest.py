@@ -33,7 +33,7 @@ from _lint_suggest import (
     ANCHOR_FILES as _LINT_ANCHOR_FILES,
     STATE_FILES as _LINT_STATE_FILES,
 )
-from _core import file_sha256
+from _progress import file_sha256
 RUNTIME = detect_runtime_dir(PROJECT_ROOT)
 SOURCE_SLUG = os.environ.get("SOURCE_SLUG", "ADL8113")
 

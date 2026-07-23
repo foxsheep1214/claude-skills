@@ -112,7 +112,7 @@ def reserve_spine(
             # A process may have completed finalization and then died before
             # removing its advisory reservation. The authoritative ``ingested``
             # marker makes that one stale case safe to reconcile automatically.
-            from _core import load_stages
+            from _progress import load_stages
             if load_stages(config, owner).get("ingested"):
                 spine_reservation_path(config).unlink(missing_ok=True)
                 existing = None

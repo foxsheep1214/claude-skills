@@ -6,23 +6,25 @@ import re
 import time
 from pathlib import Path
 
+from _config import Config
 from _core import (
-    Config,
     PrepareStopAfter,
     detect_template_type,
     load_template,
+    set_current_file as _set_current_file,
+    is_query_bridge_source,
+)
+from _progress import (
     file_sha256,
     load_progress,
     save_progress,
     delete_progress_keys,
-    parse_file_blocks,
-    set_current_file as _set_current_file,
     is_stage_done,
     mark_stage_done,
     unmark_stage_done,
-    list_existing_slugs,
-    is_query_bridge_source,
 )
+from _parse import parse_file_blocks
+from _schema import list_existing_slugs
 from _stage_1_extract import (
     stage_1_1_extract_text,
     stage_1_2_extract_images,

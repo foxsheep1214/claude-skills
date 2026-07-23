@@ -49,6 +49,7 @@ from _frontmatter import (  # noqa: E402
     extract_frontmatter_title,
 )
 from _paths import atomic_write  # noqa: E402
+from _exit_codes import HANDOFF_PENDING  # noqa: E402
 
 # ── LLM judge constants (verbatim from NashSU sweep-reviews.ts) ──────────────
 JUDGE_BATCH_SIZE = 40
@@ -626,7 +627,7 @@ def main() -> int:
         # ConversationPending (BaseException subclass) → exit 101 so the agent
         # answers the judge prompt and re-invokes (NashSU conversation handoff).
         if type(exc).__name__ == "ConversationPending":
-            return 101
+            return HANDOFF_PENDING
         raise
 
     if args.json:

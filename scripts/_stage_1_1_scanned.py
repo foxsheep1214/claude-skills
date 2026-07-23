@@ -19,11 +19,8 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
-# Shared infrastructure
-_script_dir = Path(__file__).resolve().parent
-if str(_script_dir) not in sys.path:
-    sys.path.insert(0, str(_script_dir))
-from _core import Config, file_sha256  # noqa: E402
+from _config import Config  # noqa: E402
+from _progress import file_sha256  # noqa: E402
 from _batch_worker_status import update_worker_phase  # noqa: E402
 
 from _stage_1_2_images import (  # noqa: E402

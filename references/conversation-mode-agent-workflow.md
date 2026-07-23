@@ -1,129 +1,113 @@
-# Conversation Mode — Agent Driving Pattern
+# Conversation Handoff Response Guide
 
-When a supported agent runtime drives the improved-wiki pipeline, it must
-answer each LLM step that `ingest.py` delegates via prompt files. This file
-documents the practical workflow for a single-book ingest.
-(机制与政策见 `references/delegate-mode.md`；本文是逐 stage 作答的 hands-on cheat sheet。)
+This is the hands-on format/QC guide. The one-fresh-worker rule, atomic
+publication, and completion lifecycle are authoritative in `delegate-mode.md`.
 
-## Generation guardrails (any FILE-block prompt)
+## Common guardrails
 
-- **Never generate index/log/overview pages** — Stage 3.5 handles these three
-  programmatically (index/log appended, overview LLM-rewritten). An LLM-emitted
-  full rewrite silently drops history entries (the ADL8113 incident).
-- **Frontmatter completeness**: every page needs the 6 required fields
-  (`type`/`title`/`tags`/`related`/`created`/`updated`; `sources` is an
-  additional field where applicable — see `references/naming-conventions.md`).
+- Read the whole prompt and embedded source segment.
+- Never emit index, log, or overview pages; Stage 3.5 owns aggregates.
+- Every generated page needs the required frontmatter fields:
+  `type`, `title`, `tags`, `related`, `created`, `updated`; include `sources`
+  where applicable.
+- Only use paths and link targets allowed by the prompt.
+- Write one complete `.txt.tmp`; do not stream into the final `.txt`.
 
-## Prerequisites
+## Stage formats
 
-- **Python**: `~/.venv/bin/python3` (3.10+). System python3 (3.9) fails on PEP 604 — see `scripting-pitfalls.md` Pitfall 4.
-- **Environment**: `IMPROVED_WIKI_ROOT=<project-path>` exported or prefixed.
-- **minerU**: Local API server on port 19999 must be running (auto-started by pipeline).
+| Stage | Prompt pattern | Required answer |
+|---|---|---|
+| Context probe | `ctxprobe*.md` | Plausible integer context size; only main-conversation exception |
+| 2.2 | `Stage-2-2-Chunk-N-*.md` | Valid YAML containing chunk index, entities, concepts, claims, formulas, existing-wiki connections, and the five-field `updated_global_digest` |
+| 2.4 | `Stage-2-4-Generation-*.md` | Exact requested `---FILE:wiki/<path>--- … ---END FILE---` blocks |
+| 2.6 | `Stage-2-6-SourcePage-*.md` | One source-page FILE block with every doctype-required H2 section |
+| 2.9 | `Stage-2-9-ComparisonReview-*.md` | Comparison FILE blocks or the exact zero-comparison sentinel |
+| 3.4 | `Stage-3-4-Review-*.md` | Strict YAML array of real findings; empty `[]` is valid |
+| Page merge | `LLM-task-*.md` | Merged body without frontmatter; preserve richer facts and wikilinks |
+| Wikilink enrichment | JSON `LLM-task-*.md` | Requested JSON mapping; `{}` is valid when no safe addition exists |
 
-## LLM Step Sequence (single-book, serial)
+## Stage 2.2 quality release
 
-Each step: `ingest.py` exits 101 → read prompt `.md` → write response `.txt` → re-run `ingest.py`.
+Before publication:
 
-| Step | Prompt file pattern | What to produce | Key tips |
-|------|-------------------|-----------------|----------|
-| Stage 2.2 | `Stage-2-2-Chunk-N-*.md` | YAML with chunk_index, entities_found, concepts_found, claims, formulas, connections_to_existing_wiki, **updated_global_digest** (5 fields: book_meta/outline/key_entities/key_concepts/key_claims — rolls up across chunks; standalone 2.1 removed 2026-07-08) | Include detailed concept definitions with key_details — these feed directly into generation. First chunk establishes book_meta + outline; later chunks refine and append. |
-| Stage 2.4 | `Stage-2-4-Generation-*.md` | FILE blocks (`---FILE:wiki/<path>---\n...\n---END FILE---`) for source + concepts + entities | The largest step. Generate a page for EVERY concept/entity listed. Use exact slugs from the prompt. Only link to pages in the "Linkable pages" list. |
-| Stage 2.6 | `Stage-2-6-SourcePage-*.md` | One source-page FILE block (doctype-aware required H2 sections) | Missing required sections raise in code (`_stage_2_6_validate_required_sections`) — follow the section list verbatim. |
-| Stage 2.9 | `Stage-2-9-ComparisonReview-*.md` | 0-N comparison FILE blocks or `---COMPARISONS_IN_SOURCE: 0---` | Each comparison: why compare, table (≥4 dimensions), selection guide, see-also. |
-| Stage 3.4 | `Stage-3-4-Review-*.md` | Strict YAML array of review items (`type`/`title`/`description`/`affected_pages`/`severity`/`search_queries`) — `affected_pages` must be safe wiki `.md` paths; suggestion/missing-page require 2–3 unique queries, other types require `[]`; report only real findings; empty `[]` is valid | Runs **after** Stage 3.1 write, on the already-written pages. The whole response is validated before any review page is written; one malformed item rejects the batch. Single handoff, no chunk chain — still dispatch a fresh subagent. |
-| Merge tasks | `LLM-task-*.md` | Merged page body (no frontmatter) | **Delegate to subagent** — see below |
-| Wikilink enrichment | `LLM-task-*.md` (JSON) | `{}` to skip | Safe to skip if Stage 2.4 already added inline wikilinks |
+```bash
+python3 "$SKILL_DIR/scripts/qc_stage22.py" \
+  --file <current-result.txt.tmp>
+```
 
-## Handling the merge loop
+The answer must:
 
-After Stage 3.1 write, the pipeline generates many `LLM-task-*.md` merge prompts.
-These are repetitive — the same pages may be re-merged across runs.
+- contain at least five genuine concepts when the source segment supports
+  them, without padding one concept into several;
+- avoid placeholder names such as “chunk 3”, “technical content”, or
+  “reference material”;
+- include non-empty source quotes/evidence anchors;
+- carry a complete five-field rolling digest:
+  `book_meta`, `outline`, `key_entities`, `key_concepts`, `key_claims`;
+- remain grounded in the current chunk, not memory of earlier prompts.
 
-**Pattern**: Dispatch a `delegate_task` subagent with:
-- `toolsets: ['terminal', 'file']`
-- Instructions to loop: read `.md` → write `.txt` → re-run `ingest.py` → repeat
-- For merge tasks: output merged body (prefer richer version, keep all wikilinks)
-- For JSON wikilink tasks: output `{}`
-- Stop when `ingest.py` exits 0 (pipeline complete) or a non-merge/non-JSON LLM stage appears
+First chunk establishes book metadata and outline. Later chunks refine and
+append; never discard correct prior digest content. Stage 2.2 is serial.
 
-## Stage 2.2 quality gate (mandatory, revised 2026-07-08)
+For formulas, locate the exact equation in the embedded chunk or cached
+per-page extract and copy it faithfully. Do not reconstruct equations from
+memory.
 
-**Policy — dispatch a fresh subagent per handoff (EVERY prompt file: chunked
-2.2/2.4 AND single-shot 2.6/2.9/3.4/dedup-confirm/merge/wikilink), max 1
-handoff, then exit; the main conversation answers NO prompts (sole exception:
-the context probe).** Chained or main-conversation answering accumulates prompt
-text in one context window and degrades later output into thin/placeholder
-content (两起事故：Skolnik 连答 14 chunks 2026-07-07；EW/Radar Handbook 主对话
-直答 5 chunks 2026-07-08；单发 handoff 在 batch 多书时同样累积). 事故全程、根因
-分析与政策沿革的**权威版在 `references/delegate-mode.md`（L4 修订）**——本文件
-只保留操作检查。If you find yourself answering ANY handoff in the main
-conversation (other than the probe), the per-handoff dispatch was skipped —
-that is the bug.
+## Stage 2.4 quality release
 
-**Quality gate (catches degradation at the cheapest point, Stage 2.2, before it
-propagates into Stage 2.4's generated pages)**: after every Stage 2.2 response,
-before advancing, verify:
-- ≥ 5 real concepts (count `- name:` entries in `concepts_found`)
-- No placeholder names (regex: `(?i)chunk \d|handbook content|reference material|technical content|book content`)
-- Response size ≥ 3000 bytes
-- source_quotes present + non-empty, and every claim carries a non-empty evidence
-  anchor (checked by `qc_stage22.py` — the in-pipeline C1/C3 hard gates were removed
-  2026-07-08 in favor of per-chunk subagent isolation, and these two checks moved
-  into the offline scanner; 2.4 consumes at most 5 key_details per concept regardless)
+Stage 2.4 may be answered concurrently within the wave emitted by `ingest.py`.
+For each prompt:
 
-Before every re-invoke, run
-`scripts/qc_stage22.py --file <current-Stage-2-2-result.txt>` so stale responses
-from older prompt hashes cannot fail the current handoff. Use `--conv <prefix>`
-only for a full-book historical audit. If the current response fails the gate,
-delete its `.txt` and re-dispatch that chunk's subagent.
+- generate the exact owner-slug inventory requested by that prompt;
+- ensure FILE-block count matches requested slugs, excluding explicit
+  placeholders/sentinels;
+- write definitions, mechanisms, equations, constraints, and source-specific
+  evidence rather than generic summaries;
+- preserve proper nouns and technical identifiers;
+- add wikilinks only from the prompt's Linkable pages universe.
 
-## Stage 2.2/2.4: scale extraction density + ground formulas (updated 2026-07-01)
+Validate all results in the wave, atomically publish them, then re-invoke. Do
+not serialize normal Stage 2.4 operation and do not exceed `--parallel`.
 
-At the **64K default ceiling** a large book splits into several ~256K-char chunks
-(~2–3 chapters each), each analyzed and generated in ONE inline pass. Two practices
-keep each chunk well-extracted and formula-faithful:
+## Source, comparisons, and review
 
-1. **Enumerate section by section — completeness, not a count.** The Stage 2.2
-   prompt nudges you to read the WHOLE chunk section by section and list every
-   genuine page-worthy concept the source defines or uses. It does **not** set a
-   per-char concept quota (the old ~1-per-20K-chars target was dropped 2026-07-02:
-   density is a property of content, not char count, and a number invited
-   padding/splitting). Quality over count — never pad, never split one concept into
-   several, never skip a real one to keep the list short. Select only the most
-   significant named systems/people as entity pages — do not make a page for every
-   model number a survey handbook mentions (over-extraction).
+Stage 2.6 required headings are code-validated. Follow the prompt verbatim; do
+not substitute a generic source summary.
 
-2. **Ground every formula by targeted grep back to source.** Don't transcribe
-   formulas from memory. For each formula you cite, locate it in the chunk text or
-   the per-page extract and copy the LaTeX verbatim:
-   ```bash
-   EXTRACT_DIR=".llm-wiki/extract-tmp/<book-stem>"
-   grep -n "frac\|tag{2-\|sigma\|lambda" "$EXTRACT_DIR"/p0NNN.txt   # find the eqn
-   ```
+Stage 2.9 comparisons need a why-compare section, a table with at least four
+useful dimensions, a selection guide, and see-also links. Use the language
+requested by the prompt.
 
-**Per-chunk subagent dispatch applies here too** — each 2.2/2.4 chunk prompt embeds
-~250K chars of source; structural isolation (fresh subagent, max 1 handoff, then
-exit) is what keeps chunk N+1's attention on chunk N+1 instead of the whole book.
-Policy and incident record: `references/delegate-mode.md` L4 revision (2026-07-08).
+Stage 3.4 runs after pages are written. Each item requires:
 
-Result publication is two-phase: each answer is produced as
-`<stage-slug>.txt.tmp`, validated, then atomically renamed to
-`<stage-slug>.txt`. Never let a subagent stream directly into the final `.txt`;
-file-existence-driven drivers can otherwise consume a partial answer and advance
-the state machine while the writer is still appending.
+- `type`, `title`, `description`, `affected_pages`, `severity`,
+  `search_queries`;
+- safe wiki `.md` paths in `affected_pages`;
+- two or three unique search queries for `suggestion` and `missing-page`;
+- `search_queries: []` for other types.
 
-Scheduling differs by stage: Stage 2.2 must wait for the prior chunk's validated
-rolling-digest answer. Stage 2.4 has a precomputed owner-slug inventory, so its
-chunk prompts may be answered concurrently by separate fresh subagents. `ingest.py`
-emits at most `--parallel` unresolved Stage 2.4 prompts per wave; answer that wave,
-validate every result file, then re-invoke for the next wave. This is bounded
-parallelism, not a conversion of Stage 2.4 to serial execution.
+Report only real findings. One malformed item rejects the whole response, so
+validate the array before publication.
 
-For Stage 2.4, the subagent generates that chunk's exact slug list; verify
-block-count == requested slugs (minus the `foo-bar` placeholder) before advancing.
+## Merge and enrichment tasks
 
-## Re-ingest (comparison or correction)
+For page merge prompts, preserve the union of supported content. Prefer the
+richer formulation, keep valid frontmatter-owned metadata out of the body, and
+never drop existing wikilinks merely to simplify the result.
 
-先问用户：full redo 还是 analysis-only（`--delete --keep-media`）。
-完整流程（backup → delete → re-ingest → compare，两种变体）与全部命令见
-`references/re-ingest-comparison.md`（权威）。
+Redundant identical duplicate writes are skipped in code. If the same merge
+reappears for byte-identical inputs, treat it as a regression rather than an
+expected manual workaround.
+
+Enrichment normally skips pages that already have outgoing wikilinks. When a
+task is emitted, add only safe, relevant links from its allowed universe; an
+empty mapping is preferable to invented links.
+
+## Re-ingest
+
+Before deletion, ask whether the user wants:
+
+- full redo: OCR, images, captions, analysis, and generation; or
+- analysis-only: `--delete --keep-media`.
+
+Follow `re-ingest-comparison.md` for backup, delete, resume, and comparison.

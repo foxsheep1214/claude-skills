@@ -42,7 +42,6 @@ import fcntl
 import json
 import os
 import re
-import sys
 import tempfile
 import threading
 import time
@@ -50,11 +49,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from pathlib import Path
 
-# Shared infrastructure
-_script_dir = Path(__file__).resolve().parent
-if str(_script_dir) not in sys.path:
-    sys.path.insert(0, str(_script_dir))
-from _core import Config  # noqa: E402
+from _config import Config  # noqa: E402
 from _batch_worker_status import update_worker_phase  # noqa: E402
 from _paths import atomic_write  # noqa: E402
 from _review_utils import resolve_review_path  # noqa: E402

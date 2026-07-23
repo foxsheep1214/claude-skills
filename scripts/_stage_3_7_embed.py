@@ -16,7 +16,7 @@ import os
 import sys
 from pathlib import Path
 
-from _core import Config
+from _config import Config
 from _page_ref import PageRef, PageRefError
 
 

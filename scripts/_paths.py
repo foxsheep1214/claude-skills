@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     # Avoid a runtime cycle: _core imports _paths (detect_runtime_dir), so _paths
     # must not import Config at runtime. The annotation is evaluated lazily under
     # `from __future__ import annotations`.
-    from _core import Config
+    from _config import Config
 
 
 def detect_runtime_dir(wiki_root: Path) -> Path:

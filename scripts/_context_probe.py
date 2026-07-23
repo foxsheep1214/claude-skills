@@ -296,7 +296,7 @@ def probe_context(config) -> int:
         # Never substitute an unverified number here: use the authoritative spec
         # if this model is recognized, else the codebase's own conservative
         # built-in default — loudly, so it doesn't read as a confirmed value.
-        from _core import _CONTEXT_SIZE_DEFAULT
+        from _config import _CONTEXT_SIZE_DEFAULT
         if known is not None:
             raw = known
             print(f"[context-probe] '{model_self}' reported no confident context "
