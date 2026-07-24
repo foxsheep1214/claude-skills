@@ -856,32 +856,47 @@ def _scan_wiki_inventory(wiki_dir: Path) -> dict[str, list[tuple[str, str]]]:
 
 
 def rebuild_index_deterministic(wiki_dir: Path) -> str:
-    """Full index.md rebuild from the on-disk page inventory — no LLM call.
+    """Rebuild index.md in NashSU 0.6.5's application-owned format.
 
-    NashSU parity (llm_wiki 0.6.4 ``rebuild_wiki_index``): a pure
-    frontmatter-scan recovery tool, independent of the ingest pipeline's LLM
-    whole-page rewrite in ``stage_3_5_aggregate_repair`` above. That LLM
-    rewrite only runs mid-ingest and is capped at ``INDEX_REWRITE_MAX_PAGES``
-    (250) pages; this is for the "index.md looks corrupted/drifted but I
-    don't want to trigger a full ingest re-run" case, at any wiki size.
+    The 0.6.5 Rust implementation groups pages by frontmatter ``type``, sorts
+    groups alphabetically, sorts pages by display title, and always writes the
+    full wiki-relative target (without ``.md``). Full targets are essential
+    when a concept and comparison share the same filename stem.
 
-    Same bullet format as the LLM rewrite (`- [[<stem>]] — <title>`, sorted
-    alphabetically by stem within each section, bilingual headers in
-    ``_INDEX_CATEGORIES`` order, empty categories omitted) so the two stay
-    visually interchangeable. Entry point: ``rebuild_index.py``.
+    Improved-wiki-only derived artifact directories are excluded because they
+    are not knowledge pages and do not exist in a stock NashSU project.
     """
-    inventory = _scan_wiki_inventory(wiki_dir)
-    lines = ["# Index", ""]
-    for subdir, header in _INDEX_CATEGORIES:
-        pages = inventory.get(subdir, [])
-        if not pages:
+    groups: dict[str, list[tuple[str, str]]] = {}
+    for path in sorted(wiki_dir.rglob("*.md")):
+        relative = path.relative_to(wiki_dir)
+        if relative.parts and relative.parts[0] in WIKI_ARTIFACT_DIRS:
             continue
-        lines.append(f"## {header}")
+        if path.stem.lower() in {"index", "overview", "log"}:
+            continue
+        try:
+            content = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        fm, _ = parse_frontmatter(content)
+        kind = str(fm.get("type") or "other").strip() or "other"
+        title = str(fm.get("title") or "").strip().strip('"').strip("'")
+        if not title:
+            match = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
+            title = match.group(1).strip() if match else path.stem
+        target = relative.with_suffix("").as_posix()
+        groups.setdefault(kind, []).append((target, title))
+
+    lines = ["# Wiki Index", ""]
+    for kind in sorted(groups):
+        lines.extend([f"## {kind}", ""])
+        pages = sorted(
+            groups[kind],
+            key=lambda page: (page[1].lower(), page[0].lower()),
+        )
+        for target, title in pages:
+            lines.append(f"- [[{target}|{title}]]")
         lines.append("")
-        for stem, title in sorted(pages, key=lambda p: p[0]):
-            lines.append(f"- [[{stem}]] — {title}")
-        lines.append("")
-    return "\n".join(lines).rstrip("\n") + "\n"
+    return "\n".join(lines) + "\n"
 
 
 def _log_contains_ingest_record(
@@ -921,9 +936,14 @@ def _assert_aggregate_outputs(
         raise RuntimeError(
             "Stage 3.5 log does not contain the source/hash INGEST record")
     index_text = index_path.read_text(encoding="utf-8")
-    if f"[[{source_stem}]]" not in index_text:
+    link_pattern = re.compile(
+        r"\[\[(?:[^|\]\n]+/)?"
+        + re.escape(source_stem)
+        + r"(?:\||\]\])"
+    )
+    if not link_pattern.search(index_text):
         raise RuntimeError(
-            f"Stage 3.5 index does not contain [[{source_stem}]]")
+            f"Stage 3.5 index does not contain a link to {source_stem}")
 
 
 def stage_3_5_aggregate_repair(
@@ -970,26 +990,48 @@ def stage_3_5_aggregate_repair(
     current_index = index_path.read_text(encoding="utf-8") if index_path.exists() else ""
 
     def _index_append_fallback() -> None:
-        new_link = f"- [[{source_path.stem}]]"
+        source_target = source_path.relative_to(config.wiki_dir).with_suffix(
+            ""
+        ).as_posix()
+        source_content = source_path.read_text(
+            encoding="utf-8",
+            errors="ignore",
+        )
+        source_fm, _ = parse_frontmatter(source_content)
+        source_title = str(
+            source_fm.get("title") or source_path.stem
+        ).strip().strip('"').strip("'")
+        new_link = f"- [[{source_target}|{source_title}]]"
         if not current_index:
             # Fresh wiki: write the skeleton WITH the new source link, not an
             # empty skeleton (the latter silently dropped the first ingest).
             stage_3_1_write_wiki_file(
-                index_path, f"# Index\n\n## Sources（来源）\n\n{new_link}\n", config)
+                index_path,
+                f"# Wiki Index\n\n## source\n\n{new_link}\n",
+                config,
+            )
             files_written.append(str(index_path.relative_to(config.wiki_root)))
             return
-        if f"[[{source_path.stem}]]" in current_index:
+        if (
+            f"[[{source_target}|" in current_index
+            or f"[[{source_target}]]" in current_index
+        ):
             return
-        # Insert after the END of the Sources header line so a bilingual header
-        # like "## Sources（来源）" isn't split mid-line.
-        m = re.search(r"(?m)^##\s+Sources.*$", current_index)
+        # Accept both the 0.6.5 type header and legacy bilingual headers.
+        m = re.search(
+            r"(?mi)^##\s+(?:source|Sources(?:（来源）)?)\s*$",
+            current_index,
+        )
         if m:
             insert_at = m.end()
             updated = current_index[:insert_at] + f"\n\n{new_link}" + current_index[insert_at:]
         else:
-            print("[stage 3.5] ⚠️ index.md has no '## Sources' header — "
-                  "appending a new Sources section at end of file")
-            updated = current_index.rstrip("\n") + f"\n\n## Sources（来源）\n\n{new_link}\n"
+            print("[stage 3.5] ⚠️ index.md has no source section — "
+                  "appending one at end of file")
+            updated = (
+                current_index.rstrip("\n")
+                + f"\n\n## source\n\n{new_link}\n"
+            )
         stage_3_1_write_wiki_file(index_path, updated, config)
         files_written.append(str(index_path.relative_to(config.wiki_root)))
 

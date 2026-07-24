@@ -1,18 +1,10 @@
 #!/usr/bin/env python3
 """rebuild_index.py — deterministic, LLM-free full rebuild of wiki/index.md.
 
-Scans the on-disk page inventory (frontmatter ``title``, falling back to the
-first ``# `` heading or the filename stem) and rewrites index.md from
-scratch: one bullet per page, grouped under the same bilingual section
-headers ingest's own Stage 3.5 LLM rewrite uses, sorted alphabetically by
-stem within each section.
-
-NashSU parity (llm_wiki 0.6.4 ``rebuild_wiki_index``): a pure recovery tool
-for when index.md is suspected corrupted or drifted (e.g. hand-edited,
-merge conflict, partial write) and a full ingest re-run isn't warranted.
-It does NOT read or preserve hand-written descriptions in the current
-index.md — every entry's description is just its inventory title, same as
-a fresh Stage 3.5 LLM rewrite would produce for a new entry.
+Scans the on-disk page inventory and writes NashSU 0.6.5's application-owned
+index format: pages grouped by frontmatter type, full wiki-relative link
+targets, display-title aliases, and title-sorted entries. Full paths preserve
+unambiguous links when different page types share a filename stem.
 
 Usage:
   python3 rebuild_index.py                                    # dry-run preview (diff)

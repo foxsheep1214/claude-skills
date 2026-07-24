@@ -100,6 +100,34 @@ class TestAggregateCompletionGate(unittest.TestCase):
                     "x",
                 )
 
+    def test_postcondition_accepts_full_relative_index_target(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cfg = _config(root)
+            log = cfg.wiki_dir / "log.md"
+            index = cfg.wiki_dir / "index.md"
+            log.parent.mkdir(parents=True)
+            source_hash = "b" * 64
+            log.write_text(
+                "# Log\n\n## 2026-01-01 — INGEST\n"
+                "- Source: `raw/Book/x.pdf`\n"
+                f"- Hash: {source_hash[:16]}\n",
+                encoding="utf-8",
+            )
+            index.write_text(
+                "# Wiki Index\n\n## source\n\n"
+                "- [[sources/Book/x|Book X]]\n",
+                encoding="utf-8",
+            )
+
+            stage3._assert_aggregate_outputs(
+                log,
+                index,
+                "raw/Book/x.pdf",
+                source_hash,
+                "x",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

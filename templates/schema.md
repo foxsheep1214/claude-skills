@@ -79,10 +79,15 @@ replicated: true | false | null
 
 ## Index Format
 
-`wiki/index.md` lists all pages grouped by type:
+`wiki/index.md` is application-maintained and lists all pages grouped by their
+frontmatter type using full wiki-relative targets:
 
 ```text
-- [[type/page-slug]] — one-line description
+# Wiki Index
+
+## concept
+
+- [[concepts/page-slug|Human-readable title]]
 ```
 
 ## Log Format
