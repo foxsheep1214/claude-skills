@@ -104,6 +104,26 @@ python3 "$SKILL_DIR/scripts/ingest.py" --pause-prefetch
 - `page-history/` — wiki page version backups (audit/rollback value; 18MB+ typical)
 - `review-suggestions.json` — pending review items
 
+### LanceDB compaction
+
+Stage 3.7 rewrites the full `wiki_chunks` table after a successful ingest.
+Current improved-wiki automatically compacts the new table and prunes verified
+historical versions after that rewrite, matching NashSU's maintenance behavior.
+The cleanup keeps `delete_unverified=False`, so it never force-deletes files
+that could belong to another live process.
+
+For a project created before this maintenance was added, first verify no ingest
+is active, then run:
+
+```bash
+python3 "$SKILL_DIR/scripts/build_embeddings.py" \
+  --project /Users/skyfend/Documents/知识库/<Project> compact
+```
+
+The command verifies that the live row count is unchanged. Do not replace this
+with `rm -rf .llm-wiki/lancedb`: compaction preserves the current semantic
+index while reclaiming old LanceDB snapshots.
+
 （注：graph 产物 `clusters/` 与 `REVIEW/knowledge-gaps.md` 实际由 `graph.py` 写在
 **`wiki/` 下**（`wiki/clusters/`、`wiki/REVIEW/knowledge-gaps.md`），不在 `.llm-wiki/`
 ——同样不要删，但不属于本清单的 runtime 目录范围。）

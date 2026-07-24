@@ -16,16 +16,19 @@ Env vars:
    there is no EMBEDDING_DIMENSIONS override.)
 
 Commands:
-  embed   — chunk all wiki pages + embed + write LanceDB
-  search  — vector search LanceDB with a natural-language query
-  stats   — show LanceDB table info
+  embed    — chunk all wiki pages + embed + write LanceDB, then compact/prune
+  compact  — compact LanceDB and prune verified old versions
+  search   — vector search LanceDB with a natural-language query
+  stats    — show LanceDB table info
 
 Usage:
   build_embeddings.py --project ~/Documents/知识库/HardwareWiki embed
+  build_embeddings.py --project ~/Documents/知识库/HardwareWiki compact
   build_embeddings.py --project ~/Documents/知识库/HardwareWiki search --query "buck ringing"
   build_embeddings.py --project ~/Documents/知识库/HardwareWiki stats
 """
 import os, sys, json, urllib.request, urllib.error, time, argparse, re, hashlib
+from datetime import timedelta
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -90,7 +93,8 @@ def parse_args():
     p.add_argument("--model", default=None, help="Override EMBEDDING_MODEL")
     p.add_argument("--base-url", default=None, help="Override EMBEDDING_BASE_URL")
     sub = p.add_subparsers(dest="command", required=True)
-    sub.add_parser("embed", help="Chunk all pages + embed into LanceDB")
+    sub.add_parser("embed", help="Chunk all pages + embed into LanceDB, then compact/prune")
+    sub.add_parser("compact", help="Compact LanceDB and prune verified old versions")
     s_search = sub.add_parser("search", help="Vector search LanceDB")
     s_search.add_argument("--query", required=True, help="Search query")
     s_search.add_argument("--top-k", type=int, default=5)
@@ -211,6 +215,35 @@ def build_chunks(pages):
 
 # ── Commands ────────────────────────────────────────────────────────
 
+def _compact_and_prune_table(tbl):
+    """Compact the current table and prune verified historical versions.
+
+    Mirrors NashSU's post-rebuild maintenance contract: compact first, then
+    remove every verified version older than the current snapshot. Keep
+    ``delete_unverified=False`` so files that may belong to another live
+    process are never force-deleted.
+    """
+    tbl.optimize(
+        cleanup_older_than=timedelta(seconds=0),
+        delete_unverified=False,
+    )
+
+
+def _best_effort_compact_and_prune(tbl):
+    """Run post-rebuild maintenance without invalidating a good new index."""
+    try:
+        _compact_and_prune_table(tbl)
+    except Exception as e:
+        print(
+            "⚠ LanceDB compact/prune failed after a successful rebuild "
+            f"({type(e).__name__}: {e}). The current index remains usable; "
+            "run the `compact` command later to reclaim old versions."
+        )
+        return False
+    print("✓ LanceDB compacted; verified historical versions pruned")
+    return True
+
+
 def cmd_embed():
     pages = collect_pages()
     print(f"Pages: {len(pages)}")
@@ -277,8 +310,31 @@ def cmd_embed():
             "path": c["path"],
             "vector": vec,
         })
-    db.create_table("wiki_chunks", data, mode="overwrite")
+    tbl = db.create_table("wiki_chunks", data, mode="overwrite")
     print(f"✓ LanceDB: {len(data)} chunks → {LANCE_DIR}/wiki_chunks")
+    _best_effort_compact_and_prune(tbl)
+
+
+def cmd_compact():
+    """Compact the live table and prune old verified snapshots."""
+    db = lancedb.connect(LANCE_DIR)
+    try:
+        tbl = db.open_table("wiki_chunks")
+    except Exception as e:
+        print(f"✗ Table not found: {e}. Run 'embed' first.")
+        raise SystemExit(1)
+    rows_before = tbl.count_rows()
+    _compact_and_prune_table(tbl)
+    rows_after = db.open_table("wiki_chunks").count_rows()
+    if rows_after != rows_before:
+        raise RuntimeError(
+            "LanceDB row count changed during compact/prune: "
+            f"{rows_before} → {rows_after}"
+        )
+    print(
+        "✓ LanceDB compacted; verified historical versions pruned "
+        f"({rows_after} rows preserved)"
+    )
 
 
 def cmd_search():
@@ -347,6 +403,8 @@ if __name__ == "__main__":
     _init_cli()
     if ARGS.command == "embed":
         cmd_embed()
+    elif ARGS.command == "compact":
+        cmd_compact()
     elif ARGS.command == "search":
         cmd_search()
     elif ARGS.command == "stats":

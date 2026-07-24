@@ -1,8 +1,6 @@
 ---
 name: improved-wiki
 description: "Ingest, lint, graph, validate, or repair a Karpathy/NashSU-style LLM Wiki. Use for PDF/PPTX/DOCX ingestion, multi-book batches, conversation handoffs, OCR/caption troubleshooting, deep research, review processing, and wiki completeness audits. Text LLM work uses conversation-mode prompt files; Phase 1 uses minerU plus a configured caption VLM."
-tags: [ingest, nashsu, mineru, local-ocr, knowledge-graph, louvain]
-related_skills: [karpathy-llm-wiki, llm-wiki-local]
 ---
 
 # improved-wiki
@@ -94,6 +92,10 @@ There is no silent quality fallback:
 - Captioning requires the configured VLM provider; optional VLM-to-VLM failover
   is allowed only when explicitly configured and logged.
 - Embeddings require the configured local stack.
+- Every successful Stage 3.7 full LanceDB rewrite runs compact + verified
+  old-version pruning. Maintenance is best-effort so a compact failure does not
+  invalidate the newly rebuilt index; retry manually with
+  `scripts/build_embeddings.py --project <wiki-root> compact`.
 - LLM, merge, config, schema, and required-media failures pause the source.
 - Corrupt cache/checkpoint files may warn and rebuild because re-derivation is
   the correct recovery.
@@ -124,6 +126,7 @@ not gated.
 ## Entry points
 
 - Auto ingest: `scripts/ingest.py`
+- Embedding build/search/compact: `scripts/build_embeddings.py`
 - Queue scan/run: `scripts/wiki-monitor.sh`, `scripts/run-queue.sh`
 - Chat ingest: `references/chat-ingest.md`
 - Deep research: `references/deep-research.md`
